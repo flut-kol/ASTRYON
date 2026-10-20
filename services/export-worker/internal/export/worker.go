@@ -1,0 +1,194 @@
+package export
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// ClickHouse is the HTTP connection to the (read-only) query endpoint.
+type ClickHouse struct {
+	URL, Database, User, Password string
+	Table                         string // default events_normalized_distributed
+	MaxExecutionSeconds           int    // default 600
+	HTTP                          *http.Client
+}
+
+func (c ClickHouse) table() string {
+	if c.Table != "" {
+		return c.Table
+	}
+	return "events_normalized_distributed"
+}
+
+// open runs the query and returns the streaming body. readonly=1 as in query-api.
+func (c ClickHouse) open(ctx context.Context, q string, params url.Values) (io.ReadCloser, error) {
+	v := url.Values{}
+	for k, vs := range params {
+		v[k] = vs
+	}
+	if c.Database != "" {
+		v.Set("database", c.Database)
+	}
+	v.Set("readonly", "1")
+	met := c.MaxExecutionSeconds
+	if met <= 0 {
+		met = 600
+	}
+	v.Set("max_execution_time", fmt.Sprint(met))
+	v.Set("max_memory_usage", "2000000000")
+	cl := c.HTTP
+	if cl == nil {
+		cl = &http.Client{} // no overall timeout: the stream may be long; ctx bounds it
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/?"+v.Encode(), strings.NewReader(q))
+	if err != nil {
+		return nil, err
+	}
+	if c.User != "" {
+		req.Header.Set("X-ClickHouse-User", c.User)
+		req.Header.Set("X-ClickHouse-Key", c.Password)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v", ErrClickHouse, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		return nil, fmt.Errorf("%w: clickhouse %s: %s", ErrClickHouse, resp.Status, strings.TrimSpace(string(b)))
+	}
+	return resp.Body, nil
+}
+
+// Runner executes exports.
+type Runner struct {
+	CH       ClickHouse
+	Store    ObjectStore
+	Presign  Presigner
+	Quota    QuotaChecker
+	Audit    AuditSink
+	MaxBytes int64         // default 1 GiB
+	TTL      time.Duration // download URL ttl, default 15 min
+	Now      func() time.Time
+}
+
+// Result describes a finished export.
+type Result struct {
+	Key         string
+	Rows, Bytes int64
+	DownloadURL string
+	ExpiresAt   time.Time
+	SpecHash    string
+}
+
+func (r *Runner) now() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// Run executes one export. The tenant comes only from the verified principal. A record is audited for
+// every outcome; partial objects are deleted on failure.
+func (r *Runner) Run(ctx context.Context, p Principal, exportID string, spec ExportSpec) (res Result, err error) {
+	rec := AuditRecord{TenantID: p.TenantID, Subject: p.Subject, ExportID: exportID}
+	emit := func(outcome string, e error) {
+		rec.Time, rec.Outcome = r.now(), outcome
+		if e != nil {
+			rec.Error = e.Error()
+		}
+		if r.Audit != nil {
+			_ = r.Audit.Emit(rec)
+		}
+	}
+	if !uuidRe.MatchString(p.TenantID) {
+		err = fmt.Errorf("%w: principal has no valid tenant", ErrInvalidSpec)
+		emit(OutcomeInvalid, err)
+		return res, err
+	}
+	if !exportIDRe.MatchString(exportID) {
+		err = fmt.Errorf("%w: invalid export id", ErrInvalidSpec)
+		emit(OutcomeInvalid, err)
+		return res, err
+	}
+	spec, err = spec.Normalize()
+	if err != nil {
+		emit(OutcomeInvalid, err)
+		return res, err
+	}
+	rec.SpecHash = spec.Hash()
+	if r.Quota != nil {
+		release, qerr := r.Quota.Acquire(p.TenantID)
+		if qerr != nil {
+			emit(OutcomeQuotaExceeded, qerr)
+			return res, qerr
+		}
+		defer release()
+	}
+	maxBytes := r.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 1 << 30
+	}
+	key := ObjectKey(p.TenantID, exportID, spec.Ext())
+	if !KeyBelongsToTenant(key, p.TenantID) {
+		err = fmt.Errorf("%w: object key outside tenant prefix", ErrInvalidSpec)
+		emit(OutcomeInvalid, err)
+		return res, err
+	}
+	q, params := buildQuery(r.CH.table(), p.TenantID, spec)
+	body, err := r.CH.open(ctx, q, params)
+	if err != nil {
+		emit(OutcomeFailed, err)
+		return res, err
+	}
+	defer body.Close()
+	g := newGuard(body, spec.Format == "csv", spec.MaxRows, maxBytes)
+	n, err := r.Store.Put(ctx, key, g)
+	rec.Rows, rec.Bytes = g.Rows, g.Bytes
+	if err == nil && g.err != nil { // store swallowed a guard error
+		err = g.err
+	}
+	if err != nil {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = r.Store.Delete(dctx, key)
+		cancel()
+		outcome := OutcomeFailed
+		switch {
+		case errors.Is(err, ErrRowCap):
+			outcome = OutcomeRowCap
+		case errors.Is(err, ErrByteCap):
+			outcome = OutcomeByteCap
+		}
+		emit(outcome, err)
+		return res, err
+	}
+	rec.Bytes = n
+	res = Result{Key: key, Rows: g.Rows, Bytes: n, SpecHash: rec.SpecHash}
+	if r.Presign != nil {
+		res.DownloadURL, res.ExpiresAt, err = r.Presign.PresignGet(key, r.TTL)
+		if err != nil {
+			_ = r.Store.Delete(ctx, key)
+			emit(OutcomeFailed, err)
+			return Result{}, err
+		}
+	}
+	emit(OutcomeSuccess, nil)
+	return res, nil
+}
+
+// DownloadURL issues a fresh short-lived URL for an existing export; the key must be under the caller's tenant.
+func (r *Runner) DownloadURL(p Principal, key string, ttl time.Duration) (string, time.Time, error) {
+	if !KeyBelongsToTenant(key, p.TenantID) {
+		return "", time.Time{}, errors.New("export not found")
+	}
+	return r.Presign.PresignGet(key, ttl)
+}

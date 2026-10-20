@@ -1,0 +1,196 @@
+openapi: 3.1.0
+info:
+  title: ASTRYON Query API
+  version: 1.0.0
+  description: |
+    Read API over ClickHouse (DPP-029). Tenant is taken only from the validated access-token claims;
+    it is never accepted in the body or headers. Unknown request fields are rejected.
+    Rows are de-duplicated per (tenant, source, event, processing_version); `processing_version` is the version to read.
+    It may be omitted when the service runs with `QUERY_PG_URL` and `source_id` is given: the source's active version
+    (set by `POST /v1/replays/{id}/activate`) is used. An explicit value always wins. Without `QUERY_PG_URL` it is mandatory.
+servers:
+  - url: http://localhost:8082
+security:
+  - bearer: []
+paths:
+  /v1/query/events:
+    post:
+      operationId: queryEvents
+      summary: Tenant-filtered event search with cursor pagination
+      description: Ordered by (event_time, event_id). Pass `next_cursor` back as `cursor` for the next page.
+      parameters: [{ $ref: '#/components/parameters/RequestId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventsRequest' }
+      responses:
+        '200':
+          description: One page of events
+          headers: { X-Request-ID: { $ref: '#/components/headers/RequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventsResponse' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/query/aggregate:
+    post:
+      operationId: queryAggregate
+      summary: Whitelisted aggregation
+      parameters: [{ $ref: '#/components/parameters/RequestId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AggregateRequest' }
+      responses:
+        '200':
+          description: Aggregate rows. UInt64 metrics are serialized as strings by ClickHouse.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rows]
+                properties:
+                  rows:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/metrics/summary:
+    get:
+      operationId: metricsSummary
+      summary: Per-source business metrics from hourly aggregates (latest revision per bucket)
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
+        - { $ref: '#/components/parameters/ProcessingVersion' }
+        - { $ref: '#/components/parameters/SourceId' }
+      responses:
+        '200':
+          description: "Sources with events_count, bytes_count, batches_count, errors_count, max_ingest_lag_ms (UInt64 as strings)."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sources: { type: array, items: { type: object, additionalProperties: true } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/quality/summary:
+    get:
+      operationId: qualitySummary
+      summary: Per-source data quality totals and per-flag counts from daily aggregates
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
+        - { $ref: '#/components/parameters/ProcessingVersion' }
+        - { $ref: '#/components/parameters/SourceId' }
+      responses:
+        '200':
+          description: "`sources`: events_total/valid/rejected/with_flags; `flags`: count per quality flag."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sources: { type: array, items: { type: object, additionalProperties: true } }
+                  flags: { type: array, items: { type: object, additionalProperties: true } }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: AAS access token; scope `astryon:query:read` required.
+  headers:
+    RequestId: { schema: { type: string, maxLength: 64 } }
+    RetryAfter: { description: Seconds to wait before retrying (sent with 429), schema: { type: integer, minimum: 1 } }
+  parameters:
+    From: { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+    To: { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+    ProcessingVersion: { name: processing_version, in: query, required: false, description: Optional only with source_id and an active version; see API description., schema: { type: integer, minimum: 0 } }
+    SourceId: { name: source_id, in: query, required: false, schema: { type: string, format: uuid } }
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: { type: string, maxLength: 64 }
+  responses:
+    Error:
+      description: |
+        400 invalid_request | invalid_range | range_too_large | invalid_limit | invalid_cursor | invalid_group_by | invalid_metric |
+        no_active_version (processing_version omitted and the source has no active version or is not the tenant's; no default is assumed;
+        pass processing_version explicitly). With processing_version omitted, source_id is required (invalid_request otherwise: a tenant-wide read
+        would mix per-source versions);
+        401 unauthenticated; 403 forbidden; 413 body_too_large; 502 backend_error.
+        429 rate_limited (per-tenant token bucket) | too_many_concurrent_queries (per-tenant in-flight cap); both carry a
+        `Retry-After` header (integer seconds) and the standard error body. Limits are per tenant (from the token); per instance, or shared
+        across replicas when the service runs with `QUERY_REDIS_URL`.
+        503 limiter_unavailable only when the shared limiter store is down and the service runs with `QUERY_REDIS_FAILURE=closed` (`Retry-After: 1`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Filter:
+      type: object
+      required: [from, to]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time, description: Exclusive; to - from <= 31 days. }
+        processing_version: { type: integer, minimum: 0, description: Optional. Omitted -> the active version of source_id; source_id is then required. }
+        source_id: { type: string, format: uuid }
+        event_type: { type: string, maxLength: 256 }
+        entity_id: { type: string, maxLength: 512 }
+    EventsRequest:
+      allOf:
+        - $ref: '#/components/schemas/Filter'
+        - type: object
+          properties:
+            limit: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+            cursor: { type: string }
+      unevaluatedProperties: false
+    AggregateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Filter'
+        - type: object
+          required: [metrics]
+          properties:
+            metrics:
+              type: array
+              minItems: 1
+              items: { enum: [count, bytes, distinct_entities, distinct_batches] }
+            group_by:
+              type: array
+              maxItems: 3
+              items: { enum: [source_id, event_type, hour, day] }
+            limit: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      unevaluatedProperties: false
+    Event:
+      type: object
+      properties:
+        event_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        batch_id: { type: string, format: uuid }
+        processing_version: { type: integer }
+        event_type: { type: string }
+        event_time: { type: string, description: 'UTC, "YYYY-MM-DD HH:MM:SS.mmm"' }
+        entity_id: { type: string }
+        attributes: { type: object, additionalProperties: { type: string } }
+        payload: { type: string, description: Normalized body; PII masked upstream. }
+        quality_flags: { type: array, items: { type: string } }
+    EventsResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Event' } }
+        next_cursor: { type: string, description: Empty string on the last page. }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+            trace_id: { type: string }

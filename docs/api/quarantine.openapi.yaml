@@ -1,0 +1,126 @@
+openapi: 3.1.0
+info:
+  title: ASTRYON Quarantine API
+  version: 1.0.0
+  description: |
+    Tenant-scoped read API over the bounded ClickHouse processing-error journal.
+    Tenant identity is taken only from validated AAS token claims. The API does
+    not return `raw_ref` and never accepts a tenant identifier from the request.
+servers:
+  - url: http://localhost:8085
+security:
+  - bearer: []
+paths:
+  /healthz:
+    get:
+      operationId: quarantineHealth
+      summary: Process liveness
+      security: []
+      responses:
+        '200':
+          description: Process is serving HTTP
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { const: ok }
+  /v1/quarantine:
+    get:
+      operationId: listQuarantine
+      summary: List processing deviations for the authenticated tenant
+      description: |
+        Requires `astryon:quarantine:read`. `include_original=true` additionally
+        requires `astryon:quarantine:read-payload` and returns only the bounded,
+        masked `sample_payload`; it does not retrieve the raw object from S3.
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: Opaque tenant-bound keyset cursor returned by the previous page.
+          schema: { type: string, maxLength: 2732 }
+        - name: include_original
+          in: query
+          description: Include the bounded masked sample, subject to the payload-read scope.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: One descending page of processing deviations
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuarantinePage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: AAS access token carrying a tenant claim and required scopes.
+  headers:
+    RequestId:
+      schema: { type: string, maxLength: 64 }
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: { type: string, maxLength: 64 }
+  responses:
+    Error:
+      description: Standard fail-closed API error
+      headers:
+        X-Request-ID: { $ref: '#/components/headers/RequestId' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    QuarantineRecord:
+      type: object
+      required: [id, reason_code, stage, quarantined_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        source_id: { type: string, format: uuid }
+        batch_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        processing_version: { type: integer, minimum: 1 }
+        pipeline_version: { type: integer, minimum: 1 }
+        reason_code: { type: string }
+        reason: { type: string, description: Masked diagnostic message; must not contain unmasked PII. }
+        stage: { type: string }
+        quarantined_at: { type: string, format: date-time }
+        original:
+          description: Bounded masked sample, present only with the separate payload-read scope.
+    QuarantinePage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/QuarantineRecord' }
+        next_cursor:
+          type: string
+          description: Empty on the last page.
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details, trace_id]
+          properties:
+            code:
+              enum: [INVALID_PAGE, INVALID_CURSOR, UNAUTHENTICATED, FORBIDDEN, QUARANTINE_UNAVAILABLE]
+            message: { type: string }
+            details: {}
+            trace_id: { type: string }

@@ -1,0 +1,132 @@
+openapi: 3.1.0
+info:
+  title: ASTRYON Export API
+  version: 1.0.0
+  description: |
+    Asynchronous tenant data export (DPP-049). The tenant is taken only from the validated access-token claims;
+    it is never accepted in the body or headers (a `tenant_id` field is rejected as an unknown field).
+    A job is created QUEUED, runs RUNNING, and ends SUCCEEDED or FAILED. Another tenant's job id is reported as 404.
+    The download link is a pre-signed S3 URL generated at request time (default 15 min, max 1 h); it is never stored,
+    so request the job again for a fresh link.
+servers:
+  - url: http://localhost:8083
+security:
+  - bearer: []
+paths:
+  /v1/exports:
+    post:
+      operationId: createExport
+      summary: Start an export job
+      description: Requires scope `astryon:export:write`. Validates the spec and the per-tenant quota, then queues the job.
+      parameters: [{ $ref: '#/components/parameters/RequestId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExportSpec' }
+      responses:
+        '202':
+          description: Job accepted
+          headers: { X-Request-ID: { $ref: '#/components/headers/RequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExportAccepted' }
+        '429':
+          description: Daily quota or concurrent-export limit reached
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/RequestId' }
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/exports/{id}:
+    get:
+      operationId: getExport
+      summary: Job status and, when SUCCEEDED, a short-lived download link
+      description: Requires scope `astryon:export:read`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Job state
+          headers: { X-Request-ID: { $ref: '#/components/headers/RequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Export' }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: AAS access token; scope `astryon:export:write` (POST) or `astryon:export:read` (GET) required.
+  headers:
+    RequestId: { schema: { type: string, maxLength: 64 } }
+    RetryAfter: { description: Seconds to wait before retrying, schema: { type: integer, minimum: 1 } }
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: { type: string, maxLength: 64 }
+  responses:
+    Error:
+      description: |
+        400 invalid_request (malformed JSON, unknown field such as tenant_id) | invalid_spec; 401 unauthenticated;
+        403 forbidden; 404 not_found (also for another tenant's id); 413 body_too_large;
+        429 quota_exceeded | too_many_concurrent (with `Retry-After`); 503 queue_full | shutting_down (with `Retry-After`);
+        500 internal; 502 presign_failed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    ExportSpec:
+      type: object
+      required: [from, to, processing_version]
+      unevaluatedProperties: false
+      properties:
+        format: { enum: [csv, ndjson], default: ndjson }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time, description: Exclusive; to - from <= 31 days. }
+        processing_version: { type: integer, minimum: 0 }
+        source_id: { type: string, format: uuid }
+        event_type: { type: string, maxLength: 256 }
+        entity_id: { type: string, maxLength: 512 }
+        max_rows: { type: integer, minimum: 1, maximum: 10000000, default: 1000000 }
+    ExportAccepted:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid }
+        status: { const: QUEUED }
+    Export:
+      type: object
+      required: [id, status, rows, bytes, format, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        status: { enum: [QUEUED, RUNNING, SUCCEEDED, FAILED] }
+        rows: { type: integer }
+        bytes: { type: integer }
+        format: { enum: [csv, ndjson] }
+        error_code:
+          type: string
+          description: Only when FAILED. invalid_spec | row_cap_exceeded | byte_cap_exceeded | timeout | shutdown | export_failed.
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        download_url: { type: string, format: uri, description: Pre-signed GET; only when SUCCEEDED; generated per request. }
+        download_expires_at: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, trace_id]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+            trace_id: { type: string }
