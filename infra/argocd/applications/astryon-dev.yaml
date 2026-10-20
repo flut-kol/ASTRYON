@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: astryon-dev
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: astryon
+  source:
+    repoURL: https://github.com/REPLACE_ORG/REPLACE_REPO.git
+    targetRevision: main
+    path: infra/kubernetes/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: astryon-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions: [CreateNamespace=true, PrunePropagationPolicy=foreground]

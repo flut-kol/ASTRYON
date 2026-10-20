@@ -30,7 +30,7 @@ Implements DEVELOPMENT_PLAN §6 (PostgreSQL control plane), §7 (ClickHouse) and
 - Rollback: forward-only; the header in each file documents the non-prod revert and the prod approach.
 
 ## ClickHouse tables
-events_normalized_local, events_normalized_distributed, processing_errors_local, processing_quality_daily, source_metrics_hourly, pipeline_metrics_hourly. (`entities_index` deferred, "if needed" per §7.)
+events_normalized_local, events_normalized_distributed, processing_errors_local, processing_errors_distributed, processing_quality_daily, source_metrics_hourly, pipeline_metrics_hourly. (`entities_index` deferred, "if needed" per §7.)
 
 Template tokens substituted by `apply.sh`: `__ON_CLUSTER__` (empty unless `CH_CLUSTER` set), `__RMT__` (`MergeTree()` by default; `ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}','{replica}')` with `CH_REPLICATED=1`, needing macros and Keeper), `__CLUSTER__` (Distributed cluster name, default `default`).
 

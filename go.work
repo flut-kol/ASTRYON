@@ -2,7 +2,18 @@ go 1.22
 
 use (
 	./libs/event-contracts
+	./libs/go-common
+	./services/ch-aggregator
 	./services/clickhouse-sink
+	./services/connector-manager
+	./services/export-worker
+	./services/file-ingestion
 	./services/gateway
+	./services/quarantine
+	./services/query-api
+	./services/replay-controller
+	./services/replay-worker
+	./services/retry-controller
+	./tests/aas-live
 	./tests/load
 )

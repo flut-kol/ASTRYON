@@ -1,0 +1,23 @@
+---
+# Copy to a private inventory; do not commit real hostnames, IPs, keys or secrets.
+astryon_admin_group: astryon-admins
+astryon_admin_users: []
+# - { name: platform-admin, ssh_public_key: "ssh-ed25519 AAAA... owner@host" }
+astryon_timezone: UTC
+astryon_ntp_servers: [time.cloudflare.com, time.google.com]
+astryon_sshd_password_authentication: "no"
+astryon_sshd_permit_root_login: "no"
+astryon_enable_firewall: false
+astryon_allowed_tcp_ports: [22]
+# Existing filesystems only. No partitioning or formatting is performed.
+astryon_mounts: []
+astryon_interfaces: []
+# - { name: eno1, mtu: 9000, dhcp4: false, addresses: ["192.0.2.10/24"] }
+astryon_apply_network: false
+astryon_sysctl:
+  net.core.somaxconn: 4096
+  net.ipv4.tcp_syncookies: 1
+  net.ipv4.conf.all.rp_filter: 1
+  net.ipv4.conf.default.rp_filter: 1
+  vm.swappiness: 1
+  fs.file-max: 1048576

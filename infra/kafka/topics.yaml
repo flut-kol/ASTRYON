@@ -18,3 +18,4 @@ topics:
   - {name: events.quarantine.v1,     partitions: 3, retention_ms: 1209600000, plan_partitions: 24}   # 14d
   - {name: events.dlq.v1,            partitions: 3, retention_ms: 1209600000, plan_partitions: 24}   # 14d
   - {name: audit.events.v1,          partitions: 3, retention_ms: 604800000,  plan_partitions: 24}   # 7d (+longer in S3)
+  - {name: replay.jobs.v1,           partitions: 12, retention_ms: 604800000, plan_partitions: 24}   # 7d

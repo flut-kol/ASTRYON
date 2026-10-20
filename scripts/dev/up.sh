@@ -5,5 +5,5 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ARGS=(-f "$ROOT/infra/docker/docker-compose.dev.yml")
 [ -f "$ROOT/.env" ] && ARGS+=(--env-file "$ROOT/.env")
-docker compose "${ARGS[@]}" up -d --wait "$@"
+docker compose "${ARGS[@]}" up -d --wait --remove-orphans "$@"
 docker compose "${ARGS[@]}" ps

@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: astryon
+  namespace: argocd
+spec:
+  description: ASTRYON platform deployments
+  sourceRepos:
+    - https://github.com/REPLACE_ORG/REPLACE_REPO.git
+  destinations:
+    - namespace: astryon-dev
+      server: https://kubernetes.default.svc
+    - namespace: astryon-stage
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  orphanedResources:
+    warn: true

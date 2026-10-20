@@ -6,9 +6,9 @@
 
 ```bash
 cp .env.example .env     # опційно, є дефолти
-make dev-up              # Kafka, PostgreSQL, ClickHouse, MinIO (чекає на healthy)
+make dev-up              # Kafka, PostgreSQL, ClickHouse, S3 emulator (чекає на healthy)
 make topics              # створює topics з infra/kafka/topics.yaml
-make migrate             # викликає db/apply.sh, якщо існує
+make migrate             # застосовує міграції через клієнти у dev-контейнерах
 make test                # go vet + go test для всіх Go-модулів
 make dev-down            # зупинка (scripts/dev/down.sh --volumes видаляє дані)
 ```
@@ -20,7 +20,7 @@ make dev-down            # зупинка (scripts/dev/down.sh --volumes вид�
 | Kafka (KRaft, 1 вузол) | 19092 | у мережі compose: `kafka:9092` |
 | PostgreSQL 16 | 15432 | |
 | ClickHouse HTTP / native | 18124 / 19010 | |
-| MinIO S3 / консоль | 19200 / 19201 | S3 emulator |
+| S3Mock S3 | 19200 | endpoint: `http://127.0.0.1:19200`; у Compose: `http://s3mock:9090` |
 
 Порти змінюються через `.env`. Креди - лише dev-плейсхолдери.
 

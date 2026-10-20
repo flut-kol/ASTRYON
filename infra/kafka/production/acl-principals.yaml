@@ -1,0 +1,15 @@
+# Desired ACL subjects; provision SCRAM credentials and ACLs outside Git.
+principals:
+  - name: gateway
+    allows:
+      - { resource: "Topic:raw.events.v1", operations: [Write, Describe] }
+      - { resource: "Topic:events.quarantine.v1", operations: [Write, Describe] }
+  - name: stream-processor
+    allows:
+      - { resource: "Topic:raw.events.v1", operations: [Read, Describe] }
+      - { resource: "Topic:validated.events.v1", operations: [Write, Describe] }
+      - { resource: "Group:stream-processor", operations: [Read] }
+  - name: clickhouse-sink
+    allows:
+      - { resource: "Topic:processed.events.v1", operations: [Read, Describe] }
+      - { resource: "Group:clickhouse-sink", operations: [Read] }

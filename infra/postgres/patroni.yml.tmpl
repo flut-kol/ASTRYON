@@ -1,0 +1,48 @@
+# Render from a secret manager at deploy time; do not commit the rendered file.
+scope: astryon-postgres
+namespace: /service/
+name: ${PATRONI_MEMBER_NAME}
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: ${PATRONI_REST_ADDRESS}:8008
+
+etcd3:
+  hosts: ${PATRONI_DCS_ENDPOINTS}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    postgresql:
+      parameters:
+        wal_level: replica
+        max_wal_senders: 10
+        max_replication_slots: 10
+        hot_standby: "on"
+        archive_mode: "on"
+        archive_command: "pgbackrest --stanza=astryon archive-push %p"
+  initdb: [encoding: UTF8, data-checksums]
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${PATRONI_POSTGRES_ADDRESS}:5432
+  data_dir: /var/lib/postgresql/data
+  authentication:
+    superuser: { username: postgres, password: "${PATRONI_SUPERUSER_PASSWORD}" }
+    replication: { username: replicator, password: "${PATRONI_REPLICATION_PASSWORD}" }
+  pg_hba:
+    - hostssl replication replicator 10.0.0.0/8 scram-sha-256
+    - hostssl all all 10.0.0.0/8 scram-sha-256
+  parameters:
+    password_encryption: scram-sha-256
+    ssl: "on"
+    ssl_cert_file: /run/secrets/postgres/tls.crt
+    ssl_key_file: /run/secrets/postgres/tls.key
+    ssl_ca_file: /run/secrets/postgres/ca.crt
+  create_replica_methods: [pgbackrest, basebackup]
+  pgbackrest:
+    command: "pgbackrest --stanza=astryon restore --delta"
+  basebackup:
+    checkpoint: fast

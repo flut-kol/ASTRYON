@@ -1,0 +1,39 @@
+groups:
+  - name: astryon-ingestion
+    rules:
+      - record: astryon:gateway_ack_error_ratio:5m
+        expr: |
+          sum(rate(astryon_gateway_ack_errors_total[5m]))
+          /
+          clamp_min(sum(rate(astryon_gateway_ack_total[5m])), 1)
+      - alert: AstryonGatewayAckErrors
+        expr: astryon:gateway_ack_error_ratio:5m > 0.01
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: ASTRYON gateway ACK errors exceed 1 percent
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonKafkaConsumerLagGrowing
+        expr: sum by (group, topic) (kafka_consumergroup_lag) > 100000
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: Kafka consumer lag exceeds 100k records
+          runbook: docs/operations/runbooks/stuck-consumer.md
+  - name: astryon-platform
+    rules:
+      - record: astryon:clickhouse_disk_free_ratio
+        expr: node_filesystem_avail_bytes{mountpoint="/var/lib/clickhouse"} / node_filesystem_size_bytes{mountpoint="/var/lib/clickhouse"}
+      - alert: AstryonClickHouseDiskHigh
+        expr: astryon:clickhouse_disk_free_ratio < 0.20
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: ClickHouse disk has less than 20 percent free
+          runbook: docs/operations/runbooks/clickhouse-disk.md
+      - alert: AstryonCertificateExpiring
+        expr: probe_ssl_earliest_cert_expiry - time() < 14 * 24 * 3600
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: ASTRYON TLS certificate expires within 14 days

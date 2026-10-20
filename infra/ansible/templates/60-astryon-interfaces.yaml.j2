@@ -1,0 +1,16 @@
+network:
+  version: 2
+  ethernets:
+{% for interface in astryon_interfaces %}
+    {{ interface.name }}:
+      mtu: {{ interface.mtu }}
+{% if interface.dhcp4 is defined %}
+      dhcp4: {{ interface.dhcp4 | bool | lower }}
+{% endif %}
+{% if interface.addresses is defined %}
+      addresses:
+{% for address in interface.addresses %}
+        - {{ address }}
+{% endfor %}
+{% endif %}
+{% endfor %}

@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - projects/astryon.yaml
+  - applications/astryon-dev.yaml
+  - applications/astryon-stage.yaml

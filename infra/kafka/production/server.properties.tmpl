@@ -1,0 +1,26 @@
+# Render one file per node through the secret/config management system.
+process.roles=broker,controller
+node.id=${KAFKA_NODE_ID}
+controller.quorum.voters=${KAFKA_CONTROLLER_QUORUM_VOTERS}
+listeners=CONTROLLER://:9093,INTERNAL://:9092,EXTERNAL://:9094
+advertised.listeners=INTERNAL://${KAFKA_INTERNAL_DNS}:9092,EXTERNAL://${KAFKA_EXTERNAL_DNS}:9094
+listener.security.protocol.map=CONTROLLER:SSL,INTERNAL:SASL_SSL,EXTERNAL:SASL_SSL
+inter.broker.listener.name=INTERNAL
+controller.listener.names=CONTROLLER
+ssl.keystore.location=/run/secrets/kafka/keystore.p12
+ssl.keystore.type=PKCS12
+ssl.keystore.password=${KAFKA_KEYSTORE_PASSWORD}
+ssl.truststore.location=/run/secrets/kafka/truststore.p12
+ssl.truststore.type=PKCS12
+ssl.truststore.password=${KAFKA_TRUSTSTORE_PASSWORD}
+sasl.enabled.mechanisms=SCRAM-SHA-512
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
+allow.everyone.if.no.acl.found=false
+auto.create.topics.enable=false
+default.replication.factor=3
+min.insync.replicas=2
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+log.dirs=/var/lib/kafka/data

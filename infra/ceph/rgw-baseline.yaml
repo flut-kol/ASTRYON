@@ -1,0 +1,19 @@
+# Desired-state input for Ceph/RGW provisioning automation (DPP-018).
+failure_domain: host
+pools:
+  - { name: astryon.rgw.meta, application: rgw, replicated_size: 3, min_size: 2, pg_autoscale_mode: on }
+  - { name: astryon.rgw.data, application: rgw, replicated_size: 3, min_size: 2, pg_autoscale_mode: on }
+storage_classes:
+  - { name: STANDARD, pool: astryon.rgw.data }
+buckets:
+  - name: astryon-files
+    versioning: enabled
+    encryption: SSE-KMS
+    lifecycle:
+      - { id: abort-incomplete-multipart, abort_incomplete_multipart_upload_days: 7 }
+      - { id: expire-temporary-uploads, prefix: temporary/, expiration_days: 30 }
+  - name: astryon-backups
+    versioning: enabled
+    encryption: SSE-KMS
+    lifecycle:
+      - { id: retain-backups, noncurrent_version_expiration_days: 90 }

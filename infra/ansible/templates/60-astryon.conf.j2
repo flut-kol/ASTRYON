@@ -1,0 +1,10 @@
+# Managed by Ansible. Console recovery: remove this file, run sshd -t, restart ssh.
+PermitRootLogin {{ astryon_sshd_permit_root_login }}
+PasswordAuthentication {{ astryon_sshd_password_authentication }}
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 4
+ClientAliveInterval 300
+ClientAliveCountMax 2
+AllowGroups {{ astryon_admin_group }}

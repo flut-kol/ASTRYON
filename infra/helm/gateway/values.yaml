@@ -1,0 +1,27 @@
+replicaCount: 2
+
+image:
+  # Deliberately non-routable. Replace both fields via an environment-owned values file.
+  repository: registry.invalid/astryon/gateway
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  port: 8080
+
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {cpu: "1", memory: 512Mi}
+
+# Non-secret runtime configuration. ASTRYON_DEV_AUTH and ASTRYON_DEV_FAKE_PUBLISHER
+# must never be supplied by an environment values file.
+env:
+  ASTRYON_GATEWAY_ADDR: ":8080"
+  ASTRYON_KAFKA_BROKERS: ""
+
+# Each entry is {name: ASTRYON_KAFKA_SASL_PASSWORD, secretName: ..., key: ...}.
+secretEnv: []

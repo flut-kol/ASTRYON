@@ -1,0 +1,14 @@
+# Keep the real inventory outside Git if it reveals physical topology.
+failure_domains:
+  racks:
+    - name: rack-a
+      pdu_a: REPLACE_ME
+      pdu_b: REPLACE_ME
+nodes:
+  - name: kafka-01
+    rack: rack-a
+    pdu_feeds: [pdu-a, pdu-b]
+    bmc: REPLACE_WITH_PRIVATE_ADDRESS
+    bonds:
+      - { name: bond0, members: [eno1, eno2], mode: 802.3ad, mtu: 9000 }
+    disks: [REPLACE_WITH_SERIAL]

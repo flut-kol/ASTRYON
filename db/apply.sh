@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Apply ASTRYON migrations in order. No secrets in repo: connection is taken from env.
-#   Postgres:   standard libpq vars (PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE) or DATABASE_URL.
+#   Postgres:   standard libpq vars (PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE) or DATABASE_URL;
+#               PG_CLIENT (legacy optional: shell-split full psql command) or PG_CLIENT_EXEC
+#               (preferred executable path; arguments are passed without shell splitting).
 #   ClickHouse: CH_HOST (default localhost) CH_PORT (9000) CH_USER CH_PASSWORD CH_DATABASE (default astryon);
-#               CH_CLIENT (optional: full client command, e.g. 'docker exec -i <container> clickhouse-client', overrides host/port);
+#               CH_CLIENT (legacy optional: shell-split full client command) or CH_CLIENT_EXEC
+#               (preferred executable path; arguments are passed without shell splitting; overrides host/port);
 #               CH_CLUSTER (optional; enables ON CLUSTER + Distributed over it), CH_REPLICATED=1 (ReplicatedMergeTree).
 # Usage: db/apply.sh [postgres|clickhouse|seeds|all]   (default: all, excluding seeds unless named / APPLY_SEEDS=1)
 set -euo pipefail
@@ -11,7 +14,15 @@ target="${1:-all}"
 
 pg_apply() {
   local conn=("${DATABASE_URL:-}"); [ -z "${DATABASE_URL:-}" ] && conn=()
-  local psql=(psql "${conn[@]}" -v ON_ERROR_STOP=1 -X -q)
+  local psql
+  if [ -n "${PG_CLIENT_EXEC:-}" ]; then
+    psql=("$PG_CLIENT_EXEC")
+  elif [ -n "${PG_CLIENT:-}" ]; then
+    read -r -a psql <<<"$PG_CLIENT"
+  else
+    psql=(psql "${conn[@]}")
+  fi
+  psql+=(-v ON_ERROR_STOP=1 -X -q)
   "${psql[@]}" -c "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
   for f in "$here"/postgres/migrations/*.up.sql; do
     n="$(basename "$f")"
@@ -25,7 +36,9 @@ pg_apply() {
 ch_apply() {
   local db="${CH_DATABASE:-astryon}"
   local ch
-  if [ -n "${CH_CLIENT:-}" ]; then
+  if [ -n "${CH_CLIENT_EXEC:-}" ]; then
+    ch=("$CH_CLIENT_EXEC" --multiquery)
+  elif [ -n "${CH_CLIENT:-}" ]; then
     # e.g. CH_CLIENT="docker exec -i astryon-e2e-clickhouse-1 clickhouse-client" when the host has no clickhouse-client
     read -r -a ch <<<"$CH_CLIENT"; ch+=(--multiquery)
   else
@@ -48,7 +61,17 @@ ch_apply() {
 }
 
 seeds_apply() {
-  for f in "$here"/seeds/*.sql; do echo "seed: $(basename "$f")"; psql ${DATABASE_URL:+"$DATABASE_URL"} -v ON_ERROR_STOP=1 -X -q -f "$f"; done
+  local conn=("${DATABASE_URL:-}"); [ -z "${DATABASE_URL:-}" ] && conn=()
+  local psql
+  if [ -n "${PG_CLIENT_EXEC:-}" ]; then
+    psql=("$PG_CLIENT_EXEC")
+  elif [ -n "${PG_CLIENT:-}" ]; then
+    read -r -a psql <<<"$PG_CLIENT"
+  else
+    psql=(psql "${conn[@]}")
+  fi
+  psql+=(-v ON_ERROR_STOP=1 -X -q)
+  for f in "$here"/seeds/*.sql; do echo "seed: $(basename "$f")"; "${psql[@]}" -f "$f"; done
 }
 
 case "$target" in

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: astryon-gateway
+description: ASTRYON ingestion gateway, deployed only with a digest-pinned image
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

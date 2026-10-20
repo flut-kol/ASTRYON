@@ -26,4 +26,4 @@ lint:
 	if command -v golangci-lint >/dev/null; then for d in $(GO_MODS); do (cd $$d && golangci-lint run ./...); done; else echo "golangci-lint not installed, skipped"; fi
 
 migrate:
-	@if [ -x db/apply.sh ]; then ./db/apply.sh; else echo "db/apply.sh not found, nothing to do"; fi
+	@if [ -x scripts/dev/migrate.sh ]; then ./scripts/dev/migrate.sh; else echo "scripts/dev/migrate.sh not found, nothing to do"; fi

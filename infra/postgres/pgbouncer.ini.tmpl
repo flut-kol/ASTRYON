@@ -1,0 +1,20 @@
+; Render at deploy time. Auth query/passwords are external secrets, never Git.
+[databases]
+astryon = host=${PATRONI_RW_SERVICE} port=5432 dbname=astryon sslmode=verify-full
+
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+auth_type = scram-sha-256
+auth_file = /run/secrets/pgbouncer/userlist.txt
+pool_mode = transaction
+max_client_conn = 2000
+default_pool_size = 50
+reserve_pool_size = 10
+server_tls_sslmode = verify-full
+server_tls_ca_file = /run/secrets/postgres/ca.crt
+server_tls_cert_file = /run/secrets/pgbouncer/tls.crt
+server_tls_key_file = /run/secrets/pgbouncer/tls.key
+admin_users = ${PGBOUNCER_ADMIN_USER}
+stats_users = ${PGBOUNCER_STATS_USER}
+ignore_startup_parameters = extra_float_digits

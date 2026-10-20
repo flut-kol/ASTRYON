@@ -1,0 +1,6 @@
+{% for server in astryon_ntp_servers %}
+server {{ server }} iburst
+{% endfor %}
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync

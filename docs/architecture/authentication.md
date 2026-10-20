@@ -31,6 +31,13 @@ ASTRYON **не містить і не розгортає власний auth-с�
 `issuer` завжди береться з discovery metadata і порівнюється з token claim `iss` буквально. Endpoint-и також
 беруться з metadata; таблиця вище є контрактом і діагностичною підказкою, а не приводом конструювати URL вручну.
 
+Фактичне розгортання AAS (перевірено 2026-10-20) — Keycloak, realm `aas`, за reverse proxy: шляхи `/oauth2/*` з таблиці
+там не доступні, а `/.well-known/openid-configuration` у корені дає 404. Тому `AAS_BASE_URL` має вказувати на realm,
+наприклад `https://astranex.sv4.one/sso/realms/aas` (discovery: `.../.well-known/openid-configuration`, JWKS:
+`.../protocol/openid-connect/certs`); `ss-auth.sv4.one` лише перенаправляє на `astranex.sv4.one/sso`. Verifier бере
+всі endpoint-и з discovery, тому код не змінюється. Живу перевірку виконує `libs/go-common/auth/realaas_test.go`
+(`ASTRYON_AAS_IT_BASE_URL`).
+
 ## Реєстрація ASTRYON у чинному AAS
 
 До ввімкнення інтеграції власник AAS додає конфігурацію ASTRYON у
@@ -57,6 +64,8 @@ audiences, redirect URI, scopes, `tenant_id`, token exchange та revocation д�
 | `astryon:sources:read`, `astryon:sources:write` | read/change sources |
 | `astryon:pipelines:read`, `astryon:pipelines:write` | read/change pipelines |
 | `astryon:jobs:read`, `astryon:jobs:write` | inspect/cancel jobs |
+| `astryon:quarantine:read` | inspect tenant-scoped quarantine metadata |
+| `astryon:quarantine:read-payload` | inspect the original quarantined payload; grant separately because it may contain rejected/unmasked input |
 | `astryon:replays:write` | create replay requests |
 | `astryon:exports:read`, `astryon:exports:write` | inspect/create exports |
 | `astryon:metrics:read` | business metrics API |
