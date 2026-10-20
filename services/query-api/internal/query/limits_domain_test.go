@@ -11,6 +11,7 @@ import (
 type domainStub struct {
 	mu     sync.Mutex
 	failX  bool
+	global bool // failure is cluster-wide
 	tokens map[string]float64
 	calls  map[string]int
 }
@@ -24,11 +25,15 @@ func (d *domainStub) FailureDomain(t string) string {
 	}
 	return "Y"
 }
+func (d *domainStub) GlobalFailure(err error) bool { return err.Error() == "cluster down" }
 func (d *domainStub) Acquire(t string, cfg LimiterConfig) (SharedDecision, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls[t]++
 	if t[0] == 'x' && d.failX {
+		if d.global {
+			return SharedDecision{}, errors.New("cluster down")
+		}
 		return SharedDecision{}, errors.New("node X down")
 	}
 	tok, ok := d.tokens[t]
@@ -137,7 +142,7 @@ func TestFallbackUnknownUsesFractionAndRate(t *testing.T) {
 	if got := countAdmitted(l, "x1", 20); got != 4 {
 		t.Fatalf("1s refill admitted %d, want 4", got)
 	}
-	clk.add(5 * time.Second) // below the episode gap: no reseed
+	clk.add(5 * time.Second)                          // below the episode gap: no reseed
 	if got := countAdmitted(l, "x1", 20); got != 10 { // capacity burst/replicas
 		t.Fatalf("idle refill capped at %d, want 10", got)
 	}
@@ -153,5 +158,19 @@ func TestLoadLimitsFallbackEnv(t *testing.T) {
 		if _, _, err := LoadLimits(func(k string) string { return bad[k] }); err == nil {
 			t.Fatalf("%v should fail", bad)
 		}
+	}
+}
+
+func TestGlobalFailurePausesEveryDomain(t *testing.T) {
+	st := newDomainStub()
+	l, _ := newTestLimiter(LimiterConfig{RatePerSec: 1, Burst: 10})
+	l.UseShared(st, FailClosed)
+	st.failX, st.global = true, true
+	if _, _, err := l.Acquire("x1"); err == nil {
+		t.Fatal("x1 should fail")
+	}
+	before := st.calls["y1"]
+	if _, _, err := l.Acquire("y1"); err == nil || err.status != 503 || st.calls["y1"] != before {
+		t.Fatalf("cluster-wide failure must pause the other domain too (err=%v calls=%d)", err, st.calls["y1"]-before)
 	}
 }

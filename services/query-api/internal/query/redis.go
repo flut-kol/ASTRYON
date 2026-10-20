@@ -317,6 +317,14 @@ func (r *RedisCounter) FailureDomain(tenant string) string {
 	return r.nodes[0]
 }
 
+// GlobalFailure is true for "CLUSTERDOWN The cluster is down": with cluster-require-full-coverage yes (the default) every
+// node answers it while any slot is uncovered, e.g. during a failover, so it is not specific to the tenant's node.
+// "CLUSTERDOWN Hash slot not served" (coverage not required) stays per domain.
+func (r *RedisCounter) GlobalFailure(err error) bool {
+	var re redisError
+	return errors.As(err, &re) && strings.HasPrefix(string(re), "CLUSTERDOWN The cluster is down")
+}
+
 func (r *RedisCounter) Acquire(tenant string, cfg LimiterConfig) (SharedDecision, error) {
 	if tenant == "" {
 		return SharedDecision{}, errors.New("empty tenant")

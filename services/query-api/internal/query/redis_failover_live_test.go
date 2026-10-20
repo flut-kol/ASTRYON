@@ -110,15 +110,15 @@ func foName(nodes []foNode, addr string) string {
 }
 
 type foLoad struct {
-	mu                                    sync.Mutex
-	admitted, limited, unavail, otherErrs map[string]int
-	start                                 time.Time
-	stop                                  chan struct{}
-	wg                                    sync.WaitGroup
+	mu                                           sync.Mutex
+	admitted, limited, unavail, otherErrs, tried map[string]int
+	start                                        time.Time
+	stop                                         chan struct{}
+	wg                                           sync.WaitGroup
 }
 
 func startLoad(l *Limiter, tenants []string, every time.Duration) *foLoad {
-	ld := &foLoad{admitted: map[string]int{}, limited: map[string]int{}, unavail: map[string]int{}, otherErrs: map[string]int{},
+	ld := &foLoad{admitted: map[string]int{}, limited: map[string]int{}, unavail: map[string]int{}, otherErrs: map[string]int{}, tried: map[string]int{},
 		start: time.Now(), stop: make(chan struct{})}
 	for _, tn := range tenants {
 		tn := tn
@@ -135,6 +135,7 @@ func startLoad(l *Limiter, tenants []string, every time.Duration) *foLoad {
 				}
 				rel, _, err := l.Acquire(tn)
 				ld.mu.Lock()
+				ld.tried[tn]++
 				switch {
 				case err == nil:
 					ld.admitted[tn]++

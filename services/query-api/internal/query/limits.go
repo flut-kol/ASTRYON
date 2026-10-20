@@ -59,9 +59,16 @@ type SharedDecision struct {
 // DomainResolver is optionally implemented by a SharedCounter: FailureDomain names the failure domain (for Redis
 // Cluster the master node currently serving the tenant's slot) so an outage only degrades tenants of that domain.
 // "" or no implementation = one global domain (single node, Sentinel).
+//
+// GlobalFailure reports errors that make the whole store unavailable although they came from one node (a Redis Cluster
+// with cluster-require-full-coverage yes answers "CLUSTERDOWN The cluster is down" on every node while any slot is
+// uncovered); those pause every domain.
 type DomainResolver interface {
 	FailureDomain(tenant string) string
+	GlobalFailure(err error) bool
 }
+
+const globalDomain = "*"
 
 // SharedCounter is a cross-replica store for the per-tenant rate bucket and concurrency leases.
 // Acquire must atomically check both limits and, only if both pass, consume a token and take a lease slot.
@@ -266,12 +273,13 @@ func (l *Limiter) seedFallback(tenant string) {
 // acquireShared returns done=false when the caller should use the local limiter (fail-local policy).
 func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release func(), retryAfter int, aerr *apiError, done bool) {
 	dom := ""
-	if dr, ok := l.shared.(DomainResolver); ok {
+	dr, hasDom := l.shared.(DomainResolver)
+	if hasDom {
 		dom = dr.FailureDomain(tenant)
 	}
 	l.smu.Lock()
 	now := l.now()
-	down := now.Before(l.downUntil[dom])
+	down := now.Before(l.downUntil[dom]) || now.Before(l.downUntil[globalDomain])
 	l.smu.Unlock()
 	var err error
 	var d SharedDecision
@@ -284,6 +292,9 @@ func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release fun
 				if !now.Before(t) {
 					delete(l.downUntil, k)
 				}
+			}
+			if hasDom && dr.GlobalFailure(err) {
+				dom = globalDomain
 			}
 			l.downUntil[dom] = now.Add(sharedCooldown)
 			l.smu.Unlock()

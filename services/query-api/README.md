@@ -52,6 +52,8 @@ Shared limits across replicas (optional, Redis):
 | `QUERY_REDIS_SENTINELS` + `QUERY_REDIS_MASTER_NAME` | unset | Sentinel: `host:port,...` of the sentinels and the monitored master name (both required, not combinable with `QUERY_REDIS_NODES`); `QUERY_REDIS_URL` still supplies scheme, credentials and db |
 | `QUERY_REDIS_FAILURE` | `local` | Redis unreachable: `local` = fall back to the in-memory limiter, `closed` = reject with 503 `limiter_unavailable` (+ `Retry-After: 1`) |
 | `QUERY_REDIS_LEASE_SECONDS` | 60 | concurrency-slot lease; set above the longest query (`QUERY_MAX_EXECUTION_SECONDS`) |
+| `QUERY_REDIS_FALLBACK_FRACTION` | 0.5 | `local` mode: when a tenant falls back and Redis never told us its token count, its local bucket starts at this fraction (0,1] of `QUERY_BURST` |
+| `QUERY_REPLICAS` | 1 | expected number of query-api replicas sharing the limit; the local fallback bucket (seed, capacity) and refill rate are divided by it |
 
 Semantics: one Lua script (EVALSHA, EVAL fallback on NOSCRIPT) runs atomically per request on keys `q:rate:{<tenant_id>}`
 (token bucket, TTL) and `q:conc:{<tenant_id>}` (sorted set of lease expiries); the tenant is only the verified token's tenant.
@@ -69,8 +71,19 @@ partitioned replica stops renewing, so its slots expire after at most one lease 
 retried quietly; if Redis is unreachable for more than a lease the slot lapses.
 Failure policy trade-off: `local` keeps serving but during an outage each replica enforces the full rate itself (N times
 the limit, i.e. today's behaviour); `closed` keeps the global limit exact but the API returns 503 while Redis is down.
-After a failure Redis is skipped for 2 s (no per-request timeout storm; this is per Limiter, not per node, so a failed master
-also pauses Redis for tenants on healthy masters for that window). Fallbacks/rejections are counted
+After a failure Redis is skipped for 2 s (no per-request timeout storm). The pause is per failure domain: in Cluster mode the
+domain is the master currently serving the tenant's slot, so only tenants on the failing node degrade (fall back or 503) and
+every other tenant keeps exact Redis limits; after the topology refresh the promoted master is a different domain and is used
+immediately. Single node and Sentinel have one domain (global pause, as before). Exception: with `cluster-require-full-coverage yes`
+(the Redis default) every node answers `CLUSTERDOWN The cluster is down` while any slot is uncovered, which is treated as
+cluster-wide (all domains pause for the cooldown); set `cluster-require-full-coverage no` on the nodes to get per-node degradation.
+Local-mode over-admission bound: when a tenant falls back, its local bucket is seeded from the last token count Redis reported
+for it (refilled at the global rate since then, capped at burst), else `QUERY_REDIS_FALLBACK_FRACTION * QUERY_BURST`, both divided by
+`QUERY_REPLICAS`; capacity is `max(1, burst/replicas)` and the refill rate `rate/replicas`. A new seed is taken only when the tenant
+had no fallback for 10 s (new outage episode). With N = `QUERY_REPLICAS` correct, the fleet admits about
+`seed + rate * outage` per tenant instead of `N * (burst + rate * outage)`; e.g. rate 10, burst 20, N 4, outage + cooldown 5 s:
+about 10 + 50 = 60 (before: 4 * (20 + 50) = 280). If the real replica count is higher than the hint the bound scales by real/hint;
+if lower, the fallback is stricter than the shared limit (under-admits) by the same factor. Fallbacks/rejections are counted
 (`Limiter.SharedStats()`) and logged at most once per minute. Not supported: ACL-restricted users without EVAL, replica reads.
 
 Topology (`redis_topology.go`): the slot -> master map comes from `CLUSTER SLOTS` (only each range's master is used; replicas are
@@ -102,6 +115,17 @@ Sentinel (1 master + 1 replica + 3 sentinels, `SENTINEL failover` under load): c
 command; closed 809 x 503 (one cooldown), local 809 fallbacks, within rate*T + burst. Without the 5 s cap the switch took 11 s (the
 demoted master only answers -READONLY once Sentinel reconfigures it, ~10 s); until then the old master keeps serving, so Sentinel mode
 can split a tenant's state across two masters for that window (tolerance: one extra burst after the switch).
+TLS + AUTH cluster failover (live, `redis_failover_tls_live_test.go`; 3 masters + 3 replicas, `rediss://`, `requirepass`/`masterauth`,
+private CA, `cluster-node-timeout 2000`, `docker stop` of the master holding most tenants, four limiters on disjoint tenants watching
+one outage; "before" = the old global cooldown, emulated by hiding the domain interface; rate 10 burst 10, 20 req/s attempted per
+tenant, 12 tenants per limiter, outage 0.7-4.8 s on the probe): `CLUSTER SLOTS` refresh and all commands worked over TLS+AUTH, wrong/missing
+password, plaintext to the TLS port and a wrong certificate name were rejected, the client followed the promoted master (rejoin as
+replica after `docker start`). With `cluster-require-full-coverage no`: closed mode, tenants affected by 503: before 12 of 12 (968
+requests), now 5 of 12 = exactly the tenants on the dead node (420 requests); local mode: before 12 of 12 (984 fallbacks), now 3 of 12
+(252 fallbacks); the other tenants had 0 degraded requests and stayed within rate*T + burst (max 133 vs bound 135). Victim tenants in local
+mode stayed within the stated bound (max 126 vs 257; N=1, so the new fraction seed only trims the old extra burst). With the default
+`cluster-require-full-coverage yes` the per-slot change cannot help: all nodes answered `CLUSTERDOWN` (12 of 12 tenants degraded in both
+variants; 362 vs 481 local fallbacks, 567 vs 925 closed 503s, the difference being the shorter pause for the victim's own domain).
 Out of scope: Sentinel with AUTH on the sentinels, multi-sentinel majority checks, reading from replicas, `cluster-announce-*` setups
 where the announced address is unreachable from query-api (use `QUERY_REDIS_NODES` with reachable aliases or fix the announce).
 
@@ -119,4 +143,4 @@ a container on the same user-defined network as the nodes (failover tests: `QUER
 TLS verification failures (unknown CA, wrong name, plaintext/TLS mismatch) are verified against the fake RESP server only
 (a real `ASK` needs a live slot migration; not exercised).
 Active version: unit tests with fakes (resolver cache/TTL, explicit wins, `no_active_version`, cross-tenant, all four endpoints) and live PostgreSQL 16 (`QUERY_PG_IT_URL`, non-superuser NOBYPASSRLS role, migrations 0001-0010): cross-tenant source never resolves, RLS hides other tenants' rows.
-Live-verified also: cluster master failover (both failure modes), resharding with ASK/MOVED under load, old-master rejoin, Sentinel failover, expiry of a killed holder's slot (`redis_failover_live_test.go`); fake-only: AUTH, periodic-refresh timing, `-CLUSTERDOWN`, hostname/null-host `CLUSTER SLOTS` quirks, Sentinel reply edge cases. Not verified: real AAS, multi-shard ClickHouse, AUTH against a real server, TLS cluster failover.
+Live-verified also: cluster master failover (both failure modes), resharding with ASK/MOVED under load, old-master rejoin, Sentinel failover, expiry of a killed holder's slot (`redis_failover_live_test.go`); fake-only: periodic-refresh timing, `-CLUSTERDOWN`, hostname/null-host `CLUSTER SLOTS` quirks, Sentinel reply edge cases. Also live-verified: AUTH and TLS together against a real 6-node cluster including failover (above). Fake-only: the multi-replica (`QUERY_REPLICAS` > 1) fallback bound (unit tests with a stub counter and a fake clock; live runs used one limiter, N=1), `ASK`. Not verified: real AAS, multi-shard ClickHouse, per-user ACL (non-default user) against a real server, a failover in a real multi-replica deployment.

@@ -523,3 +523,20 @@ func TestNoRedisUnchanged(t *testing.T) {
 		t.Fatal("stats should be zero without shared store")
 	}
 }
+
+func TestRedisCounterDomainAndGlobalFailure(t *testing.T) {
+	rc, err := NewRedisCounter("redis://127.0.0.1:7000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rc.FailureDomain("t"); got != "127.0.0.1:7000" {
+		t.Fatalf("unknown topology -> first seed, got %q", got)
+	}
+	rc.ranges = []slotRange{{0, 16383, "10.0.0.1:6379"}}
+	if got := rc.FailureDomain("t"); got != "10.0.0.1:6379" {
+		t.Fatalf("got %q", got)
+	}
+	if !rc.GlobalFailure(redisError("CLUSTERDOWN The cluster is down")) || rc.GlobalFailure(redisError("CLUSTERDOWN Hash slot not served")) || rc.GlobalFailure(fmt.Errorf("x")) {
+		t.Fatal("GlobalFailure classification wrong")
+	}
+}
