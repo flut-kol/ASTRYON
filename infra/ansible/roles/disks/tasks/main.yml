@@ -1,0 +1,26 @@
+---
+- name: Format data devices as XFS (only if explicitly enabled; never overwrites existing fs)
+  community.general.filesystem:
+    fstype: xfs
+    dev: "{{ item.device }}"
+    force: false
+  loop: "{{ disks_mounts }}"
+  when: disks_format_enabled | bool
+
+- name: Mount XFS data volumes (noatime)
+  ansible.posix.mount:
+    path: "{{ item.path }}"
+    src: "{{ item.device }}"
+    fstype: "{{ item.fstype | default('xfs') }}"
+    opts: "{{ item.opts | default(disks_mount_opts) }}"
+    state: mounted
+  loop: "{{ disks_mounts }}"
+
+- name: Data directory layout
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop: "{{ disks_dirs }}"

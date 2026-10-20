@@ -1,0 +1,6 @@
+---
+# disks_mounts: list of {device, path, fstype (xfs), opts}. Empty = nothing is formatted.
+disks_mounts: []
+disks_mount_opts: "noatime,nodiratime,inode64"
+disks_format_enabled: false   # safety: formatting must be explicitly enabled per host/group
+disks_dirs: []                # list of {path, owner, group, mode}

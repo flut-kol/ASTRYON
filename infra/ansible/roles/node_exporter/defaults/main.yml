@@ -1,0 +1,7 @@
+---
+node_exporter_version: "1.8.2"
+node_exporter_arch: linux-amd64
+node_exporter_listen: "0.0.0.0:9100"
+# Checksum must be supplied via vars/vault after verification; role fails if empty.
+node_exporter_checksum: ""   # "sha256:<hex>"
+node_exporter_collectors: [systemd, processes]

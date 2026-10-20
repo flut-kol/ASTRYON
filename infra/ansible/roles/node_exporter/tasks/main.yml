@@ -1,0 +1,44 @@
+---
+- name: Require checksum for the downloaded binary
+  ansible.builtin.assert:
+    that: node_exporter_checksum | length > 0
+    fail_msg: "Set node_exporter_checksum (sha256:<hex>) from the official sha256sums.txt"
+
+- name: Create node_exporter user
+  ansible.builtin.user:
+    name: node_exporter
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Download and unpack node_exporter
+  ansible.builtin.unarchive:
+    src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.{{ node_exporter_arch }}.tar.gz"
+    dest: /tmp
+    remote_src: true
+    checksum: "{{ node_exporter_checksum }}"
+    creates: "/tmp/node_exporter-{{ node_exporter_version }}.{{ node_exporter_arch }}/node_exporter"
+
+- name: Install binary
+  ansible.builtin.copy:
+    src: "/tmp/node_exporter-{{ node_exporter_version }}.{{ node_exporter_arch }}/node_exporter"
+    dest: /usr/local/bin/node_exporter
+    remote_src: true
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Restart node_exporter
+
+- name: Systemd unit
+  ansible.builtin.template:
+    src: node_exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    mode: "0644"
+  notify: Restart node_exporter
+
+- name: Enable node_exporter
+  ansible.builtin.systemd:
+    name: node_exporter
+    enabled: true
+    state: started
+    daemon_reload: true

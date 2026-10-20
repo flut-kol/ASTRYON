@@ -1,0 +1,8 @@
+---
+firewall_role_tcp_ports:
+  - { port: 5432, from: "{{ cluster_cidrs }}", comment: "postgres" }
+sysctl_extra:
+  vm.overcommit_memory: 2
+  vm.dirty_background_ratio: 5
+disks_mounts:
+  - { device: /dev/nvme1n1, path: /var/lib/postgresql }

@@ -1,0 +1,25 @@
+# Managed by Ansible
+[connection]
+id={{ network_bond_name }}
+type=bond
+interface-name={{ network_bond_name }}
+autoconnect=true
+
+[bond]
+mode={{ network_bond_mode }}
+lacp_rate={{ network_bond_lacp_rate }}
+miimon=100
+xmit_hash_policy={{ network_bond_hash_policy }}
+
+[ethernet]
+mtu={{ network_mtu }}
+
+[ipv4]
+method=manual
+address1={{ network_addresses[0] }}{% if network_gateway %},{{ network_gateway }}{% endif %}
+
+{% if network_dns %}dns={{ network_dns | join(';') }};
+{% endif %}
+
+[ipv6]
+method=ignore

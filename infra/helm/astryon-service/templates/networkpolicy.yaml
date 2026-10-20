@@ -1,0 +1,39 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "astryon-service.fullname" . }}
+  labels: {{- include "astryon-service.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "astryon-service.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  {{- $m := .Values.networkPolicy.metrics | default dict }}
+  {{- if or .Values.networkPolicy.ingress.from $m.from }}
+  ingress:
+    {{- with .Values.networkPolicy.ingress.from }}
+    - from: {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- if and $m.from $m.port }}
+    # Prometheus scrape: only the metrics port, only from the monitoring namespace selector
+    - from: {{- toYaml $m.from | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: {{ $m.port }}}
+    {{- end }}
+  {{- else }}
+  ingress: []
+  {{- end }}
+  egress:
+    {{- if .Values.networkPolicy.egress.allowDNS }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- end }}
+    {{- with .Values.networkPolicy.egress.rules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

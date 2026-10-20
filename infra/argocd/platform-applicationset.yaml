@@ -1,0 +1,32 @@
+# Namespaces/quotas/default-deny per env from infra/kubernetes/overlays/<env>.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: astryon-platform
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - list:
+        elements:
+          - {env: dev, auto: "true"}
+          - {env: stage, auto: "false"}
+          - {env: prod, auto: "false"}
+  template:
+    metadata:
+      name: 'platform-{{.env}}'
+    spec:
+      project: astryon
+      source:
+        repoURL: https://github.com/astryon/ASTRYON.git
+        targetRevision: main
+        path: 'infra/kubernetes/overlays/{{.env}}'
+      destination: {server: https://kubernetes.default.svc, namespace: 'astryon-{{.env}}'}
+      syncPolicy:
+        syncOptions: [CreateNamespace=false]
+  templatePatch: |
+    {{- if eq .auto "true" }}
+    spec:
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
+    {{- end }}

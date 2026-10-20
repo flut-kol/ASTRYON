@@ -1,0 +1,10 @@
+---
+firewall_role_tcp_ports:
+  - { port: 3300, from: "{{ cluster_cidrs }}", comment: "ceph mon v2" }
+  - { port: 6789, from: "{{ cluster_cidrs }}", comment: "ceph mon v1" }
+  - { port: "6800-7568", from: "{{ cluster_cidrs }}", comment: "ceph osd/mgr/mds" }
+sysctl_extra:
+  kernel.pid_max: 4194303
+# OSD devices are consumed raw by Ceph, so no XFS mounts here.
+disks_mounts: []
+network_mtu: 9000

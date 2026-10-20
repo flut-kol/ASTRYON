@@ -1,0 +1,23 @@
+---
+timezone: UTC
+common_packages: [chrony, curl, ca-certificates, vim, htop, iotop, sysstat, ethtool, xfsprogs, chrony, rsyslog, jq, nftables]
+ntp_servers: ["0.pool.ntp.org", "1.pool.ntp.org"]
+admin_users: []
+ssh_allow_groups: [sudo]
+ssh_port: 22
+sysctl_base:
+  vm.swappiness: 1
+  net.core.somaxconn: 4096
+  net.core.netdev_max_backlog: 16384
+  net.core.rmem_max: 134217728
+  net.core.wmem_max: 134217728
+  net.ipv4.tcp_rmem: "4096 87380 67108864"
+  net.ipv4.tcp_wmem: "4096 65536 67108864"
+  net.ipv4.tcp_max_syn_backlog: 8192
+  net.ipv4.tcp_slow_start_after_idle: 0
+  net.ipv4.tcp_tw_reuse: 1
+  net.ipv4.ip_local_port_range: "10240 65535"
+  fs.file-max: 2097152
+sysctl_extra: {}
+limits_nofile: 131072
+limits_nproc: 65536

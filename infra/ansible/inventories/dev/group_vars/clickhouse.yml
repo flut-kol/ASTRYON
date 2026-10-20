@@ -1,0 +1,11 @@
+---
+firewall_role_tcp_ports:
+  - { port: 8443, from: "{{ cluster_cidrs }}", comment: "clickhouse https" }
+  - { port: 9440, from: "{{ cluster_cidrs }}", comment: "clickhouse native TLS" }
+  - { port: 9009, from: "{{ cluster_cidrs }}", comment: "clickhouse interserver" }
+sysctl_extra:
+  vm.max_map_count: 262144
+  kernel.perf_event_paranoid: 2
+limits_nofile: 262144
+disks_mounts:
+  - { device: /dev/nvme1n1, path: /var/lib/clickhouse }

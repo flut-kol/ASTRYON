@@ -1,0 +1,16 @@
+---
+mgmt_cidrs: []
+monitoring_cidrs: []
+ssh_port: 22
+node_exporter_port: 9100
+firewall_role_tcp_ports: []    # list of {port, from: [cidrs], comment}
+firewall_enabled: true
+auditd_rules:
+  - "-w /etc/passwd -p wa -k identity"
+  - "-w /etc/group -p wa -k identity"
+  - "-w /etc/shadow -p wa -k identity"
+  - "-w /etc/sudoers -p wa -k sudo"
+  - "-w /etc/sudoers.d/ -p wa -k sudo"
+  - "-w /etc/ssh/sshd_config -p wa -k sshd"
+  - "-w /etc/ssh/sshd_config.d/ -p wa -k sshd"
+  - "-a always,exit -F arch=b64 -S execve -F euid=0 -k root_exec"

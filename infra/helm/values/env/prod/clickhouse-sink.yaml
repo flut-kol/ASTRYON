@@ -1,0 +1,7 @@
+# prod overrides. Pin image.tag to an immutable tag/digest (CI updates it).
+image: {tag: "prod-latest"}
+replicaCount: 3
+pdb: {enabled: true, minAvailable: 1}
+config:
+  CHSINK_KAFKA_BROKERS: kafka-0.kafka.astryon-kafka.svc:9092,kafka-1.kafka.astryon-kafka.svc:9092,kafka-2.kafka.astryon-kafka.svc:9092
+  CHSINK_CH_URL: http://clickhouse.astryon-data.svc:8123

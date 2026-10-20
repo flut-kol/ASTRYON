@@ -1,0 +1,16 @@
+[Unit]
+Description=Prometheus node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=node_exporter
+ExecStart=/usr/local/bin/node_exporter --web.listen-address={{ node_exporter_listen }}{% for c in node_exporter_collectors %} --collector.{{ c }}{% endfor %}
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

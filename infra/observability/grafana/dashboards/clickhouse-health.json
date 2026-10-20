@@ -1,0 +1,133 @@
+{
+ "uid": "clickhouse-health",
+ "title": "ASTRYON ClickHouse Health",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "30s",
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "tags": [
+  "astryon"
+ ],
+ "panels": [
+  {
+   "id": 1,
+   "type": "timeseries",
+   "title": "Max parts per partition",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "ClickHouseAsyncMetrics_MaxPartCountForPartition",
+     "legendFormat": "parts"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "Merge pool tasks",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "ClickHouseMetrics_BackgroundMergesAndMutationsPoolTask",
+     "legendFormat": "tasks"
+    },
+    {
+     "refId": "B",
+     "expr": "ClickHouseMetrics_BackgroundMergesAndMutationsPoolSize",
+     "legendFormat": "pool size"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "Disk used ratio",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "1 - ClickHouseAsyncMetrics_DiskAvailable_default / ClickHouseAsyncMetrics_DiskTotal_default",
+     "legendFormat": "used"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "Inserted rows/s",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 8,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate(ClickHouseProfileEvents_InsertedRows[1m])",
+     "legendFormat": "rows/s"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,15 @@
+---
+# Secrets: never put values here. Reference vault vars, e.g. in group_vars/all/vault.yml
+# (encrypted with `ansible-vault encrypt`), see README. Placeholder: vault_admin_ssh_keys.
+timezone: UTC
+ntp_servers: ["0.pool.ntp.org", "1.pool.ntp.org"]
+admin_users:
+  - name: astryon-ops
+    groups: [sudo]
+    ssh_keys: "{{ vault_admin_ssh_keys | default([]) }}"
+ssh_allow_groups: [sudo]
+mgmt_cidrs: ["10.0.0.0/24"]        # bastion / management networks
+cluster_cidrs: ["10.10.0.0/16"]    # intra-cluster traffic
+monitoring_cidrs: ["10.0.0.0/24"]  # Prometheus scrapers
+node_exporter_listen: "0.0.0.0:9100"
+firewall_role_tcp_ports: []

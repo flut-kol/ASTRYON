@@ -1,0 +1,9 @@
+---
+firewall_role_tcp_ports:
+  - { port: 10250, from: "{{ cluster_cidrs }}", comment: "kubelet" }
+  - { port: "30000-32767", from: "{{ cluster_cidrs }}", comment: "nodeport" }
+sysctl_extra:
+  net.ipv4.ip_forward: 1
+  fs.inotify.max_user_instances: 8192
+  fs.inotify.max_user_watches: 524288
+disks_mounts: []

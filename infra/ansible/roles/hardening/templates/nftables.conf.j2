@@ -1,0 +1,34 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible. Default-drop inbound; allow lists are role/group based.
+flush ruleset
+
+table inet astryon {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    ct state established,related accept
+    ct state invalid drop
+    iif "lo" accept
+    ip protocol icmp accept
+    ip6 nexthdr icmpv6 accept
+
+    # SSH from management networks
+{% if mgmt_cidrs %}
+    ip saddr { {{ mgmt_cidrs | join(', ') }} } tcp dport {{ ssh_port }} accept
+{% endif %}
+    # node_exporter from monitoring
+{% if monitoring_cidrs %}
+    ip saddr { {{ monitoring_cidrs | join(', ') }} } tcp dport {{ node_exporter_port }} accept
+{% endif %}
+    # Role ports (group_vars: firewall_role_tcp_ports)
+{% for r in firewall_role_tcp_ports %}
+    # {{ r.comment | default('') }}
+    ip saddr { {{ r.from | join(', ') }} } tcp dport {{ r.port | string | replace('-', '-') }} accept
+{% endfor %}
+  }
+  chain forward {
+    type filter hook forward priority 0; policy {{ 'accept' if ((sysctl_extra | default({}))['net.ipv4.ip_forward'] | default(0)) | int == 1 else 'drop' }};
+  }
+  chain output {
+    type filter hook output priority 0; policy accept;
+  }
+}

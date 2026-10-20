@@ -2,6 +2,10 @@
 *.local
 *.pem
 *.key
+*.csr
+*.srl
+# dev-only generated Kafka TLS CA/broker cert (scripts/dev/gen-kafka-tls.sh); never commit
+infra/docker/.devcerts/
 bin/
 dist/
 *.test
@@ -12,3 +16,4 @@ go.work.sum
 .vscode/
 .DS_Store
 node_modules/
+tests/load/loadgen

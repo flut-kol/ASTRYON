@@ -1,0 +1,14 @@
+---
+# Bonding is opt-in; enable per group/host with real NIC names.
+network_bond_enabled: false
+network_backend: netplan        # netplan | networkmanager
+network_bond_name: bond0
+network_bond_members: []        # e.g. [enp1s0f0, enp1s0f1]
+network_bond_mode: 802.3ad      # LACP
+network_bond_lacp_rate: fast
+network_bond_hash_policy: layer3+4
+network_mtu: 1500
+network_addresses: []           # e.g. ["10.10.1.11/24"]
+network_gateway: ""
+network_dns: []
+network_vlans: []               # list of {id, addresses, mtu}

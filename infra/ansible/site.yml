@@ -1,0 +1,15 @@
+---
+- name: Baseline for all nodes
+  hosts: all
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: disks
+      tags: [disks]
+    - role: network
+      tags: [network]
+    - role: hardening
+      tags: [hardening]
+    - role: node_exporter
+      tags: [node_exporter]

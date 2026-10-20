@@ -1,0 +1,81 @@
+# Plain Prometheus rules file; wrap `groups:` in a PrometheusRule spec for Kubernetes.
+# Thresholds: ack p95 250ms (DEVELOPMENT_PLAN §2), CH disk 70/80% (§13).
+groups:
+  - name: astryon-ingestion
+    rules:
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "{{ $labels.job }} {{ $labels.instance }} is down"}
+      - alert: GatewayAckP95AboveSLO
+        expr: histogram_quantile(0.95, sum by (le) (rate(astryon_gateway_ack_duration_seconds_bucket[5m]))) > 0.25
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Gateway ack p95 above 250ms SLO target", runbook: "docs/operations/observability.md"}
+      - alert: GatewayAckErrorRateHigh
+        expr: sum(rate(astryon_gateway_requests_total{code=~"5.."}[5m])) / clamp_min(sum(rate(astryon_gateway_requests_total[5m])), 1e-9) > 0.01
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Gateway 5xx/ack error ratio above 1%"}
+      - alert: GatewayAuthFailuresHigh
+        expr: sum(rate(astryon_gateway_requests_total{code=~"401|403"}[5m])) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Elevated auth failures at gateway"}
+  - name: astryon-pipeline
+    rules:
+      - alert: ConsumerLagGrowing
+        expr: sum by (consumergroup, topic) (kafka_consumergroup_lag) > 100000 and deriv(sum by (consumergroup, topic) (kafka_consumergroup_lag)[10m:1m]) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Consumer lag growing for {{ $labels.consumergroup }}/{{ $labels.topic }}"}
+      - alert: SinkQuarantineGrowth
+        expr: sum(rate(astryon_clickhouse_sink_quarantined_total[10m])) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "ClickHouse sink quarantining events (DLQ rate)"}
+      - alert: SinkInsertOrCommitFailures
+        expr: sum(rate(astryon_clickhouse_sink_insert_failures_total[5m])) + sum(rate(astryon_clickhouse_sink_commit_failures_total[5m])) > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "ClickHouse sink insert/commit failures"}
+      - alert: KafkaUnderReplicatedPartitions
+        expr: sum(kafka_topic_partition_under_replicated_partition) > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Kafka under-replicated partitions (RF=3, min ISR=2)"}
+  - name: astryon-clickhouse
+    rules:
+      - alert: ClickHouseTooManyParts
+        expr: ClickHouseAsyncMetrics_MaxPartCountForPartition > 300
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "ClickHouse parts per partition > 300 (merge backlog)"}
+      - alert: ClickHouseMergeBacklog
+        expr: ClickHouseMetrics_BackgroundMergesAndMutationsPoolTask > 0.9 * ClickHouseMetrics_BackgroundMergesAndMutationsPoolSize
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "ClickHouse merge pool saturated"}
+      - alert: ClickHouseDiskUsageHigh
+        expr: 1 - ClickHouseAsyncMetrics_DiskAvailable_default / ClickHouseAsyncMetrics_DiskTotal_default > 0.7
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "ClickHouse disk > 70%"}
+      - alert: ClickHouseDiskUsageCritical
+        expr: 1 - ClickHouseAsyncMetrics_DiskAvailable_default / ClickHouseAsyncMetrics_DiskTotal_default > 0.8
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "ClickHouse disk > 80%"}
+  - name: astryon-infra
+    rules:
+      - alert: NodeDiskUsageHigh
+        expr: 1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} > 0.85
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Disk > 85% on {{ $labels.instance }} {{ $labels.mountpoint }}"}
+      - alert: PostgresReplicationLag
+        expr: pg_replication_lag_seconds > 30
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Postgres replication lag > 30s"}

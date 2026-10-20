@@ -1,0 +1,1 @@
+{{ include "astryon-service.fullname" . }} deployed. Secrets referenced via secretRefs must exist in the namespace (not managed by this chart).

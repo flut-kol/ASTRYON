@@ -1,0 +1,38 @@
+# Managed by Ansible
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+{% for nic in network_bond_members %}
+    {{ nic }}:
+      mtu: {{ network_mtu }}
+{% endfor %}
+  bonds:
+    {{ network_bond_name }}:
+      interfaces: [{{ network_bond_members | join(', ') }}]
+      mtu: {{ network_mtu }}
+      addresses: [{{ network_addresses | join(', ') }}]
+{% if network_gateway %}
+      routes:
+        - to: default
+          via: {{ network_gateway }}
+{% endif %}
+{% if network_dns %}
+      nameservers:
+        addresses: [{{ network_dns | join(', ') }}]
+{% endif %}
+      parameters:
+        mode: {{ network_bond_mode }}
+        lacp-rate: {{ network_bond_lacp_rate }}
+        mii-monitor-interval: 100
+        transmit-hash-policy: {{ network_bond_hash_policy }}
+{% if network_vlans %}
+  vlans:
+{% for v in network_vlans %}
+    {{ network_bond_name }}.{{ v.id }}:
+      id: {{ v.id }}
+      link: {{ network_bond_name }}
+      mtu: {{ v.mtu | default(network_mtu) }}
+      addresses: [{{ v.addresses | join(', ') }}]
+{% endfor %}
+{% endif %}

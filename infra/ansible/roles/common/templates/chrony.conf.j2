@@ -1,0 +1,9 @@
+# Managed by Ansible
+{% for s in ntp_servers %}
+pool {{ s }} iburst maxsources 2
+{% endfor %}
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+leapsectz right/UTC
+logdir /var/log/chrony

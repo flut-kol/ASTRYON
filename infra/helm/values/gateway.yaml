@@ -1,0 +1,46 @@
+# astryon-service values: ingestion gateway (services/gateway). Secrets: Secret "gateway-secrets" created out-of-band with
+# ASTRYON_KAFKA_SASL_USERNAME / ASTRYON_KAFKA_SASL_PASSWORD. Secret "kafka-ca" with key ca.crt.
+fullnameOverride: gateway
+image:
+  repository: ghcr.io/astryon/gateway
+containerPort: 8080
+extraPorts:
+  - {name: metrics, containerPort: 9101}   # /metrics, internal only (not on the public API port)
+serviceMonitor: {enabled: true, port: metrics, path: /metrics}
+service: {enabled: true, type: ClusterIP, port: 80}
+config:
+  ASTRYON_GATEWAY_ADDR: ":8080"
+  ASTRYON_GATEWAY_METRICS_ADDR: ":9101"
+  ASTRYON_GATEWAY_MAX_BATCH_EVENTS: "100"
+  AAS_BASE_URL: ""               # per env
+  ASTRYON_AAS_AUDIENCE: ""       # per env
+  ASTRYON_KAFKA_BROKERS: ""      # per env, comma separated
+  ASTRYON_KAFKA_TLS: "1"
+  ASTRYON_KAFKA_TLS_CA_FILE: /etc/astryon/kafka-ca/ca.crt
+  ASTRYON_KAFKA_SASL_MECHANISM: SCRAM-SHA-512
+  ASTRYON_KAFKA_CLIENT_ID: astryon-gateway
+secretRefs:
+  - name: gateway-secrets
+secretMounts:
+  - {name: kafka-ca, secretName: kafka-ca, mountPath: /etc/astryon/kafka-ca}
+resources:
+  requests: {cpu: 250m, memory: 128Mi}
+  limits: {memory: 512Mi}
+probes:
+  liveness: {enabled: true, httpGet: {path: /healthz, port: http}, initialDelaySeconds: 5, periodSeconds: 10}
+  readiness: {enabled: true, httpGet: {path: /healthz, port: http}, initialDelaySeconds: 2, periodSeconds: 5}
+networkPolicy:
+  enabled: true
+  metrics:
+    port: 9101
+    from:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}   # per env
+  ingress:
+    from:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
+  egress:
+    allowDNS: true
+    rules:
+      - ports:            # Kafka (TLS/SASL) and AAS (HTTPS); tighten CIDRs per env
+          - {protocol: TCP, port: 9093}
+          - {protocol: TCP, port: 443}

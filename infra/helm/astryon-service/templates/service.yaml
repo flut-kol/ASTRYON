@@ -1,0 +1,21 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "astryon-service.fullname" . }}
+  labels: {{- include "astryon-service.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: {{ .Values.portName }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.portName }}
+      protocol: TCP
+    {{- range .Values.extraPorts }}
+    - name: {{ .name }}
+      port: {{ .containerPort }}
+      targetPort: {{ .name }}
+      protocol: TCP
+    {{- end }}
+  selector: {{- include "astryon-service.selectorLabels" . | nindent 4 }}
+{{- end }}

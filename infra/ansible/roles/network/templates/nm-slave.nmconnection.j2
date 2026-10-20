@@ -1,0 +1,11 @@
+# Managed by Ansible
+[connection]
+id={{ network_bond_name }}-{{ item }}
+type=ethernet
+interface-name={{ item }}
+master={{ network_bond_name }}
+slave-type=bond
+autoconnect=true
+
+[ethernet]
+mtu={{ network_mtu }}

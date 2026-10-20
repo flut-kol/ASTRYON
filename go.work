@@ -1,8 +1,13 @@
 go 1.22
 
 use (
+	./db/postgres/schematest
 	./libs/event-contracts
+	./libs/go-common
 	./services/clickhouse-sink
 	./services/gateway
+	./services/query-api
+	./services/stream-processor
+	./tests/e2e
 	./tests/load
 )

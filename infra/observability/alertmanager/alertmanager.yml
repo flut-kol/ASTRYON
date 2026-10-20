@@ -1,0 +1,3 @@
+route: {receiver: default, group_by: [alertname, job], group_wait: 30s, repeat_interval: 4h}
+receivers:
+  - name: default   # configure webhook/email/pager receivers via deployment; no secrets here

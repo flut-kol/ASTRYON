@@ -1,0 +1,14 @@
+---
+firewall_role_tcp_ports:
+  - { port: 9093, from: "{{ cluster_cidrs }}", comment: "kafka broker TLS" }
+  - { port: 9094, from: "{{ cluster_cidrs }}", comment: "kafka controller" }
+sysctl_extra:
+  vm.max_map_count: 262144
+  vm.dirty_ratio: 60
+  vm.dirty_background_ratio: 5
+limits_nofile: 262144
+disks_mounts:
+  - { device: /dev/nvme1n1, path: /var/lib/kafka/data1 }
+  - { device: /dev/nvme2n1, path: /var/lib/kafka/data2 }
+disks_dirs:
+  - { path: /var/lib/kafka, owner: root, group: root, mode: "0755" }

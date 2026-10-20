@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: astryon
+  namespace: argocd
+spec:
+  description: ASTRYON data platform services
+  sourceRepos:
+    - https://github.com/astryon/ASTRYON.git   # TODO set real repo URL
+  destinations:
+    - {server: https://kubernetes.default.svc, namespace: astryon-dev}
+    - {server: https://kubernetes.default.svc, namespace: astryon-stage}
+    - {server: https://kubernetes.default.svc, namespace: astryon-prod}
+  clusterResourceWhitelist:
+    - {group: "", kind: Namespace}   # namespaces come from infra/kubernetes overlays
+  namespaceResourceBlacklist:
+    - {group: "", kind: Secret}      # secrets are never managed from git
+  roles:
+    - name: deployer
+      description: Sync dev/stage; prod sync requires admin
+      policies:
+        - p, proj:astryon:deployer, applications, sync, astryon/*-dev, allow
+        - p, proj:astryon:deployer, applications, sync, astryon/*-stage, allow
+        - p, proj:astryon:deployer, applications, get, astryon/*, allow
+      groups: [astryon-deployers]

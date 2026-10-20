@@ -1,0 +1,48 @@
+# astryon-service values: services/clickhouse-sink (Kafka consumer -> ClickHouse). No inbound API; no TLS/SASL config in the
+# sink yet (see services/clickhouse-sink config.go) so brokers must be reachable over in-cluster plaintext listener.
+# Secret "clickhouse-sink-secrets" holds CHSINK_CH_PASSWORD.
+fullnameOverride: clickhouse-sink
+image:
+  repository: ghcr.io/astryon/clickhouse-sink
+containerPort: 9102
+portName: metrics
+service: {enabled: true, port: 9102}   # metrics only (needed by ServiceMonitor)
+serviceMonitor: {enabled: true, port: metrics, path: /metrics}
+config:
+  CHSINK_KAFKA_BROKERS: ""       # per env
+  CHSINK_TOPIC: processed.events.v1
+  CHSINK_QUARANTINE_TOPIC: events.quarantine.v1
+  CHSINK_GROUP_ID: clickhouse-sink
+  CHSINK_CH_URL: ""              # per env
+  CHSINK_CH_DATABASE: astryon
+  CHSINK_CH_USER: astryon
+  CHSINK_CH_TABLE: events_normalized_local
+  CHSINK_BATCH_SIZE: "5000"
+  CHSINK_BATCH_INTERVAL: 2s
+  CHSINK_METRICS_ADDR: ":9102"   # /metrics (Prometheus), /healthz, /readyz, /debug/vars (expvar)
+secretRefs:
+  - name: clickhouse-sink-secrets
+resources:
+  requests: {cpu: 250m, memory: 256Mi}
+  limits: {memory: 1Gi}
+probes:
+  liveness: {enabled: true, httpGet: {path: /healthz, port: metrics}, initialDelaySeconds: 10, periodSeconds: 10}
+  readiness: {enabled: true, httpGet: {path: /readyz, port: metrics}, initialDelaySeconds: 5, periodSeconds: 10}
+terminationGracePeriodSeconds: 60   # > CHSINK_SHUTDOWN_TIMEOUT to flush batch and commit offsets
+# Scale by Kafka partitions, not CPU: fixed replicas, no HPA.
+autoscaling: {enabled: false}
+pdb: {enabled: true, minAvailable: 1}
+networkPolicy:
+  enabled: true
+  ingress: {from: []}
+  metrics:
+    port: 9102
+    from:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}   # per env
+  egress:
+    allowDNS: true
+    rules:
+      - ports:            # Kafka plaintext in-cluster listener and ClickHouse HTTP(S)
+          - {protocol: TCP, port: 9092}
+          - {protocol: TCP, port: 8123}
+          - {protocol: TCP, port: 8443}

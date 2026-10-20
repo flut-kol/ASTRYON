@@ -1,0 +1,36 @@
+---
+- name: Validate bonding variables
+  ansible.builtin.assert:
+    that:
+      - network_bond_members | length >= 2
+      - network_addresses | length > 0
+    fail_msg: "network_bond_enabled requires >=2 members and at least one address"
+  when: network_bond_enabled | bool
+
+- name: Render netplan bond config
+  ansible.builtin.template:
+    src: netplan-bond.yaml.j2
+    dest: /etc/netplan/60-astryon-bond.yaml
+    mode: "0600"
+    validate: "true"
+  when: network_bond_enabled | bool and network_backend == 'netplan'
+  notify: Apply netplan
+
+- name: Render NetworkManager bond profiles
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/NetworkManager/system-connections/{{ item.dest }}"
+    mode: "0600"
+  loop:
+    - { src: nm-bond.nmconnection.j2, dest: "{{ network_bond_name }}.nmconnection" }
+  when: network_bond_enabled | bool and network_backend == 'networkmanager'
+  notify: Reload NetworkManager
+
+- name: Render NetworkManager bond slave profiles
+  ansible.builtin.template:
+    src: nm-slave.nmconnection.j2
+    dest: "/etc/NetworkManager/system-connections/{{ network_bond_name }}-{{ item }}.nmconnection"
+    mode: "0600"
+  loop: "{{ network_bond_members }}"
+  when: network_bond_enabled | bool and network_backend == 'networkmanager'
+  notify: Reload NetworkManager

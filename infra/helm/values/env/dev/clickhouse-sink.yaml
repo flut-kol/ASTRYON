@@ -1,0 +1,7 @@
+# dev overrides. Pin image.tag to an immutable tag/digest (CI updates it).
+image: {tag: "dev-latest"}
+replicaCount: 1
+pdb: {enabled: false, minAvailable: 1}
+config:
+  CHSINK_KAFKA_BROKERS: kafka-0.kafka.astryon-kafka.svc:9092,kafka-1.kafka.astryon-kafka.svc:9092,kafka-2.kafka.astryon-kafka.svc:9092
+  CHSINK_CH_URL: http://clickhouse.astryon-data.svc:8123

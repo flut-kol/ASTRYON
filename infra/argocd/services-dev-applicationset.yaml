@@ -1,0 +1,38 @@
+# dev: automated sync on every commit to main (Sprint 03 gate)
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: astryon-services-dev
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - {env: dev, revision: main}
+          - list:
+              elements:
+                - {service: gateway}
+                - {service: clickhouse-sink}
+  template:
+    metadata:
+      name: '{{.service}}-{{.env}}'
+    spec:
+      project: astryon
+      sources:
+        - repoURL: https://github.com/astryon/ASTRYON.git
+          targetRevision: '{{.revision}}'
+          path: infra/helm/astryon-service
+          helm:
+            releaseName: '{{.service}}'
+            valueFiles:
+              - '$values/infra/helm/values/{{.service}}.yaml'
+              - '$values/infra/helm/values/env/{{.env}}/{{.service}}.yaml'
+        - repoURL: https://github.com/astryon/ASTRYON.git
+          targetRevision: '{{.revision}}'
+          ref: values
+      destination: {server: https://kubernetes.default.svc, namespace: 'astryon-{{.env}}'}
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
