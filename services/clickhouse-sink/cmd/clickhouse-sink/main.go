@@ -3,11 +3,11 @@ package main
 
 import (
 	"context"
-	"expvar"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/astryon/clickhouse-sink/internal/sink"
@@ -30,17 +30,17 @@ func main() {
 		BatchSize: cfg.BatchSize, BatchInterval: cfg.BatchInterval, MaxRetries: cfg.MaxRetries,
 		RetryBackoff: cfg.RetryBackoff, RetryBackoffMax: cfg.RetryBackoffMax, ShutdownTimeout: cfg.ShutdownTimeout,
 	})
+	var ready atomic.Bool
 	p.M.Publish()
 	if cfg.MetricsAddr != "" {
 		go func() {
-			mux := http.NewServeMux()
-			mux.Handle("/debug/vars", expvar.Handler())
-			log.Printf("metrics: %v", http.ListenAndServe(cfg.MetricsAddr, mux))
+			log.Printf("metrics: %v", http.ListenAndServe(cfg.MetricsAddr, p.M.Mux(&ready)))
 		}()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("clickhouse-sink started topic=%s table=%s batch=%d/%s", cfg.Topic, cfg.CHTable, cfg.BatchSize, cfg.BatchInterval)
+	ready.Store(true)
 	if err := p.Run(ctx); err != nil {
 		log.Printf("fatal: %v", err)
 		os.Exit(1)
