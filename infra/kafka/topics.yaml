@@ -1,0 +1,20 @@
+# Topics-as-code, DEVELOPMENT_PLAN.md §5.2. Consumed by scripts/dev/create-topics.sh.
+# NOTE (dev): partitions are reduced and replication_factor=1 / min_insync_replicas=1
+# because the dev stack is a single KRaft node. Production target for critical
+# event topics: RF=3, acks=all, min.insync.replicas=2, idempotent producers.
+# Plan partition hypotheses (96/24) are NOT fixed; to be set after POC benchmarks.
+# Keep one topic per line in the `topics:` list: name, partitions, retention_ms,
+# plan_partitions (reference only).
+defaults:
+  dev_replication_factor: 1
+  prod_replication_factor: 3
+  prod_min_insync_replicas: 2
+topics:
+  - {name: raw.events.v1,            partitions: 6, retention_ms: 604800000,  plan_partitions: 96}   # 7d
+  - {name: validated.events.v1,      partitions: 6, retention_ms: 259200000,  plan_partitions: 96}   # 3d
+  - {name: processed.events.v1,      partitions: 6, retention_ms: 259200000,  plan_partitions: 96}   # 3d
+  - {name: ingestion.filejobs.v1,    partitions: 3, retention_ms: 604800000,  plan_partitions: 24}   # 7d
+  - {name: processing.jobstatus.v1,  partitions: 3, retention_ms: 604800000,  plan_partitions: 24}   # 7d
+  - {name: events.quarantine.v1,     partitions: 3, retention_ms: 1209600000, plan_partitions: 24}   # 14d
+  - {name: events.dlq.v1,            partitions: 3, retention_ms: 1209600000, plan_partitions: 24}   # 14d
+  - {name: audit.events.v1,          partitions: 3, retention_ms: 604800000,  plan_partitions: 24}   # 7d (+longer in S3)

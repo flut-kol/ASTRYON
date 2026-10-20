@@ -1,0 +1,8 @@
+go 1.22
+
+use (
+	./libs/event-contracts
+	./services/clickhouse-sink
+	./services/gateway
+	./tests/load
+)

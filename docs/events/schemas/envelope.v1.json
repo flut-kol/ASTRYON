@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astryon.example/schemas/events/envelope.v1.json",
+  "title": "ASTRYON Event Envelope v1",
+  "description": "DEVELOPMENT_PLAN §5.1. Mirrors libs/event-contracts Envelope. Semantic checks not expressible here (event_time not too far in the future, checksum matches inline payload, ref path traversal) are enforced by Envelope.Validate().",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "tenant_id", "source_id", "schema_id", "schema_version", "ingested_at", "trace_id", "payload_format", "processing_version"],
+  "properties": {
+    "event_id": {
+      "description": "UUID or ULID; stable across retries of the same logical event.",
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25})$"
+    },
+    "tenant_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "description": "From validated token claims only." },
+    "source_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+    "schema_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "event_time": { "type": "string", "format": "date-time", "pattern": "(Z|[+-]00:00)$", "description": "Source time, UTC. Omit only with event_time_missing=true." },
+    "event_time_missing": { "type": "boolean", "description": "Explicit absence marker for event_time." },
+    "ingested_at": { "type": "string", "format": "date-time", "pattern": "(Z|[+-]00:00)$", "description": "Server ingestion time, UTC." },
+    "entity_key": { "type": "string", "maxLength": 256, "description": "Partition key part; must not be raw PII." },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "payload_format": { "enum": ["json", "protobuf", "avro", "parquet-reference"] },
+    "payload": { "not": { "type": "null" }, "description": "Inline payload (max 1 MiB serialized). Binary formats: base64 JSON string." },
+    "object_ref": { "type": "string", "maxLength": 2048, "pattern": "^s3://[^/?#@]+/[^?#]+$" },
+    "checksum": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 hex." },
+    "processing_version": { "type": "integer", "minimum": 1 }
+  },
+  "allOf": [
+    {
+      "description": "payload XOR object_ref",
+      "oneOf": [
+        { "required": ["payload"], "not": { "required": ["object_ref"] } },
+        { "required": ["object_ref"], "not": { "required": ["payload"] } }
+      ]
+    },
+    { "if": { "required": ["object_ref"] }, "then": { "required": ["checksum"] } },
+    { "if": { "properties": { "payload_format": { "const": "parquet-reference" } }, "required": ["payload_format"] }, "then": { "required": ["object_ref"] } },
+    {
+      "description": "event_time present XOR event_time_missing=true",
+      "oneOf": [
+        { "required": ["event_time"], "not": { "required": ["event_time_missing"] } },
+        { "properties": { "event_time_missing": { "const": false } }, "required": ["event_time", "event_time_missing"] },
+        { "required": ["event_time_missing"], "not": { "required": ["event_time"] }, "properties": { "event_time_missing": { "const": true } } }
+      ]
+    }
+  ]
+}

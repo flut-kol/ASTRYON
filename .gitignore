@@ -1,0 +1,14 @@
+.env
+*.local
+*.pem
+*.key
+bin/
+dist/
+*.test
+*.out
+coverage.*
+go.work.sum
+.idea/
+.vscode/
+.DS_Store
+node_modules/

@@ -1,0 +1,96 @@
+# ASTRYON dev stack (DPP-006). DEV ONLY: placeholder creds, single node, ports on 127.0.0.1.
+# Host ports (chosen to avoid collisions on the dev host; override via .env):
+#   Kafka 19092 | PostgreSQL 15432 | ClickHouse HTTP 18124, native 19010 | MinIO S3 19200, console 19201
+name: astryon-dev
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-19092}:19092"
+    environment:
+      KAFKA_NODE_ID: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:${KAFKA_HOST_PORT:-19092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # single node: RF=1 everywhere (prod uses RF=3, see infra/kafka/topics.yaml)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-astryon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-astryon_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-astryon}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_HTTP_HOST_PORT:-18124}:8123"
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_HOST_PORT:-19010}:9000"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-astryon}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-astryon}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-astryon_dev_only}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping | grep -q Ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "127.0.0.1:${MINIO_S3_HOST_PORT:-19200}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_HOST_PORT:-19201}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-astryon_dev}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-astryon_dev_only}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || curl -fs http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  kafka_data:
+  postgres_data:
+  clickhouse_data:
+  minio_data:
