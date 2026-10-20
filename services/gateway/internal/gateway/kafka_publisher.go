@@ -6,8 +6,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -38,13 +40,17 @@ type KafkaConfig struct {
 func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 	c := KafkaConfig{
 		ClientID:        def(getenv("ASTRYON_KAFKA_CLIENT_ID"), "astryon-gateway"),
-		TLS:             getenv("ASTRYON_KAFKA_TLS") == "1",
 		TLSCAFile:       getenv("ASTRYON_KAFKA_TLS_CA_FILE"),
 		SASLMech:        strings.ToUpper(strings.TrimSpace(getenv("ASTRYON_KAFKA_SASL_MECHANISM"))),
 		SASLUser:        getenv("ASTRYON_KAFKA_SASL_USERNAME"),
 		SASLPass:        getenv("ASTRYON_KAFKA_SASL_PASSWORD"),
 		DeliveryTimeout: 30 * time.Second,
 	}
+	tlsOn, err := parseTLSFlag(getenv("ASTRYON_KAFKA_TLS"))
+	if err != nil {
+		return c, err
+	}
+	c.TLS = tlsOn
 	for _, b := range strings.Split(getenv("ASTRYON_KAFKA_BROKERS"), ",") {
 		if b = strings.TrimSpace(b); b != "" {
 			c.Brokers = append(c.Brokers, b)
@@ -69,7 +75,44 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 	default:
 		return c, fmt.Errorf("unsupported ASTRYON_KAFKA_SASL_MECHANISM %q", c.SASLMech)
 	}
+	// Fail closed: never let a security setting be silently ignored.
+	if c.TLSCAFile != "" && !c.TLS {
+		return c, errors.New("ASTRYON_KAFKA_TLS_CA_FILE is set but ASTRYON_KAFKA_TLS is off (refusing to fall back to plaintext)")
+	}
+	if c.SASLMech == "PLAIN" && !c.TLS {
+		return c, errors.New("ASTRYON_KAFKA_SASL_MECHANISM=PLAIN requires ASTRYON_KAFKA_TLS=1 (password would be sent in clear)")
+	}
 	return c, nil
+}
+
+// parseTLSFlag accepts 1/true/0/false/empty; anything else is an error so a typo
+// (e.g. "yes") cannot silently downgrade the connection to plaintext.
+func parseTLSFlag(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false":
+		return false, nil
+	case "1", "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("ASTRYON_KAFKA_TLS must be 1/true or 0/false, got %q", v)
+}
+
+// tlsConfig builds the client TLS config: system roots or the given CA bundle,
+// server certificate chain and hostname always verified (no InsecureSkipVerify).
+func (c KafkaConfig) tlsConfig() (*tls.Config, error) {
+	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+	if c.TLSCAFile != "" {
+		pem, err := os.ReadFile(c.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read ASTRYON_KAFKA_TLS_CA_FILE: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, errors.New("ASTRYON_KAFKA_TLS_CA_FILE: no valid PEM certificates")
+		}
+		tc.RootCAs = pool
+	}
+	return tc, nil
 }
 
 func (c KafkaConfig) saslMechanism() sasl.Mechanism {
@@ -91,8 +134,73 @@ type kafkaProducer interface {
 	close()
 }
 
+// connErrs remembers the latest broker connect/handshake failure (TLS verify, SASL auth)
+// so a timed-out publish can say why, instead of only "context deadline exceeded".
+// The configured password is redacted from the stored text.
+// connErrTTL: a recorded connect error older than this is considered recovered.
+const connErrTTL = 30 * time.Second
+
+type connErrs struct {
+	last atomic.Value // string
+	at   atomic.Int64 // unix nanos of the last stored error
+	pass string
+}
+
+// OnBrokerConnect implements kgo.HookBrokerConnect.
+func (h *connErrs) OnBrokerConnect(meta kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
+	if err == nil {
+		return // errors age out (see lastErr): TCP/TLS connect succeeds before SASL runs
+	}
+	h.store("broker "+meta.Host, err)
+}
+
+// Level and Log implement kgo.Logger at error level only: franz-go reports a failed SASL
+// handshake (wrong password, mechanism not enabled) solely through its logger.
+func (h *connErrs) Level() kgo.LogLevel { return kgo.LogLevelError }
+
+func (h *connErrs) Log(_ kgo.LogLevel, msg string, kv ...any) {
+	if msg != "unable to initialize sasl" {
+		return
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i] == "err" {
+			if e, ok := kv[i+1].(error); ok {
+				h.store("sasl", e)
+			}
+		}
+	}
+}
+
+func (h *connErrs) store(where string, err error) {
+	msg := err.Error()
+	if h.pass != "" {
+		msg = strings.ReplaceAll(msg, h.pass, "***")
+	}
+	h.last.Store(where + ": " + msg)
+	h.at.Store(time.Now().UnixNano())
+}
+
+func (h *connErrs) lastErr() string {
+	if h == nil || time.Since(time.Unix(0, h.at.Load())) > connErrTTL {
+		return ""
+	}
+	s, _ := h.last.Load().(string)
+	return s
+}
+
+func (h *connErrs) annotate(err error) error {
+	if err == nil || h == nil {
+		return err
+	}
+	if s := h.lastErr(); s != "" && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out")) {
+		return fmt.Errorf("%w (last broker connect error: %s)", err, s)
+	}
+	return err
+}
+
 type franzProducer struct {
-	cl *kgo.Client
+	conn *connErrs
+	cl   *kgo.Client
 	// wait bounds the caller's wait; franz-go can block past RecordDeliveryTimeout
 	// and ctx while it retries a metadata fetch against an unreachable cluster.
 	wait time.Duration
@@ -110,9 +218,9 @@ func (p franzProducer) produce(ctx context.Context, topic string, key, value []b
 	}()
 	select {
 	case err := <-done:
-		return err
+		return p.conn.annotate(err)
 	case <-ctx.Done():
-		return ctx.Err()
+		return p.conn.annotate(ctx.Err())
 	}
 }
 
@@ -143,28 +251,22 @@ func NewKafkaPublisher(c KafkaConfig) (*KafkaPublisher, error) {
 		kgo.ProducerLinger(0), // latency-first: each Publish is awaited individually
 	}
 	if c.TLS {
-		tc := &tls.Config{MinVersion: tls.VersionTLS12}
-		if c.TLSCAFile != "" {
-			pem, err := os.ReadFile(c.TLSCAFile)
-			if err != nil {
-				return nil, fmt.Errorf("read ASTRYON_KAFKA_TLS_CA_FILE: %w", err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pem) {
-				return nil, errors.New("ASTRYON_KAFKA_TLS_CA_FILE: no valid PEM certificates")
-			}
-			tc.RootCAs = pool
+		tc, err := c.tlsConfig()
+		if err != nil {
+			return nil, err
 		}
 		opts = append(opts, kgo.DialTLSConfig(tc))
 	}
 	if m := c.saslMechanism(); m != nil {
 		opts = append(opts, kgo.SASL(m))
 	}
+	ce := &connErrs{pass: c.SASLPass}
+	opts = append(opts, kgo.WithHooks(ce), kgo.WithLogger(ce))
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &KafkaPublisher{p: franzProducer{cl: cl, wait: c.DeliveryTimeout}}, nil
+	return &KafkaPublisher{p: franzProducer{conn: ce, cl: cl, wait: c.DeliveryTimeout}}, nil
 }
 
 // Publish returns nil only after durable broker acknowledgement.

@@ -26,7 +26,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("kafka: %v", err)
 	}
-	p := sink.NewPipeline(k, ch, k, sink.Options{
+	var intents sink.IntentStore
+	if cfg.IntentTable != "" {
+		in, err := sink.NewCHIntents(cfg)
+		if err != nil {
+			log.Fatalf("intents: %v", err)
+		}
+		intents = in
+		log.Printf("durable chunk boundaries enabled (table %s)", cfg.IntentTable)
+	}
+	p := sink.NewPipeline(k, ch, k, sink.Options{Intents: intents, IntentWait: cfg.IntentWait,
 		BatchSize: cfg.BatchSize, BatchInterval: cfg.BatchInterval, MaxRetries: cfg.MaxRetries,
 		RetryBackoff: cfg.RetryBackoff, RetryBackoffMax: cfg.RetryBackoffMax, ShutdownTimeout: cfg.ShutdownTimeout,
 	})

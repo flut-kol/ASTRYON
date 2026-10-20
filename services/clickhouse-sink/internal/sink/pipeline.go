@@ -20,6 +20,11 @@ type Options struct {
 	RetryBackoffMax time.Duration
 	ShutdownTimeout time.Duration
 	Now             func() time.Time
+	// Intents, when set, makes chunk boundaries durable: each chunk's offset range is recorded before insert and a
+	// restarted pipeline re-cuts the first chunk of a partition to the recorded range (same dedup token).
+	Intents IntentStore
+	// IntentWait bounds how long a flush is held waiting for a recorded range to be redelivered in full.
+	IntentWait time.Duration
 }
 
 // Pipeline: Source -> map -> batch -> Sink (+Quarantiner) -> commit.
@@ -31,6 +36,16 @@ type Pipeline struct {
 	M   *Metrics
 
 	buf []Message
+
+	// durable chunk boundaries
+	pending   map[partKey]Range // recorded range found for a partition and not yet applied
+	next      map[partKey]int64 // next expected offset after the last commit; mismatch => (re)look up intents
+	holdSince time.Time
+}
+
+type partKey struct {
+	topic string
+	part  int32
 }
 
 func NewPipeline(src Source, snk Sink, qr Quarantiner, opt Options) *Pipeline {
@@ -52,7 +67,11 @@ func NewPipeline(src Source, snk Sink, qr Quarantiner, opt Options) *Pipeline {
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
-	return &Pipeline{src: src, snk: snk, qr: qr, opt: opt, M: &Metrics{}}
+	if opt.IntentWait <= 0 {
+		opt.IntentWait = 30 * time.Second
+	}
+	return &Pipeline{src: src, snk: snk, qr: qr, opt: opt, M: &Metrics{},
+		pending: map[partKey]Range{}, next: map[partKey]int64{}}
 }
 
 // Token returns the deterministic insert_deduplication_token for a chunk:
@@ -89,11 +108,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			continue
 		}
 		if len(p.buf) >= p.opt.BatchSize || (len(p.buf) > 0 && !time.Now().Before(deadline)) {
-			if err := p.flush(ctx); err != nil {
+			held, err := p.flush(ctx)
+			if err != nil {
 				if ctx.Err() != nil {
 					continue // shutdown path flushes with a fresh context
 				}
 				return err
+			}
+			if held {
+				deadline = time.Now().Add(p.opt.BatchInterval) // keep polling until the recorded range is complete
+				continue
 			}
 		}
 		if !time.Now().Before(deadline) || len(p.buf) == 0 && len(msgs) == 0 {
@@ -109,7 +133,8 @@ func (p *Pipeline) shutdown() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), p.opt.ShutdownTimeout)
 	defer cancel()
-	if err := p.flush(ctx); err != nil {
+	p.holdSince = time.Time{} // if a recorded range is still incomplete the flush is held: nothing is committed and the buffer is redelivered
+	if _, err := p.flush(ctx); err != nil {
 		return fmt.Errorf("shutdown flush (offsets not committed, will be redelivered): %w", err)
 	}
 	return nil
@@ -117,83 +142,141 @@ func (p *Pipeline) shutdown() error {
 
 // flush maps, inserts, quarantines and commits the current buffer. On error the
 // buffer is kept (nothing committed) so the same call can be retried identically.
-func (p *Pipeline) flush(ctx context.Context) error {
+// held=true means nothing was done because a recorded chunk range is not fully buffered yet.
+func (p *Pipeline) flush(ctx context.Context) (held bool, err error) {
 	msgs := p.buf
 	now := p.opt.Now()
 
-	type group struct {
-		topic       string
-		part        int32
+	// Per-partition ordered messages.
+	byPart := map[partKey][]Message{}
+	var order []partKey
+	for _, m := range msgs {
+		k := partKey{m.Topic, m.Partition}
+		if _, ok := byPart[k]; !ok {
+			order = append(order, k)
+		}
+		byPart[k] = append(byPart[k], m)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		if order[i].topic != order[j].topic {
+			return order[i].topic < order[j].topic
+		}
+		return order[i].part < order[j].part
+	})
+	for _, k := range order {
+		sort.Slice(byPart[k], func(i, j int) bool { return byPart[k][i].Offset < byPart[k][j].Offset })
+	}
+
+	if p.opt.Intents != nil {
+		if held, err := p.prepareIntents(ctx, order, byPart); held || err != nil {
+			return held, err
+		}
+	}
+	p.holdSince = time.Time{}
+
+	type segment struct {
+		k           partKey
 		first, last int64
 		rows        [][]byte
+		recorded    bool // range came from a durable intent
 	}
-	groups := map[[2]int64]*group{}
-	topicIdx := map[string]int64{}
+	var segs []*segment
 	var bad []Quarantined
-	for _, m := range msgs {
-		ti, ok := topicIdx[m.Topic]
-		if !ok {
-			ti = int64(len(topicIdx))
-			topicIdx[m.Topic] = ti
+	for _, k := range order {
+		ms := byPart[k]
+		cut := int64(-1) // last offset of the first segment when an intent applies
+		if r, ok := p.pending[k]; ok && ms[0].Offset == r.First {
+			cut = r.Last
 		}
-		k := [2]int64{ti, int64(m.Partition)}
-		g := groups[k]
-		if g == nil {
-			g = &group{topic: m.Topic, part: m.Partition, first: m.Offset, last: m.Offset}
-			groups[k] = g
+		delete(p.pending, k)
+		var cur *segment
+		for _, m := range ms {
+			if cur == nil || (cut >= 0 && cur.recorded && m.Offset > cut) {
+				cur = &segment{k: k, first: m.Offset, recorded: cut >= 0 && cur == nil}
+				segs = append(segs, cur)
+			}
+			cur.last = m.Offset
+			line, code, reason := MapMessage(m, now)
+			if code != "" {
+				bad = append(bad, Quarantined{Msg: m, Code: code, Reason: reason})
+				continue
+			}
+			cur.rows = append(cur.rows, line)
 		}
-		if m.Offset < g.first {
-			g.first = m.Offset
-		}
-		if m.Offset > g.last {
-			g.last = m.Offset
-		}
-		line, code, reason := MapMessage(m, now)
-		if code != "" {
-			bad = append(bad, Quarantined{Msg: m, Code: code, Reason: reason})
-			continue
-		}
-		g.rows = append(g.rows, line)
 	}
-	keys := make([][2]int64, 0, len(groups))
-	for k := range groups {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i][0] != keys[j][0] {
-			return keys[i][0] < keys[j][0]
-		}
-		return keys[i][1] < keys[j][1]
-	})
 
-	for _, k := range keys {
-		g := groups[k]
-		if len(g.rows) == 0 {
+	for _, sg := range segs {
+		if len(sg.rows) == 0 {
 			continue
 		}
-		c := Chunk{Token: Token(g.topic, g.part, g.first, g.last), Topic: g.topic, Partition: g.part,
-			FirstOffset: g.first, LastOffset: g.last, Rows: g.rows}
+		if p.opt.Intents != nil && !sg.recorded {
+			rg := Range{sg.first, sg.last}
+			if err := p.retry(ctx, "record intent", func() error { return p.opt.Intents.Record(ctx, sg.k.topic, sg.k.part, rg) }); err != nil {
+				return false, err
+			}
+		}
+		c := Chunk{Token: Token(sg.k.topic, sg.k.part, sg.first, sg.last), Topic: sg.k.topic, Partition: sg.k.part,
+			FirstOffset: sg.first, LastOffset: sg.last, Rows: sg.rows}
 		if err := p.retry(ctx, "insert", func() error { return p.snk.Insert(ctx, c) }); err != nil {
 			p.M.InsertFailures.Add(1)
-			return err
+			return false, err
 		}
 		p.M.Inserted.Add(int64(len(c.Rows)))
 	}
 	if len(bad) > 0 {
 		if err := p.retry(ctx, "quarantine", func() error { return p.qr.Quarantine(ctx, bad) }); err != nil {
-			return err
+			return false, err
 		}
 		p.M.Quarantined.Add(int64(len(bad)))
 	}
 	if err := p.retry(ctx, "commit", func() error { return p.src.Commit(ctx, msgs) }); err != nil {
 		p.M.CommitFailures.Add(1)
-		return err
+		return false, err
+	}
+	for _, k := range order {
+		ms := byPart[k]
+		p.next[k] = ms[len(ms)-1].Offset + 1
 	}
 	p.M.Commits.Add(1)
 	p.M.Batches.Add(1)
 	p.buf = nil
 	p.M.Buffered.Store(0)
-	return nil
+	return false, nil
+}
+
+// prepareIntents looks up the latest recorded range of every partition whose buffered offsets do not continue from
+// the last commit (first sight, restart, rebalance) and decides whether the buffer holds the whole recorded range.
+// A recorded range is applied only if the buffer starts exactly at its first offset; a range that starts earlier
+// than the buffer was already committed and is dropped. If the range is not fully buffered the flush is held, up to
+// IntentWait, after which the range is abandoned (rows may then be stored twice; readers dedup via LIMIT 1 BY).
+func (p *Pipeline) prepareIntents(ctx context.Context, order []partKey, byPart map[partKey][]Message) (bool, error) {
+	for _, k := range order {
+		ms := byPart[k]
+		first, last := ms[0].Offset, ms[len(ms)-1].Offset
+		if n, ok := p.next[k]; !ok || n != first {
+			r, found, err := p.opt.Intents.Latest(ctx, k.topic, k.part)
+			if err != nil {
+				return false, fmt.Errorf("load intent: %w", err)
+			}
+			delete(p.pending, k)
+			if found && r.First == first {
+				p.pending[k] = r
+			}
+			p.next[k] = first // looked up for this position; do not repeat while the flush is held
+		}
+		if r, ok := p.pending[k]; ok && last < r.Last {
+			if p.holdSince.IsZero() {
+				p.holdSince = time.Now()
+			}
+			if time.Since(p.holdSince) < p.opt.IntentWait {
+				return true, nil
+			}
+			log.Printf("recorded chunk %s/%d [%d,%d] not redelivered within %s; abandoning (possible duplicate rows)",
+				k.topic, k.part, r.First, r.Last, p.opt.IntentWait)
+			delete(p.pending, k)
+		}
+	}
+	return false, nil
 }
 
 func (p *Pipeline) retry(ctx context.Context, what string, fn func() error) error {

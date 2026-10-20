@@ -55,12 +55,20 @@ type Config struct {
 	Audience    string
 	Environment string
 	AllowedAZP  []string
-	TokenType   string
+	// TokenType is the expected `typ` claim. Empty accepts the two values real AAS (Keycloak)
+	// access tokens and RFC 9068 use: "Bearer" and "at+jwt". ID tokens ("ID") and DPoP-bound
+	// tokens ("DPoP", unsupported here) are always rejected unless named explicitly.
+	TokenType string
 
 	JWKSCacheTTL time.Duration
-	ClockSkew    time.Duration
-	HTTPClient   *http.Client
-	Now          func() time.Time
+	// JWKSMinRefresh bounds how often an unknown kid or a failing AAS may trigger a JWKS fetch
+	// (default 10s). JWKSMaxStale is how long an expired cache may keep verifying while AAS is
+	// unreachable (default 1h); tokens are still checked against exp.
+	JWKSMinRefresh time.Duration
+	JWKSMaxStale   time.Duration
+	ClockSkew      time.Duration
+	HTTPClient     *http.Client
+	Now            func() time.Time
 }
 
 type discovery struct {
@@ -77,9 +85,11 @@ type Verifier struct {
 	issuer  string
 	jwksURI string
 
-	mu        sync.Mutex
-	keys      map[string]crypto.PublicKey
-	expiresAt time.Time
+	mu          sync.Mutex
+	keys        map[string]crypto.PublicKey
+	expiresAt   time.Time
+	lastUnknown time.Time // last refresh triggered by an unknown kid
+	lastFailed  time.Time // last failed refresh
 }
 
 // NewVerifier loads OIDC discovery and the initial JWKS. Discovery issuer must
@@ -101,8 +111,11 @@ func NewVerifier(ctx context.Context, cfg Config) (*Verifier, error) {
 	if cfg.ClockSkew < 0 {
 		return nil, errors.New("auth: ClockSkew must not be negative")
 	}
-	if cfg.TokenType == "" {
-		cfg.TokenType = "at+jwt"
+	if cfg.JWKSMinRefresh <= 0 {
+		cfg.JWKSMinRefresh = 10 * time.Second
+	}
+	if cfg.JWKSMaxStale <= 0 {
+		cfg.JWKSMaxStale = time.Hour
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
@@ -151,7 +164,7 @@ func (v *Verifier) principal(claims map[string]any) (Principal, error) {
 	if !ok || issuer != v.issuer || !audienceContains(claims["aud"], v.cfg.Audience) {
 		return Principal{}, ErrUnauthenticated
 	}
-	if stringClaim(claims, "env") != v.cfg.Environment || stringClaim(claims, "typ") != v.cfg.TokenType {
+	if stringClaim(claims, "env") != v.cfg.Environment || !v.typeAllowed(stringClaim(claims, "typ")) {
 		return Principal{}, ErrUnauthenticated
 	}
 	if len(v.cfg.AllowedAZP) > 0 && !contains(v.cfg.AllowedAZP, stringClaim(claims, "azp")) {
@@ -177,15 +190,43 @@ func (v *Verifier) principal(claims map[string]any) (Principal, error) {
 	return p, nil
 }
 
+func (v *Verifier) typeAllowed(typ string) bool {
+	if v.cfg.TokenType != "" {
+		return typ == v.cfg.TokenType
+	}
+	return typ == "Bearer" || typ == "at+jwt"
+}
+
 func (v *Verifier) key(ctx context.Context, kid string) (crypto.PublicKey, error) {
+	now := v.cfg.Now()
 	v.mu.Lock()
 	key := v.keys[kid]
-	fresh := v.cfg.Now().Before(v.expiresAt)
+	fresh := now.Before(v.expiresAt)
+	stale := key != nil && !fresh && now.Before(v.expiresAt.Add(v.cfg.JWKSMaxStale))
+	recentFail := !v.lastFailed.IsZero() && now.Sub(v.lastFailed) < v.cfg.JWKSMinRefresh
+	if key == nil {
+		// Unknown kid: refetch at most once per JWKSMinRefresh so forged kids cannot flood AAS.
+		if !v.lastUnknown.IsZero() && now.Sub(v.lastUnknown) < v.cfg.JWKSMinRefresh {
+			v.mu.Unlock()
+			return nil, errors.New("auth: unknown kid")
+		}
+		v.lastUnknown = now
+	}
 	v.mu.Unlock()
 	if key != nil && fresh {
 		return key, nil
 	}
+	if stale && recentFail {
+		return key, nil
+	}
 	if err := v.refresh(ctx); err != nil {
+		v.mu.Lock()
+		v.lastFailed = now
+		v.mu.Unlock()
+		if stale {
+			// AAS unreachable: keep verifying with the cached key (exp is still enforced).
+			return key, nil
+		}
 		return nil, err
 	}
 	v.mu.Lock()
