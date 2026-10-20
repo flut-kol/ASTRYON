@@ -91,11 +91,29 @@ type kafkaProducer interface {
 	close()
 }
 
-type franzProducer struct{ cl *kgo.Client }
+type franzProducer struct {
+	cl *kgo.Client
+	// wait bounds the caller's wait; franz-go can block past RecordDeliveryTimeout
+	// and ctx while it retries a metadata fetch against an unreachable cluster.
+	wait time.Duration
+}
 
 func (p franzProducer) produce(ctx context.Context, topic string, key, value []byte) error {
-	// ProduceSync blocks until the record is acked or permanently failed.
-	return p.cl.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: key, Value: value}).FirstErr()
+	ctx, cancel := context.WithTimeout(ctx, p.wait)
+	defer cancel()
+	// ProduceSync blocks until the record is acked or permanently failed; run it aside so the
+	// caller gets "no ack" at the deadline. The record may still land later: clients must retry
+	// with the same Idempotency-Key (stable event_id), so a late write is a deduplicated duplicate.
+	done := make(chan error, 1)
+	go func() {
+		done <- p.cl.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: key, Value: value}).FirstErr()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (p franzProducer) close() { p.cl.Close() }
@@ -146,7 +164,7 @@ func NewKafkaPublisher(c KafkaConfig) (*KafkaPublisher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &KafkaPublisher{p: franzProducer{cl}}, nil
+	return &KafkaPublisher{p: franzProducer{cl: cl, wait: c.DeliveryTimeout}}, nil
 }
 
 // Publish returns nil only after durable broker acknowledgement.

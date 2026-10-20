@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/astryon/gateway/internal/gateway"
+	goauth "github.com/astryon/go-common/auth"
 )
 
 func main() {
@@ -17,7 +18,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var auth gateway.Authenticator = gateway.AASJWTAuthenticator{} // stub: rejects everything
+	var auth gateway.Authenticator = gateway.AASJWTAuthenticator{} // rejects everything unless AAS_BASE_URL or dev auth is set
+	if os.Getenv("AAS_BASE_URL") != "" {
+		v, err := goauth.NewVerifier(context.Background(), aasConfig(os.Getenv))
+		if err != nil {
+			log.Fatalf("aas: %v", err)
+		}
+		auth = aasAuthenticator{v}
+	}
 	if cfg.DevAuth {
 		log.Println("WARNING: ASTRYON_DEV_AUTH=1 static dev authenticator enabled; never use outside dev")
 		auth = gateway.DevStaticAuthenticator{Token: cfg.DevToken, Principal: gateway.Principal{TenantID: cfg.DevTenantID, Scopes: cfg.DevScopes}}

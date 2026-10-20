@@ -55,7 +55,8 @@ func (d DevStaticAuthenticator) Authenticate(r *http.Request) (Principal, error)
 // AASJWTAuthenticator is a STUB for AAS access-token verification
 // (docs/architecture/authentication.md). It always rejects (fail closed).
 //
-// TODO(DPP-auth): replace with the shared libs/go-common/auth middleware:
+// Production auth is wired in cmd/gateway/aas.go via libs/go-common/auth (AAS_BASE_URL set); this stub is the fail-closed default.
+// Original TODO(DPP-auth) scope, now covered by go-common except DPoP/L3:
 // OIDC discovery from AAS_BASE_URL, JWKS verification (bounded cache), iss/aud/
 // exp/nbf/jti/typ/env/azp checks, DPoP proof, scopes and signed tenant_id claim
 // mapped into Principal. Do not implement ad-hoc JWT parsing here.
