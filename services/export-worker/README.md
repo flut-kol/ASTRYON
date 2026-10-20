@@ -18,6 +18,8 @@ It has an HTTP layer and either an in-memory or a durable PostgreSQL job store/q
 - Env: `LISTEN_ADDR` (:8083) `EXPORT_WORKERS` (2) `CH_URL CH_DATABASE CH_USER CH_PASSWORD` `S3_ENDPOINT S3_BUCKET S3_REGION S3_ACCESS_KEY S3_SECRET_KEY`
   `EXPORT_MAX_PER_DAY` `EXPORT_MAX_CONCURRENT_PER_TENANT` `EXPORT_URL_TTL_SECONDS` `AAS_*`
   `EXPORT_PG_URL` (enables durable jobs + quota + the dispatcher; unset = in-memory with a warning log) `EXPORT_WORKER_ID` (default hostname-pid, unique per replica) `EXPORT_LEASE_SECONDS` (60)
+  `EXPORT_CH_IDLE_TIMEOUT` (30s) / `EXPORT_CH_MAX_DURATION` (15m): ClickHouse stream timeouts, `0` = off, value as Go duration or bare seconds (see 'Timeouts, zombie runs, outages').
+  `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters).
   `EXPORT_SWEEP_SECONDS` (300, 0 = off) / `EXPORT_SWEEP_GRACE_SECONDS` (60): orphan multipart-upload sweeper (dispatcher mode, see 'Failure modes').
 - Docker: `docker build -f services/export-worker/Dockerfile -t astryon/export-worker .` (repo root context).
 - Verified: httptest suite with fakes under `-race` (401/403, tenant in body 400, cross-tenant 404, quota 429, lifecycle,
@@ -146,7 +148,7 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
   stream) are now `clickhouse_error` (a cancelled context stays `shutdown`/`timeout`).
 - `docker kill` of ClickHouse mid-stream: FAILED `clickhouse_error` 0.6-1.5 s later, no object, 0 uploads; a job posted while CH is down fails at once
   (`clickhouse_error`, nothing written); after `docker start` CH answers `/ping` 0.7-3.9 s later and the next job SUCCEEDED (~170 ms job) 0.9-4.2 s after the start.
-  NOT covered: a CH that hangs (no data, no reset): the read has no idle timeout, only `max_execution_time` (600 s) and the 1 h job timeout bound it.
+  A CH that hangs without closing the connection is now bounded by the idle/max-duration timeouts (next section).
 - PostgreSQL `docker restart` (1.5-6.7 s) with 8 jobs x 259 200 rows (2 workers x 2 runners; running + queued): the workers did not crash, the log stays small
   (heartbeat failure logged once per outage, "queue reachable again after ..."), all 8 jobs SUCCEEDED (the running ones kept streaming and the terminal
   write was retried until PG came back), each audited exactly once, new work served 170-210 ms after PG was back. All terminal 32-53 s after the disruption (job duration dominates).
@@ -158,7 +160,7 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
   visible at check time (the zombie run is not cancelled when the lease is lost, so it can still finish and leave an unreferenced object later). Recovery time: new job served 170 ms after PG up.
   Fixes: terminal write retried with jittered backoff for up to `FinishRetry` (2 min, then the job is abandoned: heartbeats for it stop so recovery fails it
   `worker_lost`; before: ONE attempt, then the job stayed RUNNING and was heartbeated forever); every claim/heartbeat/recover has a 15 s timeout (before: a hung PG blocked
-  the runner and the shutdown); heartbeat failures are logged once per outage. NOT verified: goroutine count (no pprof endpoint; the unit tests cover the bounded retry), PG failover/replicas, outages longer than `FinishRetry`.
+  the runner and the shutdown); heartbeat failures are logged once per outage. Zombie runs, goroutine leaks and outages longer than `FinishRetry` are handled in the next section. NOT verified: PG failover/replicas.
 - SIGTERM mid-export: (a) ~5 s export: the listener closes at once, the worker waits, the job ends SUCCEEDED, exit 2.5-3.3 s after SIGTERM, 0 uploads left.
   (b) S3 stalled (MinIO `docker pause`) so the job cannot finish: the worker waits the 25 s deadline, cancels, aborts the upload (the abort gets through when S3 returns
   within its 30 s timeout), marks the job FAILED `shutdown`, exits 26.1 s after SIGTERM; no object, 0 uploads. NOT covered: S3 down for the whole abort window (then the
@@ -178,6 +180,36 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
   another bucket name, the tenant directory, `exports/`, the bucket root with and without `?list-type=2&prefix=...` (no listing), 400 for `../` traversal;
   PUT, DELETE, HEAD -> 403 and POST -> 400 with the GET URL; the object stays readable through its own URL.
 - Regression tests without Docker: `guard`/`errCode` for the exception line (also split across chunks), finish retry and abandon, heartbeat-before-recovery, sweeper decisions.
+
+## Timeouts, zombie runs, outages (`robust_test.go`, `dispatcher.go`, `worker.go`, `cmd/export-worker/debug.go`)
+- ClickHouse stall: the response body has an idle watchdog (`EXPORT_CH_IDLE_TIMEOUT`, default 30 s; the clock runs only inside a ClickHouse `Read`, so a slow S3
+  never trips it) and the whole request has `EXPORT_CH_MAX_DURATION` (default 15 m). Either fails the job with `error_code` `clickhouse_timeout` (audit text says idle / max duration),
+  the reader error makes the store abort the multipart upload, the partial object is deleted. A stall BEFORE the response headers is bounded only by the max duration
+  (ClickHouse may legitimately compute a long time before its first byte).
+- Zombie run: `PGJobStore.HeartbeatOwned` returns the ids whose lease was extended; the dispatcher cancels every running job missing from it (cause `ErrLeaseLost`, log
+  `ALERT export_lease_lost`, `export_lease_lost_total`), the run aborts its upload and deletes its partial object, nothing is written for the job. If the run finished anyway and
+  `Finish` is rejected by the owner guard, the object is deleted (`ALERT export_finish_rejected`). A job whose heartbeat cannot reach PG is NOT cancelled locally (the lease is a
+  DB clock; only the DB can say it is gone): it keeps running and learns the truth at the first heartbeat or `Finish` after PG is back.
+- PG outage longer than `EXPORT_FINISH_RETRY`: defined behaviour = abandon. The result is not written, the job is no longer heartbeated, the runner is free, the log has
+  `ALERT export_job_abandoned job=... tenant=... status=... key=...` and `export_jobs_abandoned_total` increments; after PG returns, recovery marks the job FAILED `worker_lost`.
+  The object is NOT deleted on abandon (a commit whose reply was lost would otherwise point a SUCCEEDED job at a deleted object): it is left to the S3 lifecycle rule; the log line
+  carries the key for reconciliation. Note the retry budget is checked only between attempts and one attempt can take the 15 s op timeout on a hung PG.
+- Alert on: log `ALERT export_job_abandoned` / `ALERT export_lease_lost` / `ALERT export_finish_rejected`, or (with `EXPORT_PPROF_ADDR=127.0.0.1:6060`) `curl 127.0.0.1:6060/debug/vars`:
+  `export_jobs_abandoned_total`, `export_lease_lost_total`, `export_finish_rejected_total`, `export_clickhouse_timeouts_total`. `EXPORT_PPROF_ADDR` is refused at startup unless it is a loopback host.
+- Docker-free tests (`-race`): idle timeout, max duration, slow consumer does not trip idle, lease lost cancels the run and writes nothing, rejected finish deletes the object,
+  abandon -> recovery `worker_lost` + alert line, and `TestNoGoroutineLeakAcrossJobOutcomes` (8 rounds x success / ClickHouse 500 / idle timeout / max duration / lease lost / finish rejected / shutdown,
+  `runtime.NumGoroutine` back to the baseline).
+- Verified LIVE (`TestE2ETimeoutsAndLeaseLoss`, `EXPORT_E2E=1`, ~60 s, lease 3 s, laptop Docker Desktop arm64):
+  - `docker pause` ClickHouse mid-stream, idle timeout 3 s: FAILED `clickhouse_timeout` 3.1-3.2 s after the pause, upload aborted at once, no object, next job SUCCEEDED 160-280 ms after unpause.
+  - pause with the idle timeout off and max duration 8 s: FAILED `clickhouse_timeout` 8.1 s after POST, no object, 0 uploads.
+  - zombie, lease lost while running (worker A's PG link cut by a TCP proxy, MinIO paused so the upload stays in flight): worker B failed the job `worker_lost` 2.97 s after the cut; A cancelled the run 0.46 s
+    after its link returned; the multipart upload was aborted immediately after MinIO resumed; no object; A served a new job 170 ms later.
+  - zombie that finishes (link cut for the whole ~4 s job): B failed it `worker_lost` 2.9 s after the cut, A had written the full object 3.9 s after the cut, 0.52 s after the link returned the owner guard rejected
+    A's Finish and the object was deleted.
+  - `docker pause` PostgreSQL for the rest of a job with `EXPORT_FINISH_RETRY=8s`: job abandoned 17.5 s after the pause (alert line logged), 200 ms after the unpause recovery set `worker_lost`, worker alive, new job
+    served in 160 ms; the finished object is left (lifecycle rule).
+- NOT verified: goroutine count in the real binary (only the in-process test; `EXPORT_PPROF_ADDR` starts but was not scraped during a long soak); PG failover/replicas; the lease-lost detection when the heartbeat cannot reach PG
+  (by design not cancelled); reconciliation/deletion of the object of an abandoned job; a CH stall before the response headers (only the max duration applies); the S3 lifecycle rule.
 
 ## Remaining proposal (not implemented)
 ```sql

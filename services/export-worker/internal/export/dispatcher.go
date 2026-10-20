@@ -255,8 +255,7 @@ func (d *Dispatcher) execute(j Job) {
 		if errors.Is(context.Cause(lctx), ErrLeaseLost) {
 			// Run already aborted the upload and deleted the partial object. Another replica failed the job
 			// (worker_lost), so there is nothing to write.
-			Counters.LeaseLost.Add(1)
-			log.Printf("ALERT export_lease_lost job=%s tenant=%s: lease lost, run cancelled, partial output removed", j.ID, j.TenantID)
+			log.Printf("export_lease_lost_cleanup_done job=%s tenant=%s: run stopped, upload aborted, partial output removed, nothing written", j.ID, j.TenantID)
 			return
 		}
 		if errors.Is(err, ErrCHTimeout) {
@@ -301,6 +300,9 @@ func (d *Dispatcher) cancelLost(owned []string) {
 	defer d.runMu.Unlock()
 	for id, c := range d.running {
 		if _, ok := set[id]; !ok {
+			// Logged and counted at once: the run's cleanup (abort upload, delete object) may take a while.
+			Counters.LeaseLost.Add(1)
+			log.Printf("ALERT export_lease_lost job=%s: heartbeat shows the lease is gone (recovered by another replica); cancelling the run", id)
 			c(ErrLeaseLost)
 			delete(d.running, id)
 		}
