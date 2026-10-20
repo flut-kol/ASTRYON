@@ -32,9 +32,28 @@ using keys generated in the test; no secret is stored in the repo. Everything cr
 - query-api built and run: 401 without token, 403 without `astryon:query:read`, 200 with it; tenant reaching the
   ClickHouse stub equals the claim even when a conflicting `X-Tenant-ID` header is sent.
 
+## Introspection and revocation (L3), `introspect_test.go`
+
+`auth.Introspector` (`libs/go-common/auth/introspect.go`) against the real AAS, `private_key_jwt` ES256, endpoints from discovery
+(`introspection_endpoint`, `revocation_endpoint`; on the Keycloak deployment these are `.../protocol/openid-connect/token/introspect` and `/revoke`).
+Proven: active token -> `active=true` with the same `tenant_id`, `sub`, `client_id`, `jti`, `scope` as the verified principal;
+after `/revoke` the token still passes local signature/exp verification but introspection gives `active=false` and `RequireActive` answers 401;
+a 3 s token is `active=false` after expiry; garbage token -> `active=false`; a client that is not in the token audience gets `active=false`.
+Finding vs docs: Keycloak 26.8.1 returns `active=false` (not an error) to a client that is not in the token `aud`, even for the
+client that was issued the token, so an L3 resource server must be an audience of the tokens it introspects (the reference gateway's
+client id is the audience URI; the test adds an audience mapper to its throw-away client). The docs do not state this requirement.
+Revocation only works for tokens of the authenticating client. Caveat: positive results are cached (default 10 s), so revocation is seen
+within that window; negative results 30 s.
+
+Local procedure used (reference deployment copied to a temp dir, never into this repo): copy it to `/private/tmp/claude-501/aas-run2`
+without `.venv`/`.git`; in the copy change the compose host ports to `127.0.0.1:18443`/`19443`, set `.env` `KC_HOSTNAME=https://localhost:18443`
+and `KC_FRONTEND_URL=https://localhost:18443`; `docker compose -p chagg-aasi up -d postgres keycloak`, wait for `https://localhost:19443/health/ready`,
+`docker compose -p chagg-aasi --profile config run --rm keycloak-config` (re-run after changing `KC_FRONTEND_URL`, the realm stores it);
+then set the `AAS_LIVE_*` variables with `AAS_LIVE_CA_FILE=<copy>/certs/ca.crt`. Tear down with `docker compose -p chagg-aasi down -v` and remove the copy.
+
 ## Not proven
 
-DPoP-bound tokens (`typ=DPoP`, unsupported by the verifier, rejected by design), introspection/revocation (L3),
+DPoP-bound tokens (`typ=DPoP`, unsupported by the verifier, rejected by design; plan: `docs/architecture/dpop-plan.md`),
 token exchange and `X-AAS-Subject`, the AAS proxy (`/oauth2/*` addresses), production deployment
 behind a reverse proxy path (`/sso`), browser/user tokens, other adapters (gateway, export-worker,
 replay-controller) end to end, RS256 realm keys, ClickHouse itself (stubbed).
