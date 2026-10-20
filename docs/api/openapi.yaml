@@ -1,0 +1,461 @@
+openapi: 3.1.0
+info:
+  title: ASTRYON Query & Admin Read API
+  version: 1.0.0
+  description: |
+    Read API served by `services/query-api` (DPP-029): structured event search, whitelisted aggregates and
+    the read endpoints used by the Admin UI. Ingestion (`/v1/events`) is served by the gateway and is not
+    part of this document.
+
+    **Tenancy.** The tenant is taken exclusively from the validated access token (`tenant_id` claim). No
+    request header, query parameter or body field can select or override it; unknown body fields are
+    rejected with 400. **No arbitrary SQL**: only the structured filters, group-bys and metrics below exist.
+
+    **Errors.** Every non-2xx response is an `Error` object. `trace_id` equals the `X-Request-ID` response
+    header. **Rate limit.** Per tenant; exceeding it returns 429 with `Retry-After` (seconds).
+
+    **Pagination.** Cursor based. `next_cursor` is opaque, HMAC-signed, bound to tenant + resource + the exact
+    filters, and expires after 15 minutes; send it back unchanged with the same filters. A cursor that is
+    tampered, expired or reused with different filters yields 400 `CURSOR_INVALID`.
+
+    **Deduplication.** Event reads are deduplicated by (source_id, event_id), keeping the highest
+    `processing_version`. Aggregates count `uniqExact(event_id)`.
+servers:
+  - url: http://localhost:8083
+    description: local dev (ASTRYON_QUERY_ADDR)
+security:
+  - bearerAuth: []
+tags:
+  - name: query
+  - name: admin
+  - name: ops
+paths:
+  /v1/query/events:
+    post:
+      tags: [query]
+      operationId: queryEvents
+      summary: Search events (structured filters, time range, cursor pagination)
+      description: Requires scope `astryon:events:read`.
+      parameters: [{$ref: '#/components/parameters/RequestId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/EventsQueryRequest'}
+            example:
+              time_range: {from: '2026-09-30T00:00:00Z', to: '2026-10-01T00:00:00Z'}
+              filters: {event_types: [order.created], attributes: {region: eu}}
+              limit: 100
+      responses:
+        '200':
+          description: One page of events, ordered by (event_time, event_id).
+          headers: {X-Request-ID: {$ref: '#/components/headers/XRequestId'}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EventsPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/query/aggregate:
+    post:
+      tags: [query]
+      operationId: queryAggregate
+      summary: Whitelisted aggregates with group-by
+      description: |
+        Requires scope `astryon:events:read`. Result is capped at `limit` rows (max 1000); `truncated` is
+        true if more groups exist (narrow the range or filters). Rows are ordered by the group-by keys.
+      parameters: [{$ref: '#/components/parameters/RequestId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AggregateRequest'}
+            example:
+              time_range: {from: '2026-09-30T00:00:00Z', to: '2026-10-01T00:00:00Z'}
+              group_by: [day, event_type]
+              metrics: [events, entities]
+      responses:
+        '200':
+          description: Aggregate rows.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AggregateResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/metrics/summary:
+    get:
+      tags: [admin]
+      operationId: getMetricsSummary
+      summary: Ingestion/business metrics summary
+      description: |
+        Requires scope `astryon:metrics:read`. Built from the hourly aggregate tables (latest revision of the
+        active processing_version per source+hour), so replays do not double-count.
+      parameters:
+        - {$ref: '#/components/parameters/RequestId'}
+        - {$ref: '#/components/parameters/From'}
+        - {$ref: '#/components/parameters/To'}
+        - {$ref: '#/components/parameters/SourceId'}
+      responses:
+        '200':
+          description: Summary.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MetricsSummary'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/quality/summary:
+    get:
+      tags: [admin]
+      operationId: getQualitySummary
+      summary: Data quality summary (valid/rejected/flagged, flags, top errors)
+      description: Requires scope `astryon:metrics:read`. Days are UTC dates covering [from, to].
+      parameters:
+        - {$ref: '#/components/parameters/RequestId'}
+        - {$ref: '#/components/parameters/From'}
+        - {$ref: '#/components/parameters/To'}
+        - {$ref: '#/components/parameters/SourceId'}
+      responses:
+        '200':
+          description: Summary.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QualitySummary'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/sources:
+    get:
+      tags: [admin]
+      operationId: listSources
+      summary: List data sources (newest first)
+      description: Requires scope `astryon:sources:read`. Soft-deleted sources are excluded; no config or credentials are returned.
+      parameters:
+        - {$ref: '#/components/parameters/RequestId'}
+        - {$ref: '#/components/parameters/PageLimit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: One page of sources.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourcesPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /v1/jobs:
+    get:
+      tags: [admin]
+      operationId: listJobs
+      summary: List batch/stream jobs (newest first)
+      description: Requires scope `astryon:jobs:read`.
+      parameters:
+        - {$ref: '#/components/parameters/RequestId'}
+        - {$ref: '#/components/parameters/PageLimit'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/JobStatus'}
+        - {$ref: '#/components/parameters/SourceId'}
+      responses:
+        '200':
+          description: One page of jobs.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/JobsPage'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness/readiness (ClickHouse and PostgreSQL reachability)
+      security: []
+      responses:
+        '200':
+          description: All dependencies reachable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+        '503':
+          description: A dependency is down.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Health'}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: AAS access token (docs/architecture/authentication.md). Audience = ASTRYON_AAS_AUDIENCE. Scopes per operation are listed in each description.
+  headers:
+    XRequestId:
+      description: Request correlation id (echoed from the request if valid, else generated). Equals `trace_id` in errors.
+      schema: {type: string, maxLength: 128}
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema: {type: string, maxLength: 128}
+    From:
+      name: from
+      in: query
+      description: Range start (RFC 3339). Default `to` minus 24h.
+      schema: {type: string, format: date-time}
+    To:
+      name: to
+      in: query
+      description: Range end, exclusive (RFC 3339). Default now. Max range 90 days.
+      schema: {type: string, format: date-time}
+    SourceId:
+      name: source_id
+      in: query
+      schema: {type: string, format: uuid}
+    PageLimit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 200, default: 100}
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque `next_cursor` from the previous page (same filters).
+      schema: {type: string, maxLength: 1024}
+  responses:
+    BadRequest:
+      description: Invalid request (`REQUEST_INVALID`, `BODY_INVALID`, `CURSOR_INVALID`).
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unauthorized:
+      description: Missing/invalid token (`UNAUTHENTICATED`).
+      headers: {WWW-Authenticate: {schema: {type: string}}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Forbidden:
+      description: Token lacks the required scope or a valid tenant (`FORBIDDEN`).
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    TooLarge:
+      description: Request body over 64 KiB (`BODY_TOO_LARGE`).
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    RateLimited:
+      description: Per-tenant rate limit exceeded (`RATE_LIMITED`).
+      headers:
+        Retry-After: {description: Seconds to wait., schema: {type: integer, minimum: 1}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unavailable:
+      description: ClickHouse/PostgreSQL unavailable (`UPSTREAM_UNAVAILABLE`); retry after `Retry-After`.
+      headers:
+        Retry-After: {schema: {type: integer}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    Error:
+      type: object
+      required: [code, message, trace_id]
+      properties:
+        code: {type: string, examples: [REQUEST_INVALID]}
+        message: {type: string}
+        details: {description: Optional machine-readable context.}
+        trace_id: {type: string}
+    TimeRange:
+      type: object
+      required: [from, to]
+      description: '`from` inclusive, `to` exclusive; to-from must be > 0 and <= 90 days.'
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+    EventFilters:
+      type: object
+      additionalProperties: false
+      properties:
+        source_ids: {type: array, maxItems: 20, items: {type: string, format: uuid}}
+        event_types: {type: array, maxItems: 20, items: {type: string, minLength: 1, maxLength: 256}}
+        entity_id: {type: string, maxLength: 256}
+        processing_version: {type: integer, minimum: 0}
+        attributes:
+          type: object
+          maxProperties: 5
+          description: Exact-match filters on event attributes (all must match).
+          additionalProperties: {type: string, maxLength: 256}
+    EventsQueryRequest:
+      type: object
+      additionalProperties: false
+      required: [time_range]
+      properties:
+        time_range: {$ref: '#/components/schemas/TimeRange'}
+        filters: {$ref: '#/components/schemas/EventFilters'}
+        order: {type: string, enum: [desc, asc], default: desc}
+        include_payload: {type: boolean, default: false, description: Include the (large) normalized payload string.}
+        limit: {type: integer, minimum: 1, maximum: 1000, default: 100}
+        cursor: {type: string, maxLength: 1024, description: 'Opaque; must be sent with identical time_range/filters/order/include_payload.'}
+    Event:
+      type: object
+      required: [event_id, source_id, batch_id, processing_version, event_type, event_time, ingested_at, entity_id, attributes, quality_flags]
+      properties:
+        event_id: {type: string, format: uuid}
+        source_id: {type: string, format: uuid}
+        batch_id: {type: string, format: uuid}
+        processing_version: {type: integer}
+        event_type: {type: string}
+        event_time: {type: string, format: date-time}
+        ingested_at: {type: string, format: date-time}
+        entity_id: {type: string}
+        attributes: {type: object, additionalProperties: {type: string}}
+        quality_flags: {type: array, items: {type: string}}
+        payload: {type: string, description: Present only when include_payload=true (normalized JSON as string).}
+    EventsPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Event'}}
+        next_cursor: {type: [string, 'null'], description: Null on the last page.}
+    AggregateRequest:
+      type: object
+      additionalProperties: false
+      required: [time_range]
+      properties:
+        time_range: {$ref: '#/components/schemas/TimeRange'}
+        filters: {$ref: '#/components/schemas/EventFilters'}
+        group_by:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items: {type: string, enum: [source_id, event_type, processing_version, day, hour]}
+        metrics:
+          type: array
+          uniqueItems: true
+          default: [events]
+          items: {type: string, enum: [events, entities, first_event_time, last_event_time]}
+          description: events = distinct event_id; entities = distinct non-empty entity_id.
+        limit: {type: integer, minimum: 1, maximum: 1000, default: 100}
+    AggregateResult:
+      type: object
+      required: [rows, truncated]
+      properties:
+        rows:
+          type: array
+          description: |
+            Each row has the requested group_by keys (`day`/`hour` as ClickHouse date strings
+            `YYYY-MM-DD` / `YYYY-MM-DD hh:mm:ss`) and metrics (`events`, `entities` integers;
+            `first_event_time`/`last_event_time` RFC 3339).
+          items: {type: object, additionalProperties: true}
+        truncated: {type: boolean}
+    SourceMetrics:
+      type: object
+      required: [source_id, events, bytes, batches, errors, max_ingest_lag_ms]
+      properties:
+        source_id: {type: string}
+        events: {type: integer}
+        bytes: {type: integer}
+        batches: {type: integer}
+        errors: {type: integer}
+        max_ingest_lag_ms: {type: integer}
+    MetricsSummary:
+      type: object
+      required: [from, to, totals, by_source, series]
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        totals:
+          allOf: [{$ref: '#/components/schemas/SourceMetrics'}]
+          description: Sums over by_source (source_id is empty).
+        by_source: {type: array, items: {$ref: '#/components/schemas/SourceMetrics'}, description: Top 200 sources by events.}
+        series:
+          type: array
+          description: Hourly totals, ascending.
+          items:
+            type: object
+            required: [hour, events, errors]
+            properties:
+              hour: {type: string, format: date-time}
+              events: {type: integer}
+              errors: {type: integer}
+    QualitySummary:
+      type: object
+      required: [from, to, events_total, events_valid, events_rejected, events_with_flags, flags, top_errors]
+      properties:
+        from: {type: string, format: date-time}
+        to: {type: string, format: date-time}
+        events_total: {type: integer}
+        events_valid: {type: integer}
+        events_rejected: {type: integer}
+        events_with_flags: {type: integer}
+        flags:
+          type: array
+          items:
+            type: object
+            required: [flag, count]
+            properties: {flag: {type: string}, count: {type: integer}}
+        top_errors:
+          type: array
+          description: Top 20 processing error codes in range.
+          items:
+            type: object
+            required: [error_code, stage, count]
+            properties: {error_code: {type: string}, stage: {type: string}, count: {type: integer}}
+    Source:
+      type: object
+      required: [id, name, kind, is_enabled, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        kind: {type: string, enum: [kafka, http_push, s3_files, sftp, database, api_pull]}
+        is_enabled: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    SourcesPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Source'}}
+        next_cursor: {type: [string, 'null']}
+    JobStatus:
+      type: string
+      enum: [NEW, QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED]
+    Job:
+      type: object
+      required: [id, kind, status, source_id, batch_id, attempt_count, max_attempts, events_processed, events_failed, last_error, created_at, started_at, finished_at]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, examples: [process_file]}
+        status: {$ref: '#/components/schemas/JobStatus'}
+        source_id: {type: [string, 'null'], format: uuid}
+        batch_id: {type: [string, 'null'], format: uuid}
+        attempt_count: {type: integer}
+        max_attempts: {type: integer}
+        events_processed: {type: integer}
+        events_failed: {type: integer}
+        last_error: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        started_at: {type: [string, 'null'], format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+    JobsPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Job'}}
+        next_cursor: {type: [string, 'null']}
+    Health:
+      type: object
+      required: [status, checks]
+      properties:
+        status: {type: string, enum: [ok, degraded]}
+        checks:
+          type: object
+          properties:
+            clickhouse: {type: string, enum: [ok, down]}
+            postgres: {type: string, enum: [ok, down]}

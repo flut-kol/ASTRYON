@@ -1,0 +1,49 @@
+# DPP-013 release: build service binaries, generate SBOM, keyless-sign with
+# cosign (Sigstore OIDC) and attach SLSA build provenance. Container image
+# signing follows the same pattern once Dockerfiles land (DPP-012).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-sign:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write # keyless signing + provenance
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build
+        run: |
+          mkdir -p dist
+          for s in gateway clickhouse-sink; do
+            (cd services/$s && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o ../../dist/$s ./cmd/$s) || echo "skip $s (no cmd)"
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: SBOM
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.8.0
+          for s in gateway clickhouse-sink; do
+            (cd services/$s && cyclonedx-gomod mod -licenses -json -output ../../dist/$s.cdx.json)
+          done
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign artifacts (keyless)
+        run: |
+          for f in dist/*; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

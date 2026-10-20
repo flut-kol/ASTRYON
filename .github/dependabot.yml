@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directories:
+      - /libs/event-contracts
+      - /libs/go-common
+      - /services/gateway
+      - /services/clickhouse-sink
+      - /tests/load
+      - /db/postgres/schematest
+    schedule: {interval: weekly}

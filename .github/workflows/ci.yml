@@ -1,0 +1,120 @@
+# DPP-013 CI: lint, unit tests, SAST, dependency scan, secrets scan, SBOM.
+# Third-party actions are pinned to major tags; pin to commit SHAs when the
+# org mirrors them (see docs/security/supply-chain.md).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: make lint
+      - name: golangci-lint
+        run: |
+          set -e
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v1.61.0/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v1.61.0
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          for d in $(find . -name go.mod -exec dirname {} \; | sort); do
+            (cd "$d" && golangci-lint run ./...)
+          done
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: make test
+      - name: race detector (gateway ingestion, DPP-025)
+        run: cd services/gateway && go test -race -count=1 ./...
+
+  sast:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: go
+          build-mode: autobuild
+      - uses: github/codeql-action/analyze@v3
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.21.4
+          for d in $(find . -name go.mod -exec dirname {} \; | sort); do
+            (cd "$d" && gosec -severity medium -confidence medium -exclude-generated ./...)
+          done
+
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: govulncheck (reachable vulnerabilities fail the build)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.3
+          for d in $(find . -name go.mod -exec dirname {} \; | sort); do
+            (cd "$d" && govulncheck ./...)
+          done
+      - name: trivy fs (SCA + misconfig, HIGH/CRITICAL fail)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: CycloneDX SBOM per module
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.8.0
+          mkdir -p sbom
+          for d in $(find . -name go.mod -exec dirname {} \; | sort); do
+            n=$(echo "$d" | sed 's|^\./||; s|/|_|g; s|^$|root|')
+            (cd "$d" && cyclonedx-gomod mod -licenses -json -output "$OLDPWD/sbom/$n.cdx.json")
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom/
+          retention-days: 90
