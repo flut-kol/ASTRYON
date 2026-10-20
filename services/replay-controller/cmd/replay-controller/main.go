@@ -15,6 +15,10 @@ import (
 )
 
 func main() {
+	// `replay-controller reconcile-audit [flags]`: resolve prepared audit events without an outcome (see README).
+	if len(os.Args) > 1 && os.Args[1] == "reconcile-audit" {
+		os.Exit(replay.RunReconcileCLI(os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
+	}
 	ch := &replay.CH{URL: os.Getenv("CH_URL"), Database: os.Getenv("CH_DATABASE"),
 		User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD")}
 	if ch.URL == "" {
