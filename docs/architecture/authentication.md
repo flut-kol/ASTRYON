@@ -97,7 +97,7 @@ Middleware fail-closed перевіряє:
 
 - схему `Authorization` (`Bearer` або `DPoP`), дозволений signing algorithm і `kid`;
 - підпис через JWKS з bounded cache та контрольованим refresh на невідомому `kid`;
-- `iss`, service-specific `aud`, `exp`, `nbf`, `iat`, обов'язковий `jti`, token `typ`;
+- `iss`, service-specific `aud`, `exp`, `nbf` (перевіряється, якщо присутній: AAS його не видає), `iat`, обов'язковий `jti`, token `typ`;
 - claim середовища `env`, дозволений `azp`, scopes і token binding `cnf`;
 - DPoP proof: `htu`, HTTP method, `ath`, clock skew та одноразовість proof `jti`; у кількох репліках replay store спільний;
 - для L3 — `active=true` через introspection;
@@ -119,6 +119,7 @@ Middleware fail-closed перевіряє:
 | `AAS_PRIVATE_KEY_FILE` | secret-mounted PEM для `private_key_jwt` |
 | `AAS_AUDIENCE` | audience конкретного resource server |
 | `AAS_ALLOWED_AZP` | allowlist gateway/portal clients |
+| `AAS_TOKEN_TYPE` | очікуваний claim `typ`; за замовчуванням `at+jwt`, реальний AAS (Keycloak) видає `Bearer` |
 | `AAS_REDIS_URL` | shared DPoP replay store для кількох реплік |
 
 TLS verification увімкнена завжди поза локальним dev. CA bundle монтується як secret/config map; `verify=false`
