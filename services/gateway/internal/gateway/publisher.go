@@ -13,6 +13,21 @@ type Publisher interface {
 	Publish(ctx context.Context, topic string, key, value []byte) error
 }
 
+// Message is one record for BatchPublisher.
+type Message struct {
+	Topic      string
+	Key, Value []byte
+}
+
+// BatchPublisher is an optional Publisher extension: PublishBatch publishes
+// all messages concurrently (one pipelined produce) and returns a slice of the
+// same length and order; errs[i]==nil ONLY after durable broker ack of msgs[i].
+// Per-message failures are independent. Ordering within one partition follows
+// the order of msgs.
+type BatchPublisher interface {
+	PublishBatch(ctx context.Context, msgs []Message) []error
+}
+
 // Record is a message captured by FakePublisher.
 type Record struct {
 	Topic      string
@@ -56,3 +71,14 @@ func (f *FakePublisher) ByTopic(topic string) []Record {
 	}
 	return out
 }
+
+// PublishBatch implements BatchPublisher by looping Publish.
+func (f *FakePublisher) PublishBatch(ctx context.Context, msgs []Message) []error {
+	errs := make([]error, len(msgs))
+	for i, m := range msgs {
+		errs[i] = f.Publish(ctx, m.Topic, m.Key, m.Value)
+	}
+	return errs
+}
+
+var _ BatchPublisher = (*FakePublisher)(nil)

@@ -19,6 +19,15 @@ type Config struct {
 	DevTenantID   string
 	DevScopes     []string
 	DevFakeBroker bool
+
+	// AASBaseURL is the AAS base URL used for OIDC discovery/JWKS when
+	// dev auth is disabled (env AAS_BASE_URL — the real contract name per
+	// docs/architecture/authentication.md; intentionally not
+	// ASTRYON_-prefixed).
+	AASBaseURL string
+	// AASAudience is this gateway's expected token audience (env
+	// ASTRYON_AAS_AUDIENCE).
+	AASAudience string
 }
 
 // LoadConfig reads ASTRYON_* variables. Secrets have no defaults.
@@ -33,6 +42,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		DevTenantID:    getenv("ASTRYON_DEV_TENANT_ID"),
 		DevScopes:      strings.Fields(strings.ReplaceAll(def(getenv("ASTRYON_DEV_SCOPES"), ScopeEventsWrite), ",", " ")),
 		DevFakeBroker:  getenv("ASTRYON_DEV_FAKE_PUBLISHER") == "1",
+		AASBaseURL:     getenv("AAS_BASE_URL"),
+		AASAudience:    getenv("ASTRYON_AAS_AUDIENCE"),
 	}
 	var err error
 	if c.MaxBodyBytes, err = envInt64(getenv, "ASTRYON_GATEWAY_MAX_BODY_BYTES", c.MaxBodyBytes); err != nil {
@@ -48,6 +59,9 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	c.MaxBatchEvents = int(n)
 	if c.DevAuth && (c.DevToken == "" || c.DevTenantID == "") {
 		return c, fmt.Errorf("ASTRYON_DEV_AUTH=1 requires ASTRYON_DEV_TOKEN and ASTRYON_DEV_TENANT_ID")
+	}
+	if !c.DevAuth && (c.AASBaseURL == "" || c.AASAudience == "") {
+		return c, fmt.Errorf("AAS_BASE_URL and ASTRYON_AAS_AUDIENCE are required unless ASTRYON_DEV_AUTH=1")
 	}
 	return c, nil
 }

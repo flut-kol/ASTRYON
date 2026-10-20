@@ -233,14 +233,6 @@ func TestDuplicateSubmitStableEventID(t *testing.T) {
 	}
 }
 
-func TestAASStubFailsClosed(t *testing.T) {
-	r := httptest.NewRequest("POST", "/", nil)
-	r.Header.Set("Authorization", "Bearer x")
-	if _, err := (AASJWTAuthenticator{}).Authenticate(r); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatal("stub must reject")
-	}
-}
-
 func TestLoadConfigDevAuthNeedsSecrets(t *testing.T) {
 	env := map[string]string{"ASTRYON_DEV_AUTH": "1"}
 	if _, err := LoadConfig(func(k string) string { return env[k] }); err == nil {

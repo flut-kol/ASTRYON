@@ -8,15 +8,26 @@ import (
 )
 
 type stubProducer struct {
-	err    error
-	topic  string
-	key    []byte
-	closed bool
+	err       error
+	topic     string
+	key       []byte
+	closed    bool
+	failTopic string
 }
 
 func (s *stubProducer) produce(_ context.Context, topic string, key, _ []byte) error {
 	s.topic, s.key = topic, key
 	return s.err
+}
+func (s *stubProducer) produceBatch(_ context.Context, msgs []Message) []error {
+	errs := make([]error, len(msgs))
+	for i, m := range msgs {
+		errs[i] = s.err
+		if s.failTopic != "" && m.Topic == s.failTopic {
+			errs[i] = errors.New("no ack")
+		}
+	}
+	return errs
 }
 func (s *stubProducer) close() { s.closed = true }
 

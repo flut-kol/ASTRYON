@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/astryon/gateway/internal/gateway"
+	"github.com/astryon/go-common/pkg/authn"
 )
 
 func main() {
@@ -17,10 +18,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var auth gateway.Authenticator = gateway.AASJWTAuthenticator{} // stub: rejects everything
+	var auth gateway.Authenticator
 	if cfg.DevAuth {
 		log.Println("WARNING: ASTRYON_DEV_AUTH=1 static dev authenticator enabled; never use outside dev")
 		auth = gateway.DevStaticAuthenticator{Token: cfg.DevToken, Principal: gateway.Principal{TenantID: cfg.DevTenantID, Scopes: cfg.DevScopes}}
+	} else {
+		verifier, err := authn.New(authn.Config{BaseURL: cfg.AASBaseURL, Audience: cfg.AASAudience})
+		if err != nil {
+			log.Fatal(err)
+		}
+		auth = gateway.NewAASJWTAuthenticator(verifier)
 	}
 	var pub gateway.Publisher
 	if cfg.DevFakeBroker {
@@ -42,6 +49,11 @@ func main() {
 	hs := &http.Server{Addr: cfg.Addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
 
 	errc := make(chan error, 1)
+	if ma := os.Getenv("ASTRYON_GATEWAY_METRICS_ADDR"); ma != "" {
+		ms := &http.Server{Addr: ma, Handler: srv.Metrics().Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() { errc <- ms.ListenAndServe() }()
+		defer ms.Close()
+	}
 	go func() { errc <- hs.ListenAndServe() }()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)

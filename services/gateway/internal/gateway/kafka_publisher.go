@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -27,6 +29,10 @@ type KafkaConfig struct {
 	SASLPass  string
 	// DeliveryTimeout bounds one record from produce call to ack (incl. retries).
 	DeliveryTimeout time.Duration
+	// Linger is how long the producer waits to fill a batch (default 2ms).
+	Linger time.Duration
+	// BatchMaxBytes caps a produce batch per partition (default 1 MiB).
+	BatchMaxBytes int32
 }
 
 // LoadKafkaConfig reads ASTRYON_KAFKA_* variables:
@@ -34,7 +40,9 @@ type KafkaConfig struct {
 //	ASTRYON_KAFKA_BROKERS (required, comma list), ASTRYON_KAFKA_CLIENT_ID,
 //	ASTRYON_KAFKA_TLS=1, ASTRYON_KAFKA_TLS_CA_FILE,
 //	ASTRYON_KAFKA_SASL_MECHANISM, ASTRYON_KAFKA_SASL_USERNAME, ASTRYON_KAFKA_SASL_PASSWORD,
-//	ASTRYON_KAFKA_DELIVERY_TIMEOUT (Go duration, default 30s).
+//	ASTRYON_KAFKA_DELIVERY_TIMEOUT (Go duration, default 30s),
+//	ASTRYON_KAFKA_LINGER (Go duration >= 0, default 2ms),
+//	ASTRYON_KAFKA_BATCH_MAX_BYTES (positive int, default 1048576).
 func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 	c := KafkaConfig{
 		ClientID:        def(getenv("ASTRYON_KAFKA_CLIENT_ID"), "astryon-gateway"),
@@ -44,6 +52,8 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 		SASLUser:        getenv("ASTRYON_KAFKA_SASL_USERNAME"),
 		SASLPass:        getenv("ASTRYON_KAFKA_SASL_PASSWORD"),
 		DeliveryTimeout: 30 * time.Second,
+		Linger:          2 * time.Millisecond,
+		BatchMaxBytes:   1 << 20,
 	}
 	for _, b := range strings.Split(getenv("ASTRYON_KAFKA_BROKERS"), ",") {
 		if b = strings.TrimSpace(b); b != "" {
@@ -59,6 +69,20 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 			return c, errors.New("ASTRYON_KAFKA_DELIVERY_TIMEOUT must be a positive duration")
 		}
 		c.DeliveryTimeout = d
+	}
+	if v := getenv("ASTRYON_KAFKA_LINGER"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return c, errors.New("ASTRYON_KAFKA_LINGER must be a non-negative duration")
+		}
+		c.Linger = d
+	}
+	if v := getenv("ASTRYON_KAFKA_BATCH_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n <= 0 {
+			return c, errors.New("ASTRYON_KAFKA_BATCH_MAX_BYTES must be a positive integer")
+		}
+		c.BatchMaxBytes = int32(n)
 	}
 	switch c.SASLMech {
 	case "":
@@ -88,6 +112,8 @@ func (c KafkaConfig) saslMechanism() sasl.Mechanism {
 // produce must return nil only after the broker acknowledged (acks=all).
 type kafkaProducer interface {
 	produce(ctx context.Context, topic string, key, value []byte) error
+	// produceBatch must return per-record errors (same order); nil only after ack.
+	produceBatch(ctx context.Context, msgs []Message) []error
 	close()
 }
 
@@ -96,6 +122,23 @@ type franzProducer struct{ cl *kgo.Client }
 func (p franzProducer) produce(ctx context.Context, topic string, key, value []byte) error {
 	// ProduceSync blocks until the record is acked or permanently failed.
 	return p.cl.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: key, Value: value}).FirstErr()
+}
+
+func (p franzProducer) produceBatch(ctx context.Context, msgs []Message) []error {
+	errs := make([]error, len(msgs))
+	var wg sync.WaitGroup
+	wg.Add(len(msgs))
+	for i, m := range msgs {
+		i := i
+		// Async Produce keeps per-partition order of calls; the promise fires
+		// only after broker ack (acks=all) or permanent failure / ctx cancel.
+		p.cl.Produce(ctx, &kgo.Record{Topic: m.Topic, Key: m.Key, Value: m.Value}, func(_ *kgo.Record, err error) {
+			errs[i] = err // distinct index per callback; wg orders the read
+			wg.Done()
+		})
+	}
+	wg.Wait()
+	return errs
 }
 
 func (p franzProducer) close() { p.cl.Close() }
@@ -109,6 +152,9 @@ type KafkaPublisher struct {
 // NewKafkaPublisher builds the client. It does not require the broker to be
 // reachable at construction; Publish fails (no ack) until it is.
 func NewKafkaPublisher(c KafkaConfig) (*KafkaPublisher, error) {
+	if c.BatchMaxBytes <= 0 {
+		c.BatchMaxBytes = 1 << 20
+	}
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(c.Brokers...),
 		kgo.ClientID(c.ClientID),
@@ -122,7 +168,8 @@ func NewKafkaPublisher(c KafkaConfig) (*KafkaPublisher, error) {
 			return d
 		}),
 		kgo.RecordPartitioner(kgo.UniformBytesPartitioner(64<<10, true, true, nil)),
-		kgo.ProducerLinger(0), // latency-first: each Publish is awaited individually
+		kgo.ProducerLinger(c.Linger),
+		kgo.ProducerBatchMaxBytes(c.BatchMaxBytes),
 	}
 	if c.TLS {
 		tc := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -157,8 +204,26 @@ func (k *KafkaPublisher) Publish(ctx context.Context, topic string, key, value [
 	return nil
 }
 
+// PublishBatch publishes all messages concurrently and waits for every ack.
+// errs[i]==nil only after durable ack of msgs[i]; failures are per message.
+func (k *KafkaPublisher) PublishBatch(ctx context.Context, msgs []Message) []error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	errs := k.p.produceBatch(ctx, msgs)
+	for i, err := range errs {
+		if err != nil {
+			errs[i] = fmt.Errorf("kafka publish to %s: %w", msgs[i].Topic, err)
+		}
+	}
+	return errs
+}
+
 // Close flushes buffered records (none are left unacked by Publish, as it is
 // synchronous) and releases connections. Safe to call once at shutdown.
 func (k *KafkaPublisher) Close() { k.p.close() }
 
-var _ Publisher = (*KafkaPublisher)(nil)
+var (
+	_ Publisher      = (*KafkaPublisher)(nil)
+	_ BatchPublisher = (*KafkaPublisher)(nil)
+)

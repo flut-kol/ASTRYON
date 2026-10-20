@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/astryon/go-common/pkg/authn"
 )
 
 // ScopeEventsWrite is required to submit events.
@@ -52,17 +55,40 @@ func (d DevStaticAuthenticator) Authenticate(r *http.Request) (Principal, error)
 	return d.Principal, nil
 }
 
-// AASJWTAuthenticator is a STUB for AAS access-token verification
-// (docs/architecture/authentication.md). It always rejects (fail closed).
+// AASJWTAuthenticator verifies AAS access tokens
+// (docs/architecture/authentication.md) using the shared
+// libs/go-common/pkg/authn Verifier. It never does ad-hoc JWT parsing
+// itself; all discovery/JWKS/claim verification lives in that package.
 //
-// TODO(DPP-auth): replace with the shared libs/go-common/auth middleware:
-// OIDC discovery from AAS_BASE_URL, JWKS verification (bounded cache), iss/aud/
-// exp/nbf/jti/typ/env/azp checks, DPoP proof, scopes and signed tenant_id claim
-// mapped into Principal. Do not implement ad-hoc JWT parsing here.
-type AASJWTAuthenticator struct{}
+// A zero-value AASJWTAuthenticator (nil verifier, e.g. misconfiguration)
+// fails closed rather than panicking.
+type AASJWTAuthenticator struct {
+	verifier *authn.Verifier
+}
 
-func (AASJWTAuthenticator) Authenticate(*http.Request) (Principal, error) {
-	return Principal{}, ErrUnauthenticated
+// NewAASJWTAuthenticator constructs an AASJWTAuthenticator backed by v.
+// Passing a nil v is allowed and yields an authenticator that always fails
+// closed (ErrUnauthenticated).
+func NewAASJWTAuthenticator(v *authn.Verifier) AASJWTAuthenticator {
+	return AASJWTAuthenticator{verifier: v}
+}
+
+func (a AASJWTAuthenticator) Authenticate(r *http.Request) (Principal, error) {
+	if a.verifier == nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	tok, ok := bearer(r)
+	if !ok || tok == "" {
+		return Principal{}, ErrUnauthenticated
+	}
+	claims, err := a.verifier.Verify(r.Context(), tok)
+	if err != nil {
+		// Detail is retained for logs via %w/%v wrapping, but callers must
+		// not surface it: the HTTP layer always responds with a generic
+		// 401 regardless of the wrapped reason.
+		return Principal{}, fmt.Errorf("%w: %v", ErrUnauthenticated, err)
+	}
+	return Principal{TenantID: claims.TenantID, Scopes: claims.Scopes}, nil
 }
 
 func bearer(r *http.Request) (string, bool) {

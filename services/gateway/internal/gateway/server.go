@@ -32,11 +32,15 @@ type Server struct {
 	auth Authenticator
 	pub  Publisher
 	now  func() time.Time
+	m    *Metrics
 }
 
 func NewServer(cfg Config, a Authenticator, p Publisher) *Server {
-	return &Server{cfg: cfg, auth: a, pub: p, now: time.Now}
+	return &Server{cfg: cfg, auth: a, pub: p, now: time.Now, m: NewMetrics()}
 }
+
+// Metrics returns the Prometheus metrics registry (serve on a separate, non-public listener).
+func (s *Server) Metrics() *Metrics { return s.m }
 
 // Handler returns the routed handler with request-ID middleware.
 func (s *Server) Handler() http.Handler {
@@ -52,7 +56,14 @@ func (s *Server) Handler() http.Handler {
 			id = newUUID()
 		}
 		w.Header().Set("X-Request-ID", id)
-		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), reqIDKey, id)))
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		mux.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), reqIDKey, id)))
+		route := routeLabel(r.URL.Path)
+		s.m.ObserveRequest(route, sw.code)
+		if r.Method == http.MethodPost && (route == "/v1/events" || route == "/v1/events/batch") {
+			s.m.ObserveAck(time.Since(start).Seconds())
+		}
 	})
 }
 
@@ -153,6 +164,7 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request) {
 	res := s.process(r.Context(), p, it, idem, 0)
 	switch res.Status {
 	case "accepted":
+		s.m.AddAccepted(1)
 		writeJSON(w, http.StatusAccepted, res)
 	case "quarantined":
 		writeErr(w, r, http.StatusUnprocessableEntity, "ENVELOPE_INVALID", "event failed validation and was quarantined", res)
@@ -194,12 +206,12 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	results := make([]ItemResult, len(items))
+	results := s.processBatch(r.Context(), p, items, idem)
 	counts := map[string]int{}
-	for i, it := range items {
-		results[i] = s.process(r.Context(), p, it, idem, i)
-		counts[results[i].Status]++
+	for _, res := range results {
+		counts[res.Status]++
 	}
+	s.m.AddAccepted(counts["accepted"])
 	status := http.StatusOK
 	switch {
 	case counts["failed"] == len(items):
@@ -214,9 +226,70 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// process validates and publishes one event. "accepted" is returned only
-// after the publisher acked.
+// pending is one record awaiting broker ack plus the result for each outcome.
+type pending struct {
+	idx      int
+	msg      Message
+	ok, fail ItemResult
+}
+
+// processBatch prepares every item, publishes all resulting records (events
+// and quarantine records) through one pipelined PublishBatch when the
+// publisher supports it, and maps acks back by index. Result order and
+// per-item semantics are identical to the sequential path.
+func (s *Server) processBatch(ctx context.Context, p Principal, items []item, idem string) []ItemResult {
+	bp, ok := s.pub.(BatchPublisher)
+	if !ok {
+		results := make([]ItemResult, len(items))
+		for i, it := range items {
+			results[i] = s.process(ctx, p, it, idem, i)
+		}
+		return results
+	}
+	results := make([]ItemResult, len(items))
+	var pend []pending
+	for i, it := range items {
+		res, pd := s.prepare(ctx, p, it, idem, i)
+		if pd == nil {
+			results[i] = res
+			continue
+		}
+		pend = append(pend, *pd)
+	}
+	if len(pend) == 0 {
+		return results
+	}
+	msgs := make([]Message, len(pend))
+	for i := range pend {
+		msgs[i] = pend[i].msg
+	}
+	errs := bp.PublishBatch(ctx, msgs)
+	for i, pd := range pend {
+		if i < len(errs) && errs[i] == nil {
+			results[pd.idx] = pd.ok
+		} else {
+			results[pd.idx] = pd.fail
+		}
+	}
+	return results
+}
+
+// process validates and publishes one event sequentially. "accepted" is
+// returned only after the publisher acked.
 func (s *Server) process(ctx context.Context, p Principal, it item, idem string, idx int) ItemResult {
+	res, pd := s.prepare(ctx, p, it, idem, idx)
+	if pd == nil {
+		return res
+	}
+	if err := s.pub.Publish(ctx, pd.msg.Topic, pd.msg.Key, pd.msg.Value); err != nil {
+		return pd.fail
+	}
+	return pd.ok
+}
+
+// prepare validates one item. It returns either a final result (nil pending)
+// or a record to publish with the results for ack / no-ack.
+func (s *Server) prepare(ctx context.Context, p Principal, it item, idem string, idx int) (ItemResult, *pending) {
 	res := ItemResult{Index: idx}
 	reqID := requestID(ctx)
 	if it.parseErr != nil {
@@ -251,17 +324,15 @@ func (s *Server) process(ctx context.Context, p Principal, it item, idem string,
 	val, err := json.Marshal(env)
 	if err != nil {
 		res.Status, res.Code, res.Message = "failed", "INTERNAL", "encode failed"
-		return res
+		return res, nil
 	}
-	if err := s.pub.Publish(ctx, ec.TopicRawEvents, env.PartitionKey(), val); err != nil {
-		res.Status, res.Code, res.Message = "failed", "PUBLISH_FAILED", "not durably accepted"
-		return res
-	}
-	res.Status = "accepted"
-	return res
+	okRes, failRes := res, res
+	okRes.Status = "accepted"
+	failRes.Status, failRes.Code, failRes.Message = "failed", "PUBLISH_FAILED", "not durably accepted"
+	return res, &pending{idx: idx, msg: Message{ec.TopicRawEvents, env.PartitionKey(), val}, ok: okRes, fail: failRes}
 }
 
-func (s *Server) quarantine(ctx context.Context, p Principal, it item, idx int, res ItemResult, codes []ec.Code, detail string) ItemResult {
+func (s *Server) quarantine(ctx context.Context, p Principal, it item, idx int, res ItemResult, codes []ec.Code, detail string) (ItemResult, *pending) {
 	strCodes := make([]string, len(codes))
 	for i, c := range codes {
 		strCodes[i] = string(c)
@@ -280,12 +351,10 @@ func (s *Server) quarantine(ctx context.Context, p Principal, it item, idx int, 
 	val, _ := json.Marshal(rec)
 	key := ec.PartitionKey(p.TenantID, fmt.Sprintf("%s/%d", requestID(ctx), idx))
 	res.Codes = strCodes
-	if err := s.pub.Publish(ctx, ec.TopicQuarantine, key, val); err != nil {
-		res.Status, res.Code, res.Message = "failed", "PUBLISH_FAILED", "quarantine not durably recorded"
-		return res
-	}
-	res.Status, res.Code, res.Message = "quarantined", "ENVELOPE_INVALID", "validation failed"
-	return res
+	okRes, failRes := res, res
+	okRes.Status, okRes.Code, okRes.Message = "quarantined", "ENVELOPE_INVALID", "validation failed"
+	failRes.Status, failRes.Code, failRes.Message = "failed", "PUBLISH_FAILED", "quarantine not durably recorded"
+	return res, &pending{idx: idx, msg: Message{ec.TopicQuarantine, key, val}, ok: okRes, fail: failRes}
 }
 
 // deriveEventID makes event_id a pure function of (tenant, source, key, index)
