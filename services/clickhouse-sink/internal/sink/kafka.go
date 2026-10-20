@@ -3,12 +3,10 @@ package sink
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,21 +19,13 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-func (c Config) kafkaTLSConfig() (*tls.Config, error) {
-	tc := &tls.Config{MinVersion: tls.VersionTLS12} // chain and hostname verified; never InsecureSkipVerify
-	if c.KafkaTLSCAFile != "" {
-		pem, err := os.ReadFile(c.KafkaTLSCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read CHSINK_KAFKA_TLS_CA_FILE: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("CHSINK_KAFKA_TLS_CA_FILE: no valid PEM certificates")
-		}
-		tc.RootCAs = pool
-	}
-	return tc, nil
+func (c Config) tlsMaterial() tlsMaterial {
+	return tlsMaterial{Prefix: "CHSINK_KAFKA", CAFile: c.KafkaTLSCAFile, CertFile: c.KafkaTLSCertFile, KeyFile: c.KafkaTLSKeyFile, Interval: c.KafkaTLSReloadInterval}
 }
+
+// kafkaTLSConfig is the startup snapshot of the client TLS config (chain and hostname verified; never
+// InsecureSkipVerify). Connections use kafkaTLSOpt, which also reloads renewed files.
+func (c Config) kafkaTLSConfig() (*tls.Config, error) { return staticTLSConfig(c.tlsMaterial()) }
 
 func (c Config) kafkaSASL() sasl.Mechanism {
 	switch c.KafkaSASLMech {
@@ -136,11 +126,11 @@ func NewKafka(c Config) (*KafkaSource, error) {
 		kgo.WithHooks(ce), kgo.WithLogger(ce),
 	}
 	if c.KafkaTLS {
-		tc, err := c.kafkaTLSConfig()
+		tlsOpt, err := kafkaTLSOpt(c.tlsMaterial())
 		if err != nil {
 			return nil, err
 		}
-		opts = append(opts, kgo.DialTLSConfig(tc))
+		opts = append(opts, tlsOpt)
 	}
 	if m := c.kafkaSASL(); m != nil {
 		opts = append(opts, kgo.SASL(m))

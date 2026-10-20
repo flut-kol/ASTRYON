@@ -67,7 +67,7 @@ func LoadShared(get func(string) string) (SharedCounter, FailureMode, error) {
 // bucket (hash tokens/ts), using the Redis server clock so replicas with skewed clocks agree.
 // KEYS[1]=q:rate:{<tenant>} KEYS[2]=q:conc:{<tenant>} (same hash tag -> same Cluster slot);
 // ARGV: rate, burst, maxConcurrent, leaseMs, slotId.
-// Returns {0,0} admitted | {1,1} concurrency cap | {2,retryAfterSeconds} rate limited. No token is consumed unless admitted.
+// Returns {0,0,tokensLeft} admitted | {1,1} concurrency cap | {2,retryAfterSeconds,tokens} rate limited. No token is consumed unless admitted.
 const limiterScript = `
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
@@ -86,13 +86,13 @@ local ttl = math.ceil(burst / rate) * 1000 + 1000
 if tokens < 1 then
   redis.call('HSET', KEYS[1], 'tokens', tostring(tokens), 'ts', now)
   redis.call('PEXPIRE', KEYS[1], ttl)
-  return {2, math.ceil((1 - tokens) / rate)}
+  return {2, math.ceil((1 - tokens) / rate), tostring(tokens)}
 end
 redis.call('HSET', KEYS[1], 'tokens', tostring(tokens - 1), 'ts', now)
 redis.call('PEXPIRE', KEYS[1], ttl)
 redis.call('ZADD', KEYS[2], now + lease, ARGV[5])
 redis.call('PEXPIRE', KEYS[2], lease)
-return {0, 0}
+return {0, 0, tostring(tokens - 1)}
 `
 
 // renewScript extends a live lease. KEYS[1]=q:conc:{<tenant>}; ARGV: leaseMs, slotId. Returns 1 renewed, 0 when the
@@ -307,6 +307,16 @@ func normalizeNode(n string) (string, error) {
 	return net.JoinHostPort(h, p), nil
 }
 
+// FailureDomain is the master currently serving the tenant's slot (MOVED override, then CLUSTER SLOTS map), else the
+// first seed. A Redis error then only pauses Redis for tenants of that node (see Limiter / DomainResolver); a
+// single node or Sentinel setup has one domain, i.e. a global cooldown as before.
+func (r *RedisCounter) FailureDomain(tenant string) string {
+	if a := r.owner(keySlot(rateKey(tenant))); a != "" {
+		return a
+	}
+	return r.nodes[0]
+}
+
 func (r *RedisCounter) Acquire(tenant string, cfg LimiterConfig) (SharedDecision, error) {
 	if tenant == "" {
 		return SharedDecision{}, errors.New("empty tenant")
@@ -324,18 +334,27 @@ func (r *RedisCounter) Acquire(tenant string, cfg LimiterConfig) (SharedDecision
 		return SharedDecision{}, err
 	}
 	arr, ok := v.([]any)
-	if !ok || len(arr) != 2 {
+	if !ok || len(arr) < 2 || len(arr) > 3 {
 		return SharedDecision{}, fmt.Errorf("unexpected script reply %v", v)
 	}
 	code, _ := arr[0].(int64)
 	ra, _ := arr[1].(int64)
+	var toks float64
+	var known bool
+	if len(arr) == 3 {
+		if s, ok := arr[2].(string); ok {
+			if f, err := strconv.ParseFloat(s, 64); err == nil && f >= 0 {
+				toks, known = f, true
+			}
+		}
+	}
 	switch code {
 	case 0:
-		return SharedDecision{Admitted: true, Slot: slot}, nil
+		return SharedDecision{Admitted: true, Slot: slot, Tokens: toks, TokensKnown: known}, nil
 	case 1:
 		return SharedDecision{Reason: "concurrent", RetryAfter: 1}, nil
 	case 2:
-		return SharedDecision{Reason: "rate", RetryAfter: int(ra)}, nil
+		return SharedDecision{Reason: "rate", RetryAfter: int(ra), Tokens: toks, TokensKnown: known}, nil
 	}
 	return SharedDecision{}, fmt.Errorf("unexpected script code %d", code)
 }

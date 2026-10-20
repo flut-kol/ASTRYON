@@ -3,12 +3,15 @@
 //
 //	AGG_LOOKBACK (default 3h; covers late data) AGG_INTERVAL (0 = run once, else repeat).
 //
-// `ch-aggregator reconcile` reports duplicate rows per batch, aggregate-vs-events drift per hour and empty hours (exit 2 on duplicates or
-// aggregate drift; gaps only with AGG_FAIL_ON_GAPS=1).
+// `ch-aggregator reconcile [--snapshot file|-] [--compare file]` reports duplicate rows per batch, aggregate-vs-events
+// drift per hour, empty hours, ClickHouse-vs-registry batch counts (REGISTRY_PG_URL, optional; REGISTRY_GRACE default 15m)
+// and per-partition checksums (exit 2 on duplicates, aggregate drift, persistent registry mismatch or silent checksum
+// change; gaps only with AGG_FAIL_ON_GAPS=1).
 package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -39,38 +42,7 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "reconcile" {
-		now := time.Now().UTC()
-		w, err := agg.HourWindow(now.Add(-dur("AGG_LOOKBACK", "3h")), now)
-		if err != nil {
-			log.Fatal(err)
-		}
-		ctx := context.Background()
-		dups, err := c.Reconcile(ctx, w, 100)
-		if err != nil {
-			log.Fatalf("reconcile: %v", err)
-		}
-		for _, d := range dups {
-			log.Printf("duplicate-rows tenant=%s source=%s batch=%s pv=%d rows=%d unique=%d", d.TenantID, d.SourceID, d.BatchID, d.ProcessingVersion, d.Rows, d.Unique)
-		}
-		ad, err := c.AggregateDrift(ctx, w, 100)
-		if err != nil {
-			log.Fatalf("reconcile aggregates: %v", err)
-		}
-		for _, d := range ad {
-			log.Printf("aggregate-drift tenant=%s source=%s pv=%d hour=%s stored=%d actual=%d", d.TenantID, d.SourceID, d.ProcessingVersion, d.Hour, d.Stored, d.Actual)
-		}
-		gaps, err := c.Gaps(ctx, w, 100)
-		if err != nil {
-			log.Fatalf("reconcile gaps: %v", err)
-		}
-		for _, g := range gaps {
-			log.Printf("gap (informational) tenant=%s source=%s pv=%d empty-hour=%s", g.TenantID, g.SourceID, g.ProcessingVersion, g.Hour)
-		}
-		if len(dups)+len(ad) > 0 || (len(gaps) > 0 && os.Getenv("AGG_FAIL_ON_GAPS") == "1") {
-			os.Exit(2)
-		}
-		log.Printf("reconcile: no drift (%d informational gaps)", len(gaps))
-		return
+		os.Exit(reconcile(c, os.Args[2:]))
 	}
 	lookback, interval := dur("AGG_LOOKBACK", "3h"), dur("AGG_INTERVAL", "0s")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -98,4 +70,40 @@ func main() {
 		case <-time.After(interval):
 		}
 	}
+}
+
+func reconcile(c *agg.Client, args []string) int {
+	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+	snap := fs.String("snapshot", "", "write the checksum snapshot (JSON) to this file, or - for stdout")
+	cmp := fs.String("compare", "", "diff against a previous snapshot file")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	log.SetFlags(0)
+	now := time.Now().UTC()
+	lb := dur("AGG_LOOKBACK", "3h")
+	w, err := agg.HourWindow(now.Add(-lb), now)
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
+	cw, err := agg.HourWindow(now.Add(-dur("AGG_CHECKSUM_LOOKBACK", lb.String())), now)
+	if err != nil {
+		log.Print(err)
+		return 1
+	}
+	c.QueryTimeout = dur("AGG_QUERY_TIMEOUT", "120s")
+	ctx := context.Background()
+	o := agg.RunOptions{Window: w, ChecksumWindow: cw, Now: now, FailOnGaps: os.Getenv("AGG_FAIL_ON_GAPS") == "1",
+		Grace: dur("REGISTRY_GRACE", "15m"), SnapshotPath: *snap, ComparePath: *cmp, Limit: 1000, Out: os.Stderr, SnapOut: os.Stdout}
+	if u := os.Getenv("REGISTRY_PG_URL"); u != "" {
+		r, err := agg.NewPGRegistry(ctx, u)
+		if err != nil {
+			log.Printf("registry connect: %v", err)
+			return 1
+		}
+		defer r.Close(ctx)
+		o.Registry = r
+	}
+	return c.Run(ctx, o)
 }

@@ -17,6 +17,71 @@ type ClickHouse struct {
 	Table                         string // default events_normalized_distributed
 	MaxExecutionSeconds           int    // default 600
 	HTTP                          *http.Client
+	// IdleTimeout fails the stream when ClickHouse delivers no byte for this long while we are waiting for data
+	// (a stalled server that keeps the connection open). Default 30s, negative = off. The clock runs only inside
+	// Read, so a slow object store never trips it. MaxDuration bounds the whole request incl. the stream (default
+	// 15m, negative = off). Both fail the job with ErrCHTimeout (error code clickhouse_timeout).
+	IdleTimeout, MaxDuration time.Duration
+}
+
+// Defaults of the ClickHouse stream timeouts (env EXPORT_CH_IDLE_TIMEOUT / EXPORT_CH_MAX_DURATION in the binary).
+const (
+	DefaultCHIdleTimeout = 30 * time.Second
+	DefaultCHMaxDuration = 15 * time.Minute
+)
+
+// ErrCHTimeout marks a ClickHouse stream that stalled (idle timeout) or ran past MaxDuration.
+var ErrCHTimeout = errors.New("clickhouse stream timeout")
+
+func orDefault(d, def time.Duration) time.Duration {
+	if d == 0 {
+		return def
+	}
+	return d
+}
+
+// chBody is the streaming response with the idle watchdog; Close releases the request context and timers.
+type chBody struct {
+	rc     io.ReadCloser
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	stopT  context.CancelFunc
+	idle   time.Duration
+	timer  *time.Timer
+}
+
+func (b *chBody) Read(p []byte) (int, error) {
+	if b.idle > 0 {
+		if b.timer == nil {
+			b.timer = time.AfterFunc(b.idle, b.fire)
+		} else {
+			b.timer.Reset(b.idle)
+		}
+	}
+	n, err := b.rc.Read(p)
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	if err != nil && err != io.EOF {
+		if cause := context.Cause(b.ctx); errors.Is(cause, ErrCHTimeout) {
+			err = cause
+		}
+	}
+	return n, err
+}
+
+func (b *chBody) fire() {
+	b.cancel(fmt.Errorf("%w: no data from ClickHouse for %s (idle timeout)", ErrCHTimeout, b.idle))
+}
+
+func (b *chBody) Close() error {
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	err := b.rc.Close()
+	b.cancel(nil)
+	b.stopT()
+	return err
 }
 
 func (c ClickHouse) table() string {
@@ -46,8 +111,17 @@ func (c ClickHouse) open(ctx context.Context, q string, params url.Values) (io.R
 	if cl == nil {
 		cl = &http.Client{} // no overall timeout: the stream may be long; ctx bounds it
 	}
+	parent := ctx
+	cctx, cancel := context.WithCancelCause(parent)
+	stopT := context.CancelFunc(func() {})
+	if md := orDefault(c.MaxDuration, DefaultCHMaxDuration); md > 0 {
+		cctx, stopT = context.WithTimeoutCause(cctx, md, fmt.Errorf("%w: ClickHouse request exceeded max duration %s", ErrCHTimeout, md))
+	}
+	release := func() { cancel(nil); stopT() }
+	ctx = cctx
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/?"+v.Encode(), strings.NewReader(q))
 	if err != nil {
+		release()
 		return nil, err
 	}
 	if c.User != "" {
@@ -56,17 +130,23 @@ func (c ClickHouse) open(ctx context.Context, q string, params url.Values) (io.R
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
+		cause := context.Cause(ctx)
+		release()
+		if parent.Err() != nil {
 			return nil, err
+		}
+		if errors.Is(cause, ErrCHTimeout) {
+			return nil, cause
 		}
 		return nil, fmt.Errorf("%w: %v", ErrClickHouse, err)
 	}
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
+		release()
 		return nil, fmt.Errorf("%w: clickhouse %s: %s", ErrClickHouse, resp.Status, strings.TrimSpace(string(b)))
 	}
-	return resp.Body, nil
+	return &chBody{rc: resp.Body, ctx: ctx, cancel: cancel, stopT: stopT, idle: orDefault(c.IdleTimeout, DefaultCHIdleTimeout)}, nil
 }
 
 // Runner executes exports.

@@ -2,9 +2,11 @@ package export
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -61,7 +63,26 @@ type Dispatcher struct {
 	wake                chan struct{}
 	wg, bgWG            sync.WaitGroup
 	hbDownSince         time.Time // maintain goroutine only: first failed heartbeat of the current outage
+
+	runMu   sync.Mutex
+	running map[string]context.CancelCauseFunc // started jobs of this replica -> cancel (lease lost)
 }
+
+// ErrLeaseLost is the cancellation cause of a job whose lease was taken away (recovered as worker_lost by another
+// replica): its run is aborted at once, the partial upload is aborted and nothing is written for it.
+var ErrLeaseLost = errors.New("job lease lost")
+
+// LeaseReporter is optionally implemented by a Queue: Heartbeat that also reports which jobs are still owned.
+// The dispatcher cancels every running job that is missing from the answer.
+type LeaseReporter interface {
+	HeartbeatOwned(ctx context.Context) ([]string, error)
+}
+
+// Counters operators can alert on (exported by the binary on the debug listener, see cmd/export-worker).
+// JobsAbandoned: the terminal write could not be delivered within FinishRetry (the job ends worker_lost).
+// LeaseLost: a running job was cancelled because its lease was lost. FinishRejected: the result was rejected by the
+// owner guard (its object was deleted). CHTimeouts: ClickHouse streams failed by the idle/max-duration timeout.
+var Counters struct{ JobsAbandoned, LeaseLost, FinishRejected, CHTimeouts atomic.Int64 }
 
 // Abandoner is optionally implemented by a Queue: after the dispatcher gives up writing a job's terminal state it
 // is no longer heartbeated, so lease expiry lets recovery fail it (worker_lost) instead of keeping it RUNNING forever.
@@ -212,8 +233,12 @@ func (d *Dispatcher) execute(j Job) {
 		}
 		return
 	}
-	jctx, jcancel := context.WithTimeout(d.jobCtx, d.JobTimeout)
+	lctx, lcancel := context.WithCancelCause(d.jobCtx)
+	jctx, jcancel := context.WithTimeout(lctx, d.JobTimeout)
 	defer jcancel()
+	defer lcancel(nil)
+	d.track(j.ID, lcancel)
+	defer d.untrack(j.ID)
 	r := *d.Runner
 	r.Quota = nil // reserved at POST
 	if r.Audit == nil {
@@ -221,21 +246,72 @@ func (d *Dispatcher) execute(j Job) {
 	}
 	// The tenant comes from the claimed row (written from the verified principal at POST), never from a request.
 	res, err := r.runNoPresign(jctx, Principal{TenantID: j.TenantID, Subject: j.Subject}, j.ID, j.Spec)
+	d.untrack(j.ID)
 	out := JobResult{Status: StatusSucceeded, Rows: res.Rows, Bytes: res.Bytes, ObjectKey: res.Key}
 	if err != nil {
 		if d.jobCtx.Err() != nil {
 			return // stopping: Shutdown fails it ("shutdown"), or after a hard stop recovery decides
 		}
+		if errors.Is(context.Cause(lctx), ErrLeaseLost) {
+			// Run already aborted the upload and deleted the partial object. Another replica failed the job
+			// (worker_lost), so there is nothing to write.
+			Counters.LeaseLost.Add(1)
+			log.Printf("ALERT export_lease_lost job=%s tenant=%s: lease lost, run cancelled, partial output removed", j.ID, j.TenantID)
+			return
+		}
+		if errors.Is(err, ErrCHTimeout) {
+			Counters.CHTimeouts.Add(1)
+			log.Printf("export_clickhouse_timeout job=%s: %v", j.ID, err)
+		}
 		out = JobResult{Status: StatusFailed, Rows: res.Rows, Bytes: res.Bytes, ErrorCode: errCode(err, jctx)}
 	}
-	d.finish(j, out)
+	if ok := d.finish(j, out); !ok && out.Status == StatusSucceeded && out.ObjectKey != "" {
+		// The owner guard rejected the result (lease lost): the job is FAILED worker_lost and nothing references the
+		// object, so remove it instead of leaving an unreferenced file to the lifecycle rule.
+		Counters.FinishRejected.Add(1)
+		dctx, dcancel := context.WithTimeout(context.WithoutCancel(d.base), 30*time.Second)
+		derr := d.Runner.Store.Delete(dctx, out.ObjectKey)
+		dcancel()
+		log.Printf("ALERT export_finish_rejected job=%s tenant=%s key=%s: lease lost before the result was written; object delete err=%v", j.ID, j.TenantID, out.ObjectKey, derr)
+	}
+}
+
+func (d *Dispatcher) track(id string, c context.CancelCauseFunc) {
+	d.runMu.Lock()
+	if d.running == nil {
+		d.running = map[string]context.CancelCauseFunc{}
+	}
+	d.running[id] = c
+	d.runMu.Unlock()
+}
+
+func (d *Dispatcher) untrack(id string) {
+	d.runMu.Lock()
+	delete(d.running, id)
+	d.runMu.Unlock()
+}
+
+// cancelLost cancels every running job whose lease is not in owned (the heartbeat just proved it is gone).
+func (d *Dispatcher) cancelLost(owned []string) {
+	set := make(map[string]struct{}, len(owned))
+	for _, id := range owned {
+		set[id] = struct{}{}
+	}
+	d.runMu.Lock()
+	defer d.runMu.Unlock()
+	for id, c := range d.running {
+		if _, ok := set[id]; !ok {
+			c(ErrLeaseLost)
+			delete(d.running, id)
+		}
+	}
 }
 
 // finish writes the terminal state, retrying with jittered exponential backoff while the queue is unreachable
 // (PostgreSQL restart) for at most FinishRetry or until the dispatcher is hard-stopped / the shutdown deadline hits.
 // The job stays RUNNING and keeps being heartbeated meanwhile, so a short outage resumes with the real result.
 // When the budget is spent the job is abandoned: heartbeats stop and recovery fails it as worker_lost.
-func (d *Dispatcher) finish(j Job, out JobResult) {
+func (d *Dispatcher) finish(j Job, out JobResult) (written bool) {
 	end := time.Now().Add(d.FinishRetry)
 	backoff := 200 * time.Millisecond
 	for attempt := 1; ; attempt++ {
@@ -248,17 +324,22 @@ func (d *Dispatcher) finish(j Job, out JobResult) {
 			} else if attempt > 1 {
 				log.Printf("dispatcher: finish %s written after %d attempts", j.ID, attempt)
 			}
-			return
+			return ok
 		}
 		if d.base.Err() != nil || d.jobCtx.Err() != nil {
-			return // hard stop / shutdown deadline: recovery or FailUnfinished decides
+			return true // hard stop / shutdown deadline: recovery or FailUnfinished decides
 		}
 		if time.Now().Add(backoff).After(end) {
-			log.Printf("dispatcher: finish %s gave up after %s: %v (abandoned; recovery will fail it as worker_lost)", j.ID, d.FinishRetry, err)
+			// Behaviour for an outage longer than FinishRetry: stop heartbeating this job so its lease expires and a
+			// recovery pass (any replica, once PostgreSQL is back) fails it as worker_lost. The object is NOT deleted
+			// here: the write may have committed without its reply, and deleting would break a SUCCEEDED job.
+			Counters.JobsAbandoned.Add(1)
+			log.Printf("ALERT export_job_abandoned job=%s tenant=%s status=%s key=%q: terminal write not delivered within %s: %v (heartbeats stopped; recovery will fail it as worker_lost; the object, if any, is left to the S3 lifecycle rule)",
+				j.ID, j.TenantID, out.Status, out.ObjectKey, d.FinishRetry, err)
 			if a, ok := d.Queue.(Abandoner); ok {
 				a.Abandon(j)
 			}
-			return
+			return true
 		}
 		if attempt == 1 {
 			log.Printf("dispatcher: finish %s: %v (retrying for up to %s)", j.ID, err, d.FinishRetry)
@@ -268,10 +349,10 @@ func (d *Dispatcher) finish(j Job, out JobResult) {
 		case <-t.C:
 		case <-d.jobCtx.Done():
 			t.Stop()
-			return
+			return true
 		case <-d.base.Done():
 			t.Stop()
-			return
+			return true
 		}
 		if backoff *= 2; backoff > 5*time.Second {
 			backoff = 5 * time.Second
@@ -311,7 +392,15 @@ func (d *Dispatcher) maintain() {
 // heartbeat extends our leases; logs only the first failure of an outage and the recovery with its duration.
 func (d *Dispatcher) heartbeat() {
 	hctx, hcancel := context.WithTimeout(d.bgCtx, d.OpTimeout)
-	_, err := d.Queue.Heartbeat(hctx)
+	var err error
+	if lr, ok := d.Queue.(LeaseReporter); ok {
+		var owned []string
+		if owned, err = lr.HeartbeatOwned(hctx); err == nil {
+			d.cancelLost(owned)
+		}
+	} else {
+		_, err = d.Queue.Heartbeat(hctx)
+	}
 	hcancel()
 	switch {
 	case err != nil && d.bgCtx.Err() == nil:

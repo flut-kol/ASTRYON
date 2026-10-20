@@ -33,11 +33,23 @@ ORDER BY rows - unique_events DESC LIMIT %d FORMAT JSONEachRow`, c.Events, f, t,
 
 // query runs a read-only statement (FORMAT JSONEachRow) and decodes each row into a T.
 func query[T any](ctx context.Context, c *Client, sql string) ([]T, error) {
+	return queryWith[T](ctx, c, sql, nil)
+}
+
+// queryWith is query plus per-request settings (e.g. max_execution_time). ClickHouse rejects setting changes under
+// readonly=1, so requests that carry settings use readonly=2 (still no writes or DDL).
+func queryWith[T any](ctx context.Context, c *Client, sql string, settings map[string]string) ([]T, error) {
 	v := url.Values{}
 	if c.Database != "" {
 		v.Set("database", c.Database)
 	}
 	v.Set("readonly", "1")
+	if len(settings) > 0 {
+		v.Set("readonly", "2")
+		for k, val := range settings {
+			v.Set(k, val)
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/?"+v.Encode(), strings.NewReader(sql))
 	if err != nil {
 		return nil, err

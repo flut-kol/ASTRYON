@@ -3,11 +3,9 @@ package gateway
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,13 +18,17 @@ import (
 
 // KafkaConfig is the producer configuration, loaded from env only.
 type KafkaConfig struct {
-	Brokers   []string
-	ClientID  string
-	TLS       bool
-	TLSCAFile string // optional PEM bundle; system roots if empty
-	SASLMech  string // "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
-	SASLUser  string
-	SASLPass  string
+	Brokers     []string
+	ClientID    string
+	TLS         bool
+	TLSCAFile   string // optional PEM bundle; system roots if empty
+	TLSCertFile string // optional client certificate (mTLS); with TLSKeyFile
+	TLSKeyFile  string
+	// TLSReloadInterval: how often changed CA/cert/key files are re-read (0 = never).
+	TLSReloadInterval time.Duration
+	SASLMech          string // "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+	SASLUser          string
+	SASLPass          string
 	// DeliveryTimeout bounds one record from produce call to ack (incl. retries).
 	DeliveryTimeout time.Duration
 }
@@ -51,6 +53,11 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 		return c, err
 	}
 	c.TLS = tlsOn
+	c.TLSCertFile = getenv("ASTRYON_KAFKA_TLS_CERT_FILE")
+	c.TLSKeyFile = getenv("ASTRYON_KAFKA_TLS_KEY_FILE")
+	if c.TLSReloadInterval, err = parseTLSReloadInterval("ASTRYON_KAFKA", getenv("ASTRYON_KAFKA_TLS_RELOAD_INTERVAL")); err != nil {
+		return c, err
+	}
 	for _, b := range strings.Split(getenv("ASTRYON_KAFKA_BROKERS"), ",") {
 		if b = strings.TrimSpace(b); b != "" {
 			c.Brokers = append(c.Brokers, b)
@@ -82,6 +89,9 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 	if c.SASLMech == "PLAIN" && !c.TLS {
 		return c, errors.New("ASTRYON_KAFKA_SASL_MECHANISM=PLAIN requires ASTRYON_KAFKA_TLS=1 (password would be sent in clear)")
 	}
+	if err := c.tlsMaterial().validate(c.TLS); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -97,23 +107,15 @@ func parseTLSFlag(v string) (bool, error) {
 	return false, fmt.Errorf("ASTRYON_KAFKA_TLS must be 1/true or 0/false, got %q", v)
 }
 
-// tlsConfig builds the client TLS config: system roots or the given CA bundle,
-// server certificate chain and hostname always verified (no InsecureSkipVerify).
-func (c KafkaConfig) tlsConfig() (*tls.Config, error) {
-	tc := &tls.Config{MinVersion: tls.VersionTLS12}
-	if c.TLSCAFile != "" {
-		pem, err := os.ReadFile(c.TLSCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read ASTRYON_KAFKA_TLS_CA_FILE: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("ASTRYON_KAFKA_TLS_CA_FILE: no valid PEM certificates")
-		}
-		tc.RootCAs = pool
-	}
-	return tc, nil
+// tlsMaterial describes the TLS files (CA bundle, optional client certificate) and reload period.
+func (c KafkaConfig) tlsMaterial() tlsMaterial {
+	return tlsMaterial{Prefix: "ASTRYON_KAFKA", CAFile: c.TLSCAFile, CertFile: c.TLSCertFile, KeyFile: c.TLSKeyFile, Interval: c.TLSReloadInterval}
 }
+
+// tlsConfig builds the startup snapshot of the client TLS config: system roots or the given CA bundle,
+// optional client certificate; server certificate chain and hostname always verified (no InsecureSkipVerify).
+// Connections use kafkaTLSOpt, which also reloads renewed files.
+func (c KafkaConfig) tlsConfig() (*tls.Config, error) { return staticTLSConfig(c.tlsMaterial()) }
 
 func (c KafkaConfig) saslMechanism() sasl.Mechanism {
 	switch c.SASLMech {
@@ -251,11 +253,11 @@ func NewKafkaPublisher(c KafkaConfig) (*KafkaPublisher, error) {
 		kgo.ProducerLinger(0), // latency-first: each Publish is awaited individually
 	}
 	if c.TLS {
-		tc, err := c.tlsConfig()
+		tlsOpt, err := kafkaTLSOpt(c.tlsMaterial())
 		if err != nil {
 			return nil, err
 		}
-		opts = append(opts, kgo.DialTLSConfig(tc))
+		opts = append(opts, tlsOpt)
 	}
 	if m := c.saslMechanism(); m != nil {
 		opts = append(opts, kgo.SASL(m))

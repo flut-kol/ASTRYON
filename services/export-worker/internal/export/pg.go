@@ -68,15 +68,16 @@ const (
 	// Recovery rule (see README): a claimed-but-not-started job (QUEUED, started_at NULL, owner lease expired) returns to
 	// QUEUED with attempts+1 while attempts+1 < $1 (max attempts); an exhausted one is FAILED 'max_attempts'; a job that
 	// had started (RUNNING) may have written output and is FAILED 'worker_lost', never re-run. Requeue runs first.
-	sqlRequeue    = `UPDATE export_jobs SET locked_by = NULL, lease_expires_at = NULL, attempts = attempts + 1 WHERE status = 'QUEUED' AND started_at IS NULL AND locked_by IS NOT NULL AND lease_expires_at < now() AND attempts + 1 < $1`
-	sqlRecover    = `UPDATE export_jobs SET status = 'FAILED', error_code = CASE WHEN status = 'QUEUED' AND started_at IS NULL THEN 'max_attempts' ELSE 'worker_lost' END, finished_at = now(), locked_by = NULL, lease_expires_at = NULL WHERE status IN ('QUEUED','RUNNING') AND locked_by IS NOT NULL AND lease_expires_at < now()`
-	sqlStart      = `UPDATE export_jobs SET status = 'RUNNING', started_at = now(), lease_expires_at = now() + make_interval(secs => $4) WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND status = 'QUEUED'`
-	sqlFinish     = `UPDATE export_jobs SET status = $4, rows = $5, bytes = $6, object_key = NULLIF($7,''), error_code = NULLIF($8,''), finished_at = now(), locked_by = NULL, lease_expires_at = NULL WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND status = 'RUNNING'`
-	sqlRelease    = `UPDATE export_jobs SET locked_by = NULL, lease_expires_at = NULL WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND status = 'QUEUED' AND started_at IS NULL`
-	sqlHeartbeat  = `UPDATE export_jobs SET lease_expires_at = now() + make_interval(secs => $2) WHERE locked_by = $1 AND status IN ('QUEUED','RUNNING') AND NOT (id::text = ANY($3::text[]))`
-	sqlClaimPick  = `SELECT id::text, tenant_id::text FROM export_jobs WHERE status = 'QUEUED' AND deleted_at IS NULL AND locked_by IS NULL ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`
-	sqlClaimSet   = `UPDATE export_jobs SET locked_by = $3, lease_expires_at = now() + make_interval(secs => $4) WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING ` + jobCols
-	sqlQuotaCount = `SELECT count(*) FILTER (WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'), count(*) FILTER (WHERE status IN ('QUEUED','RUNNING')) FROM export_jobs WHERE tenant_id = $1::uuid`
+	sqlRequeue        = `UPDATE export_jobs SET locked_by = NULL, lease_expires_at = NULL, attempts = attempts + 1 WHERE status = 'QUEUED' AND started_at IS NULL AND locked_by IS NOT NULL AND lease_expires_at < now() AND attempts + 1 < $1`
+	sqlRecover        = `UPDATE export_jobs SET status = 'FAILED', error_code = CASE WHEN status = 'QUEUED' AND started_at IS NULL THEN 'max_attempts' ELSE 'worker_lost' END, finished_at = now(), locked_by = NULL, lease_expires_at = NULL WHERE status IN ('QUEUED','RUNNING') AND locked_by IS NOT NULL AND lease_expires_at < now()`
+	sqlStart          = `UPDATE export_jobs SET status = 'RUNNING', started_at = now(), lease_expires_at = now() + make_interval(secs => $4) WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND status = 'QUEUED'`
+	sqlFinish         = `UPDATE export_jobs SET status = $4, rows = $5, bytes = $6, object_key = NULLIF($7,''), error_code = NULLIF($8,''), finished_at = now(), locked_by = NULL, lease_expires_at = NULL WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND status = 'RUNNING'`
+	sqlRelease        = `UPDATE export_jobs SET locked_by = NULL, lease_expires_at = NULL WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND status = 'QUEUED' AND started_at IS NULL`
+	sqlHeartbeat      = `UPDATE export_jobs SET lease_expires_at = now() + make_interval(secs => $2) WHERE locked_by = $1 AND status IN ('QUEUED','RUNNING') AND NOT (id::text = ANY($3::text[]))`
+	sqlHeartbeatOwned = `WITH u AS (UPDATE export_jobs SET lease_expires_at = now() + make_interval(secs => $2) WHERE locked_by = $1 AND status IN ('QUEUED','RUNNING') AND NOT (id::text = ANY($3::text[])) RETURNING id::text) SELECT COALESCE(array_agg(id), ARRAY[]::text[]) FROM u`
+	sqlClaimPick      = `SELECT id::text, tenant_id::text FROM export_jobs WHERE status = 'QUEUED' AND deleted_at IS NULL AND locked_by IS NULL ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`
+	sqlClaimSet       = `UPDATE export_jobs SET locked_by = $3, lease_expires_at = now() + make_interval(secs => $4) WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING ` + jobCols
+	sqlQuotaCount     = `SELECT count(*) FILTER (WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'), count(*) FILTER (WHERE status IN ('QUEUED','RUNNING')) FROM export_jobs WHERE tenant_id = $1::uuid`
 )
 
 // PGJobStore is the durable, replica-safe JobStore backed by export_jobs (migration 0009).
@@ -351,6 +352,16 @@ func (s *PGJobStore) Heartbeat(ctx context.Context) (int, error) {
 		return e
 	})
 	return int(n), err
+}
+
+// HeartbeatOwned is Heartbeat that also returns the ids of the jobs whose lease it extended; a running job that is
+// missing (recovered as worker_lost by another replica) has lost its lease and the Dispatcher cancels it.
+func (s *PGJobStore) HeartbeatOwned(ctx context.Context) ([]string, error) {
+	var ids []string
+	err := s.inTx(ctx, "", true, func(tx Tx) error {
+		return tx.QueryRow(ctx, sqlHeartbeatOwned, s.WorkerID, s.lease(), s.abandonedIDs()).Scan(&ids)
+	})
+	return ids, err
 }
 
 // Claim takes one unowned QUEUED job with FOR UPDATE SKIP LOCKED and leases it to this worker; it stays QUEUED

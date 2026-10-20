@@ -10,29 +10,32 @@ import (
 
 // Config is read from environment variables only.
 type Config struct {
-	Brokers         []string
-	KafkaTLS        bool   // CHSINK_KAFKA_TLS=1|true
-	KafkaTLSCAFile  string // optional PEM bundle; system roots if empty
-	KafkaSASLMech   string // "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
-	KafkaSASLUser   string
-	KafkaSASLPass   string
-	Topic           string
-	QuarantineTopic string
-	GroupID         string
-	CHURL           string
-	CHDatabase      string
-	CHUser          string
-	CHPassword      string
-	CHTable         string
-	IntentTable     string        // optional durable chunk boundaries (migration 0004); empty = disabled
-	IntentWait      time.Duration // max time to wait for redelivery of a recorded range before giving up on it
-	BatchSize       int
-	BatchInterval   time.Duration
-	MaxRetries      int // 0 = retry until shutdown
-	RetryBackoff    time.Duration
-	RetryBackoffMax time.Duration
-	ShutdownTimeout time.Duration
-	MetricsAddr     string
+	Brokers                []string
+	KafkaTLS               bool   // CHSINK_KAFKA_TLS=1|true
+	KafkaTLSCAFile         string // optional PEM bundle; system roots if empty
+	KafkaTLSCertFile       string // optional client certificate (mTLS); with KafkaTLSKeyFile
+	KafkaTLSKeyFile        string
+	KafkaTLSReloadInterval time.Duration // re-read changed CA/cert/key files this often (0 = never)
+	KafkaSASLMech          string        // "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+	KafkaSASLUser          string
+	KafkaSASLPass          string
+	Topic                  string
+	QuarantineTopic        string
+	GroupID                string
+	CHURL                  string
+	CHDatabase             string
+	CHUser                 string
+	CHPassword             string
+	CHTable                string
+	IntentTable            string        // optional durable chunk boundaries (migration 0004); empty = disabled
+	IntentWait             time.Duration // max time to wait for redelivery of a recorded range before giving up on it
+	BatchSize              int
+	BatchInterval          time.Duration
+	MaxRetries             int // 0 = retry until shutdown
+	RetryBackoff           time.Duration
+	RetryBackoffMax        time.Duration
+	ShutdownTimeout        time.Duration
+	MetricsAddr            string
 }
 
 func env(k, d string) string {
@@ -69,24 +72,29 @@ func envDur(k string, d time.Duration) (time.Duration, error) {
 // LoadConfig reads CHSINK_* variables. Defaults match infra/docker/docker-compose.dev.yml.
 func LoadConfig() (Config, error) {
 	c := Config{
-		Brokers:         strings.Split(env("CHSINK_KAFKA_BROKERS", "127.0.0.1:19092"), ","),
-		KafkaTLSCAFile:  os.Getenv("CHSINK_KAFKA_TLS_CA_FILE"),
-		KafkaSASLMech:   strings.ToUpper(strings.TrimSpace(os.Getenv("CHSINK_KAFKA_SASL_MECHANISM"))),
-		KafkaSASLUser:   os.Getenv("CHSINK_KAFKA_SASL_USERNAME"),
-		KafkaSASLPass:   os.Getenv("CHSINK_KAFKA_SASL_PASSWORD"),
-		Topic:           env("CHSINK_TOPIC", "processed.events.v1"),
-		QuarantineTopic: env("CHSINK_QUARANTINE_TOPIC", "events.quarantine.v1"),
-		GroupID:         env("CHSINK_GROUP_ID", "clickhouse-sink"),
-		CHURL:           env("CHSINK_CH_URL", "http://127.0.0.1:18124"),
-		CHDatabase:      env("CHSINK_CH_DATABASE", "astryon"),
-		CHUser:          env("CHSINK_CH_USER", "astryon"),
-		CHPassword:      os.Getenv("CHSINK_CH_PASSWORD"),
-		CHTable:         env("CHSINK_CH_TABLE", "events_normalized_local"),
-		IntentTable:     os.Getenv("CHSINK_INTENT_TABLE"),
-		MetricsAddr:     os.Getenv("CHSINK_METRICS_ADDR"),
+		Brokers:          strings.Split(env("CHSINK_KAFKA_BROKERS", "127.0.0.1:19092"), ","),
+		KafkaTLSCAFile:   os.Getenv("CHSINK_KAFKA_TLS_CA_FILE"),
+		KafkaTLSCertFile: os.Getenv("CHSINK_KAFKA_TLS_CERT_FILE"),
+		KafkaTLSKeyFile:  os.Getenv("CHSINK_KAFKA_TLS_KEY_FILE"),
+		KafkaSASLMech:    strings.ToUpper(strings.TrimSpace(os.Getenv("CHSINK_KAFKA_SASL_MECHANISM"))),
+		KafkaSASLUser:    os.Getenv("CHSINK_KAFKA_SASL_USERNAME"),
+		KafkaSASLPass:    os.Getenv("CHSINK_KAFKA_SASL_PASSWORD"),
+		Topic:            env("CHSINK_TOPIC", "processed.events.v1"),
+		QuarantineTopic:  env("CHSINK_QUARANTINE_TOPIC", "events.quarantine.v1"),
+		GroupID:          env("CHSINK_GROUP_ID", "clickhouse-sink"),
+		CHURL:            env("CHSINK_CH_URL", "http://127.0.0.1:18124"),
+		CHDatabase:       env("CHSINK_CH_DATABASE", "astryon"),
+		CHUser:           env("CHSINK_CH_USER", "astryon"),
+		CHPassword:       os.Getenv("CHSINK_CH_PASSWORD"),
+		CHTable:          env("CHSINK_CH_TABLE", "events_normalized_local"),
+		IntentTable:      os.Getenv("CHSINK_INTENT_TABLE"),
+		MetricsAddr:      os.Getenv("CHSINK_METRICS_ADDR"),
 	}
 	var err error
 	if c.KafkaTLS, err = parseTLSFlag(os.Getenv("CHSINK_KAFKA_TLS")); err != nil {
+		return c, err
+	}
+	if c.KafkaTLSReloadInterval, err = parseTLSReloadInterval("CHSINK_KAFKA", os.Getenv("CHSINK_KAFKA_TLS_RELOAD_INTERVAL")); err != nil {
 		return c, err
 	}
 	if err = c.validateKafkaSecurity(); err != nil {
@@ -150,6 +158,9 @@ func (c Config) validateKafkaSecurity() error {
 	}
 	if c.KafkaSASLMech == "PLAIN" && !c.KafkaTLS {
 		return fmt.Errorf("CHSINK_KAFKA_SASL_MECHANISM=PLAIN requires CHSINK_KAFKA_TLS=1 (password would be sent in clear)")
+	}
+	if err := c.tlsMaterial().validate(c.KafkaTLS); err != nil {
+		return err
 	}
 	return nil
 }

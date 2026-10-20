@@ -63,6 +63,10 @@ func (g *guard) Read(p []byte) (int, error) {
 		return n, io.EOF
 	}
 	if err != nil {
+		if errors.Is(err, ErrCHTimeout) {
+			g.err = err
+			return n, g.err
+		}
 		g.err = fmt.Errorf("%w: %v", ErrTruncated, err)
 		return n, g.err
 	}

@@ -425,8 +425,8 @@ func TestRedisFallbackLocalWhenDown(t *testing.T) {
 			t.Fatalf("unexpected %v", err)
 		}
 	}
-	if ok != 2 {
-		t.Fatalf("local fallback admitted %d, want burst 2", ok)
+	if ok != 1 { // seeded at FallbackFraction(0.5)*burst, no Redis-known count
+		t.Fatalf("local fallback admitted %d, want seed 1", ok)
 	}
 	fb, rj := l.SharedStats()
 	if fb != 5 || rj != 0 {

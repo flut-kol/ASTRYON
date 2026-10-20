@@ -3,11 +3,9 @@ package replay
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -32,23 +30,15 @@ func parseTLSFlag(v string) (bool, error) {
 	return false, fmt.Errorf("ASTRYON_KAFKA_TLS must be 1/true or 0/false, got %q", v)
 }
 
-// tlsConfig builds the client TLS config: system roots or the given CA bundle,
-// server certificate chain and hostname always verified (no InsecureSkipVerify).
-func (c KafkaConfig) tlsConfig() (*tls.Config, error) {
-	tc := &tls.Config{MinVersion: tls.VersionTLS12}
-	if c.TLSCAFile != "" {
-		pem, err := os.ReadFile(c.TLSCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read ASTRYON_KAFKA_TLS_CA_FILE: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("ASTRYON_KAFKA_TLS_CA_FILE: no valid PEM certificates")
-		}
-		tc.RootCAs = pool
-	}
-	return tc, nil
+// tlsMaterial describes the TLS files (CA bundle, optional client certificate) and reload period.
+func (c KafkaConfig) tlsMaterial() tlsMaterial {
+	return tlsMaterial{Prefix: "ASTRYON_KAFKA", CAFile: c.TLSCAFile, CertFile: c.TLSCertFile, KeyFile: c.TLSKeyFile, Interval: c.TLSReloadInterval}
 }
+
+// tlsConfig builds the startup snapshot of the client TLS config: system roots or the given CA bundle,
+// optional client certificate; server certificate chain and hostname always verified (no InsecureSkipVerify).
+// Connections use kafkaTLSOpt, which also reloads renewed files.
+func (c KafkaConfig) tlsConfig() (*tls.Config, error) { return staticTLSConfig(c.tlsMaterial()) }
 
 func (c KafkaConfig) saslMechanism() sasl.Mechanism {
 	switch c.SASLMech {
@@ -170,11 +160,11 @@ func newFranzProducer(c KafkaConfig) (franzProducer, error) {
 		kgo.ProducerLinger(0),
 	}
 	if c.TLS {
-		tc, err := c.tlsConfig()
+		tlsOpt, err := kafkaTLSOpt(c.tlsMaterial())
 		if err != nil {
 			return franzProducer{}, err
 		}
-		opts = append(opts, kgo.DialTLSConfig(tc))
+		opts = append(opts, tlsOpt)
 	}
 	if m := c.saslMechanism(); m != nil {
 		opts = append(opts, kgo.SASL(m))

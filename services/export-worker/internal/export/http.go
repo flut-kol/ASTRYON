@@ -274,6 +274,8 @@ func (r *Runner) runNoPresign(ctx context.Context, p Principal, id string, spec 
 
 func errCode(err error, ctx context.Context) string {
 	switch {
+	case errors.Is(err, ErrCHTimeout) && ctx.Err() == nil:
+		return "clickhouse_timeout"
 	case errors.Is(err, ErrInvalidSpec):
 		return "invalid_spec"
 	case errors.Is(err, ErrRowCap):

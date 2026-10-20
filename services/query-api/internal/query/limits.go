@@ -51,6 +51,16 @@ type SharedDecision struct {
 	Reason     string // when !Admitted: "rate" or "concurrent"
 	RetryAfter int    // seconds, >= 1 when !Admitted
 	Slot       string // when Admitted: lease id to pass to Release
+	// Tokens is the bucket content left after this decision when TokensKnown (used to seed the local fallback bucket).
+	Tokens      float64
+	TokensKnown bool
+}
+
+// DomainResolver is optionally implemented by a SharedCounter: FailureDomain names the failure domain (for Redis
+// Cluster the master node currently serving the tenant's slot) so an outage only degrades tenants of that domain.
+// "" or no implementation = one global domain (single node, Sentinel).
+type DomainResolver interface {
+	FailureDomain(tenant string) string
 }
 
 // SharedCounter is a cross-replica store for the per-tenant rate bucket and concurrency leases.
@@ -76,10 +86,16 @@ type LimiterConfig struct {
 	IdleTTL       time.Duration // tenants idle (no tokens owed, nothing in flight) longer than this are evicted
 	MaxTenants    int           // hard bound on tracked tenants
 	SlotLease     time.Duration // shared mode: concurrency lease; must exceed the longest query (default 60s)
+
+	// Local fallback bound (shared mode, FailLocal). When Redis is unavailable for a tenant its local bucket is seeded
+	// from the last Redis-known token count (else FallbackFraction*Burst), both divided by Replicas, and refills at
+	// RatePerSec/Replicas, so the whole fleet admits about seed + rate*outage instead of Replicas*(burst + rate*outage).
+	FallbackFraction float64 // (0,1]; default 0.5 (QUERY_REDIS_FALLBACK_FRACTION)
+	Replicas         int     // expected query-api replicas sharing the limit; default 1 (QUERY_REPLICAS)
 }
 
 // DefaultLimiterConfig holds safe defaults.
-var DefaultLimiterConfig = LimiterConfig{RatePerSec: 10, Burst: 20, MaxConcurrent: 8, IdleTTL: 10 * time.Minute, MaxTenants: 10000, SlotLease: 60 * time.Second}
+var DefaultLimiterConfig = LimiterConfig{RatePerSec: 10, Burst: 20, MaxConcurrent: 8, IdleTTL: 10 * time.Minute, MaxTenants: 10000, SlotLease: 60 * time.Second, FallbackFraction: 0.5, Replicas: 1}
 
 func (c LimiterConfig) withDefaults() LimiterConfig {
 	d := DefaultLimiterConfig
@@ -101,6 +117,12 @@ func (c LimiterConfig) withDefaults() LimiterConfig {
 	if c.SlotLease <= 0 {
 		c.SlotLease = d.SlotLease
 	}
+	if c.FallbackFraction <= 0 || c.FallbackFraction > 1 {
+		c.FallbackFraction = d.FallbackFraction
+	}
+	if c.Replicas <= 0 {
+		c.Replicas = d.Replicas
+	}
 	return c
 }
 
@@ -109,6 +131,12 @@ type tenantState struct {
 	last     time.Time
 	inflight int
 	seen     time.Time
+	lastFB   time.Time // last time this tenant was served by the fallback (episode detection)
+}
+
+type knownTokens struct {
+	tokens float64
+	at     time.Time
 }
 
 // Limiter is a per-tenant token bucket plus in-flight cap. Keys are tenant IDs from the verified Principal only.
@@ -121,15 +149,20 @@ type Limiter struct {
 
 	shared    SharedCounter
 	mode      FailureMode
-	smu       sync.Mutex // guards downUntil, lastLog
-	downUntil time.Time
+	smu       sync.Mutex           // guards downUntil, lastLog
+	downUntil map[string]time.Time // failure domain -> Redis skipped until (see DomainResolver)
 	lastLog   time.Time
-	fallbacks atomic.Uint64 // requests served by the local limiter because shared was down
-	rejected  atomic.Uint64 // requests rejected 503 because shared was down (closed mode)
-	renewing  atomic.Int64  // lease-renewal goroutines currently running (observability/tests)
+	kmu       sync.Mutex
+	known     map[string]knownTokens // tenant -> last bucket content reported by Redis
+	fallbacks atomic.Uint64          // requests served by the local limiter because shared was down
+	rejected  atomic.Uint64          // requests rejected 503 because shared was down (closed mode)
+	renewing  atomic.Int64           // lease-renewal goroutines currently running (observability/tests)
 }
 
-const sharedCooldown = 2 * time.Second // after a shared failure, skip it this long (no per-request timeout storm)
+const (
+	sharedCooldown  = 2 * time.Second  // after a shared failure, skip that failure domain this long (no per-request timeout storm)
+	fallbackEpisode = 10 * time.Second // a tenant unseen by the fallback this long starts a new outage episode (reseed)
+)
 
 // UseShared attaches a cross-replica store. mode "" means FailLocal.
 func (l *Limiter) UseShared(sc SharedCounter, mode FailureMode) {
@@ -160,7 +193,8 @@ func (l *Limiter) logSharedErr(format string, err error) {
 }
 
 func NewLimiter(cfg LimiterConfig) *Limiter {
-	return &Limiter{cfg: cfg.withDefaults(), now: time.Now, tenants: map[string]*tenantState{}}
+	return &Limiter{cfg: cfg.withDefaults(), now: time.Now, tenants: map[string]*tenantState{},
+		downUntil: map[string]time.Time{}, known: map[string]knownTokens{}}
 }
 
 // Acquire admits one query for tenant. On success the caller MUST call release exactly once.
@@ -177,14 +211,67 @@ func (l *Limiter) AcquireCtx(ctx context.Context, tenant string) (release func()
 		if rel, ra, aerr, done := l.acquireShared(ctx, tenant); done {
 			return rel, ra, aerr
 		}
+		return l.acquireLocal(tenant, true) // shared store unavailable for this tenant: bounded fallback
 	}
-	return l.acquireLocal(tenant)
+	return l.acquireLocal(tenant, false)
+}
+
+// noteTokens remembers the bucket content Redis reported for tenant (bounded by MaxTenants).
+func (l *Limiter) noteTokens(tenant string, tokens float64) {
+	l.kmu.Lock()
+	if _, ok := l.known[tenant]; !ok && len(l.known) >= l.cfg.MaxTenants {
+		for k := range l.known { // arbitrary eviction keeps the bound; a missing entry only means "unknown"
+			delete(l.known, k)
+			break
+		}
+	}
+	l.known[tenant] = knownTokens{tokens, l.now()}
+	l.kmu.Unlock()
+}
+
+// fbCapacity is the fleet-share bucket size of the local fallback.
+func (l *Limiter) fbCapacity() float64 {
+	return math.Max(1, float64(l.cfg.Burst)/float64(l.cfg.Replicas))
+}
+
+// seedFallback starts the local fallback bucket of a tenant at the beginning of an outage episode: from the last
+// Redis-known count (refilled at the global rate for the time since, capped at burst) or FallbackFraction*Burst,
+// divided by the expected replicas so the fleet-wide seed equals one bucket, not Replicas buckets.
+func (l *Limiter) seedFallback(tenant string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	st := l.tenants[tenant]
+	if st != nil && now.Sub(st.lastFB) < fallbackEpisode {
+		st.lastFB = now
+		return
+	}
+	seed := l.cfg.FallbackFraction * float64(l.cfg.Burst)
+	l.kmu.Lock()
+	if k, ok := l.known[tenant]; ok {
+		seed = math.Min(float64(l.cfg.Burst), k.tokens+now.Sub(k.at).Seconds()*l.cfg.RatePerSec)
+	}
+	l.kmu.Unlock()
+	seed /= float64(l.cfg.Replicas)
+	if st == nil {
+		if len(l.tenants) >= l.cfg.MaxTenants {
+			l.evictOldest()
+		}
+		st = &tenantState{}
+		l.tenants[tenant] = st
+	}
+	st.tokens, st.last, st.seen, st.lastFB = math.Min(seed, l.fbCapacity()), now, now, now
 }
 
 // acquireShared returns done=false when the caller should use the local limiter (fail-local policy).
 func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release func(), retryAfter int, aerr *apiError, done bool) {
+	dom := ""
+	if dr, ok := l.shared.(DomainResolver); ok {
+		dom = dr.FailureDomain(tenant)
+	}
 	l.smu.Lock()
-	down := l.now().Before(l.downUntil)
+	now := l.now()
+	down := now.Before(l.downUntil[dom])
 	l.smu.Unlock()
 	var err error
 	var d SharedDecision
@@ -192,8 +279,16 @@ func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release fun
 		d, err = l.shared.Acquire(tenant, l.cfg)
 		if err != nil {
 			l.smu.Lock()
-			l.downUntil = l.now().Add(sharedCooldown)
+			now = l.now()
+			for k, t := range l.downUntil { // domains are few (cluster masters); drop expired ones
+				if !now.Before(t) {
+					delete(l.downUntil, k)
+				}
+			}
+			l.downUntil[dom] = now.Add(sharedCooldown)
 			l.smu.Unlock()
+		} else if d.TokensKnown {
+			l.noteTokens(tenant, d.Tokens)
 		}
 	}
 	if down || err != nil {
@@ -206,6 +301,7 @@ func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release fun
 				Message: "rate limiter temporarily unavailable"}, true
 		}
 		l.fallbacks.Add(1)
+		l.seedFallback(tenant)
 		return nil, 0, nil, false
 	}
 	if !d.Admitted {
@@ -263,27 +359,31 @@ func (l *Limiter) renewLoop(ctx context.Context, rn LeaseRenewer, tenant, slot s
 	}
 }
 
-func (l *Limiter) acquireLocal(tenant string) (release func(), retryAfter int, err *apiError) {
+func (l *Limiter) acquireLocal(tenant string, fb bool) (release func(), retryAfter int, err *apiError) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
 	l.sweep(now)
+	rate, capacity := l.cfg.RatePerSec, float64(l.cfg.Burst)
+	if fb {
+		rate, capacity = rate/float64(l.cfg.Replicas), l.fbCapacity()
+	}
 	st := l.tenants[tenant]
 	if st == nil {
 		if len(l.tenants) >= l.cfg.MaxTenants {
 			l.evictOldest()
 		}
-		st = &tenantState{tokens: float64(l.cfg.Burst), last: now}
+		st = &tenantState{tokens: capacity, last: now}
 		l.tenants[tenant] = st
 	}
-	st.tokens = math.Min(float64(l.cfg.Burst), st.tokens+now.Sub(st.last).Seconds()*l.cfg.RatePerSec)
+	st.tokens = math.Min(capacity, st.tokens+now.Sub(st.last).Seconds()*rate)
 	st.last, st.seen = now, now
 	if st.inflight >= l.cfg.MaxConcurrent {
 		return nil, 1, &apiError{status: 429, Code: "too_many_concurrent_queries",
 			Message: "too many concurrent queries for this tenant", Details: map[string]any{"max_concurrent": l.cfg.MaxConcurrent}}
 	}
 	if st.tokens < 1 {
-		ra := int(math.Ceil((1 - st.tokens) / l.cfg.RatePerSec))
+		ra := int(math.Ceil((1 - st.tokens) / rate))
 		if ra < 1 {
 			ra = 1
 		}
@@ -333,7 +433,7 @@ func (l *Limiter) evictOldest() {
 func (l *Limiter) size() int { l.mu.Lock(); defer l.mu.Unlock(); return len(l.tenants) }
 
 // LoadLimits reads QUERY_RATE_PER_SEC, QUERY_BURST, QUERY_MAX_CONCURRENT, QUERY_IDLE_TTL_SECONDS, QUERY_MAX_TENANTS,
-// QUERY_REDIS_LEASE_SECONDS, QUERY_MAX_EXECUTION_SECONDS, QUERY_MAX_RESULT_ROWS, QUERY_MAX_MEMORY_BYTES. Unset -> defaults; invalid -> error.
+// QUERY_REDIS_LEASE_SECONDS, QUERY_REDIS_FALLBACK_FRACTION, QUERY_REPLICAS, QUERY_MAX_EXECUTION_SECONDS, QUERY_MAX_RESULT_ROWS, QUERY_MAX_MEMORY_BYTES. Unset -> defaults; invalid -> error.
 func LoadLimits(get func(string) string) (LimiterConfig, Caps, error) {
 	cfg, caps := DefaultLimiterConfig, DefaultCaps
 	var errs []string
@@ -381,6 +481,15 @@ func LoadLimits(get func(string) string) (LimiterConfig, Caps, error) {
 		cfg.SlotLease = time.Duration(n) * time.Second
 		return nil
 	})
+	num("QUERY_REDIS_FALLBACK_FRACTION", func(v string) error {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || !(f > 0) || f > 1 {
+			return fmt.Errorf("bad")
+		}
+		cfg.FallbackFraction = f
+		return nil
+	})
+	num("QUERY_REPLICAS", pos(&cfg.Replicas))
 	num("QUERY_MAX_EXECUTION_SECONDS", pos(&caps.MaxExecutionSeconds))
 	num("QUERY_MAX_RESULT_ROWS", pos(&caps.MaxResultRows))
 	num("QUERY_MAX_MEMORY_BYTES", func(v string) error {

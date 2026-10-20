@@ -14,14 +14,18 @@ const TopicReplayJobs = "replay.jobs.v1"
 
 // KafkaConfig is the producer configuration, loaded from env only (same variables as the gateway).
 type KafkaConfig struct {
-	Brokers         []string
-	ClientID        string
-	TLS             bool
-	TLSCAFile       string // optional PEM bundle; system roots if empty
-	SASLMech        string // "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
-	SASLUser        string
-	SASLPass        string
-	DeliveryTimeout time.Duration
+	Brokers     []string
+	ClientID    string
+	TLS         bool
+	TLSCAFile   string // optional PEM bundle; system roots if empty
+	TLSCertFile string // optional client certificate (mTLS); with TLSKeyFile
+	TLSKeyFile  string
+	// TLSReloadInterval: how often changed CA/cert/key files are re-read (0 = never).
+	TLSReloadInterval time.Duration
+	SASLMech          string // "", PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+	SASLUser          string
+	SASLPass          string
+	DeliveryTimeout   time.Duration
 }
 
 // LoadKafkaConfig reads ASTRYON_KAFKA_BROKERS (required), ASTRYON_KAFKA_CLIENT_ID, ASTRYON_KAFKA_TLS (1/true/0/false; anything else is an error),
@@ -40,6 +44,11 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 		return c, err
 	}
 	c.TLS = tlsOn
+	c.TLSCertFile = getenv("ASTRYON_KAFKA_TLS_CERT_FILE")
+	c.TLSKeyFile = getenv("ASTRYON_KAFKA_TLS_KEY_FILE")
+	if c.TLSReloadInterval, err = parseTLSReloadInterval("ASTRYON_KAFKA", getenv("ASTRYON_KAFKA_TLS_RELOAD_INTERVAL")); err != nil {
+		return c, err
+	}
 	if v := getenv("ASTRYON_KAFKA_CLIENT_ID"); v != "" {
 		c.ClientID = v
 	}
@@ -73,6 +82,9 @@ func LoadKafkaConfig(getenv func(string) string) (KafkaConfig, error) {
 	}
 	if c.SASLMech == "PLAIN" && !c.TLS {
 		return c, errors.New("ASTRYON_KAFKA_SASL_MECHANISM=PLAIN requires ASTRYON_KAFKA_TLS=1 (password would be sent in clear)")
+	}
+	if err := c.tlsMaterial().validate(c.TLS); err != nil {
+		return c, err
 	}
 	return c, nil
 }

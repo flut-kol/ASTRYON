@@ -22,7 +22,8 @@ const tsLayout = "2006-01-02 15:04:05"
 // Client executes statements over the ClickHouse HTTP interface.
 type Client struct {
 	URL, Database, User, Password string
-	Events, Errors                string // source tables (default events_normalized_distributed / processing_errors_local)
+	Events, Errors                string        // source tables (default events_normalized_distributed / processing_errors_local)
+	QueryTimeout                  time.Duration // server-side max_execution_time for reconcile queries (default 120s)
 	HTTP                          *http.Client
 }
 
