@@ -1,0 +1,1 @@
+{"from":"2026-10-19T00:00:00Z","to":"2026-10-20T00:00:00Z","events_total":1204743,"events_valid":1204331,"events_rejected":412,"events_with_flags":38,"flags":[{"flag":"late_arrival","count":38}],"top_errors":[{"error_code":"SCHEMA_INVALID","stage":"validate","count":300}]}
