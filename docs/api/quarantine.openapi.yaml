@@ -3,7 +3,7 @@ info:
   title: ASTRYON Quarantine API
   version: 1.0.0
   description: |
-    Tenant-scoped quarantine browser and replay dry-run API (DPP-042). The tenant is taken only from
+    Tenant-scoped quarantine browser and bounded replay API (DPP-042). The tenant is taken only from
     validated AAS token claims and is never accepted in request bodies, query parameters, or headers.
     The dry-run endpoint is read-only: it does not publish a replay job or mutate stored data.
 servers:
@@ -75,6 +75,29 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ReplayDryRunPlan' }
         default: { $ref: '#/components/responses/Error' }
+  /v1/quarantine/replays:
+    post:
+      operationId: publishQuarantineReplay
+      summary: Publish a bounded tenant quarantine replay job
+      description: |
+        Requires the separate `astryon:quarantine:replay-publish` scope. The service repeats the
+        tenant-bound plan, requires an exact count of at most 10000, writes a durable prepared audit
+        event, and only then publishes to `quarantine.replay.jobs.v1`. This is intentionally distinct
+        from the incompatible DPP-043 `replay.jobs.v1` processing-version contract.
+      parameters: [{ $ref: '#/components/parameters/RequestId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplayDryRunRequest' }
+      responses:
+        '202':
+          description: The bounded replay job was acknowledged by Kafka.
+          headers: { X-Request-ID: { $ref: '#/components/headers/RequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReplayQueued' }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearer:
@@ -93,7 +116,8 @@ components:
     Error:
       description: |
         400 INVALID_REQUEST; 401 UNAUTHENTICATED; 403 FORBIDDEN; 415 INVALID_REQUEST;
-        503 QUARANTINE_UNAVAILABLE or REPLAY_UNAVAILABLE.
+        422 REPLAY_SCOPE_TOO_LARGE; 502 REPLAY_PUBLISH_FAILED; 503 QUARANTINE_UNAVAILABLE,
+        REPLAY_UNAVAILABLE, or AUDIT_UNAVAILABLE.
       headers:
         X-Request-ID: { $ref: '#/components/headers/RequestId' }
       content:
@@ -161,6 +185,16 @@ components:
           type: boolean
           description: False when the candidate limit is exceeded; dry-run itself remains side-effect free.
         reason: { enum: [candidate_limit_exceeded] }
+    ReplayQueued:
+      type: object
+      required: [job_id, status, candidate_count]
+      properties:
+        job_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+          description: Generated replay identifier; never supplied by the caller.
+        status: { const: queued }
+        candidate_count: { type: integer, minimum: 0, maximum: 10000 }
     Error:
       type: object
       required: [error]

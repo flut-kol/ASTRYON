@@ -28,6 +28,7 @@ var tenantUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // token claims; it is deliberately not accepted as a query parameter.
 type BrowserPrincipal struct {
 	TenantID string
+	Subject  string
 	Scopes   map[string]bool
 }
 
@@ -69,8 +70,12 @@ type BrowserStore interface {
 }
 
 type BrowserHandler struct {
-	Auth  BrowserAuthenticator
-	Store BrowserStore
+	Auth          BrowserAuthenticator
+	Store         BrowserStore
+	ReplayPlanner ReplayDryRunPlanner
+	ReplayJobs    ReplayJobPublisher
+	Audit         ReplayAuditSink
+	Now           func() time.Time
 }
 
 func (h BrowserHandler) Routes() http.Handler {
@@ -81,6 +86,8 @@ func (h BrowserHandler) Routes() http.Handler {
 		writeBrowserJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /v1/quarantine", h.list)
+	mux.HandleFunc("POST /v1/quarantine/replays/dry-run", h.replayDryRun)
+	mux.HandleFunc("POST /v1/quarantine/replays", h.replayPublish)
 	return mux
 }
 

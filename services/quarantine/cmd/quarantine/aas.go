@@ -20,7 +20,7 @@ func (a aasAuthenticator) Authenticate(r *http.Request) (replay.BrowserPrincipal
 	for _, scope := range principal.Scopes {
 		scopes[scope] = true
 	}
-	return replay.BrowserPrincipal{TenantID: principal.TenantID, Scopes: scopes}, nil
+	return replay.BrowserPrincipal{TenantID: principal.TenantID, Subject: principal.Subject, Scopes: scopes}, nil
 }
 
 func aasConfig() auth.Config {

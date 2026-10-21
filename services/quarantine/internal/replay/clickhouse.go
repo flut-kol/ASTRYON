@@ -24,7 +24,7 @@ var clickHouseIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 const clickHouseTime = "2006-01-02 15:04:05.000"
 
 const (
-	maxErrorMessageBytes = 8 << 10
+	maxErrorMessageBytes  = 8 << 10
 	maxSamplePayloadBytes = 64 << 10
 	maxClickHouseResponse = 12 << 20
 )

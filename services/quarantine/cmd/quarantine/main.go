@@ -2,6 +2,7 @@
 //
 // ClickHouse: CH_URL, CH_DATABASE, CH_USER, CH_PASSWORD, QUARANTINE_CH_TABLE.
 // AAS: AAS_BASE_URL, AAS_ISSUER, AAS_AUDIENCE, AAS_ENV, AAS_ALLOWED_AZP.
+// Kafka replay/audit: ASTRYON_KAFKA_* and optional QUARANTINE_REPLAY_TOPIC.
 // DEV ONLY: QUARANTINE_DEV_TOKEN and QUARANTINE_DEV_TENANT.
 // With neither AAS nor the dev token configured, authentication fails closed.
 package main
@@ -48,10 +49,12 @@ func main() {
 	}
 	if token := os.Getenv("QUARANTINE_DEV_TOKEN"); token != "" {
 		authenticator = replay.DevStaticAuthenticator{Token: token, Principal: replay.BrowserPrincipal{
-			TenantID: os.Getenv("QUARANTINE_DEV_TENANT"),
+			TenantID: os.Getenv("QUARANTINE_DEV_TENANT"), Subject: "dev-static",
 			Scopes: map[string]bool{
 				replay.ScopeQuarantineRead:        true,
 				replay.ScopeQuarantineReadPayload: true,
+				replay.ReplayScope:                true,
+				replay.ReplayPublishScope:         true,
 			},
 		}}
 		log.Print("WARNING: dev static authenticator enabled")
@@ -61,7 +64,21 @@ func main() {
 		User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
 		Table: env("QUARANTINE_CH_TABLE", "processing_errors_distributed"),
 	}
-	handler := (replay.BrowserHandler{Auth: authenticator, Store: store}).Routes()
+	var kafka *replay.KafkaPublisher
+	if os.Getenv("ASTRYON_KAFKA_BROKERS") != "" {
+		config, err := replay.LoadKafkaConfig(os.Getenv)
+		if err != nil {
+			log.Fatalf("kafka config: %v", err)
+		}
+		kafka, err = replay.NewKafkaPublisher(config)
+		if err != nil {
+			log.Fatalf("kafka: %v", err)
+		}
+		defer kafka.Close()
+	}
+	handler := (replay.BrowserHandler{
+		Auth: authenticator, Store: store, ReplayPlanner: store, ReplayJobs: kafka, Audit: kafka,
+	}).Routes()
 	server := &http.Server{Addr: env("LISTEN_ADDR", ":8085"), Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 
 	errorChannel := make(chan error, 1)
