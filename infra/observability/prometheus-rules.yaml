@@ -37,3 +37,33 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: ASTRYON TLS certificate expires within 14 days
+  - name: astryon-clickhouse-sink
+    rules:
+      - alert: AstryonSinkInsertFailures
+        expr: sum(increase(astryon_clickhouse_sink_insert_failures_total[10m])) > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: clickhouse-sink exhausted insert retries
+          runbook: docs/operations/runbooks/stuck-consumer.md
+      - alert: AstryonSinkCommitFailures
+        expr: sum(increase(astryon_clickhouse_sink_commit_failures_total[10m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: clickhouse-sink cannot commit Kafka offsets (duplicates possible after restart)
+          runbook: docs/operations/runbooks/stuck-consumer.md
+      - alert: AstryonSinkQuarantineRising
+        expr: sum(rate(astryon_clickhouse_sink_quarantined_total[15m])) / clamp_min(sum(rate(astryon_clickhouse_sink_consumed_total[15m])), 1) > 0.01
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 1 percent of processed events are quarantined by the sink
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonSinkStalled
+        expr: sum(rate(astryon_clickhouse_sink_consumed_total[10m])) == 0 and sum(kafka_consumergroup_lag) > 0
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: clickhouse-sink consumes nothing while lag exists
+          runbook: docs/operations/runbooks/stuck-consumer.md

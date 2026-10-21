@@ -308,3 +308,13 @@ func TestMultiPartitionChunks(t *testing.T) {
 		t.Fatalf("%+v", snk.calls)
 	}
 }
+
+func TestWritePrometheus(t *testing.T) {
+	var m Metrics
+	m.Inserted.Store(7)
+	var b strings.Builder
+	m.WritePrometheus(&b)
+	if !strings.Contains(b.String(), "# TYPE astryon_clickhouse_sink_inserted_rows_total counter\nastryon_clickhouse_sink_inserted_rows_total 7\n") {
+		t.Fatalf("bad exposition:\n%s", b.String())
+	}
+}

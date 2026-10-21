@@ -44,6 +44,10 @@ func main() {
 		go func() {
 			mux := http.NewServeMux()
 			mux.Handle("/debug/vars", expvar.Handler())
+			mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+				p.M.WritePrometheus(w)
+			})
 			log.Printf("metrics: %v", http.ListenAndServe(cfg.MetricsAddr, mux))
 		}()
 	}
