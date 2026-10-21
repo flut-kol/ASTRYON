@@ -71,7 +71,7 @@ type Profile struct {
 	MaxColumns           int // top-level fields per record
 	MaxLineBytes         int // per-record bytes
 
-	// Parser. Only "ndjson" is wired in the worker.
+	// Parser: "ndjson" or "csv" are wired; the worker picks the actual parser from the upload's content type.
 	Parser         string
 	RequiredFields []string // top-level fields every record must have
 	OnInvalid      OnInvalid

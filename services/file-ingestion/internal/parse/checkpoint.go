@@ -11,6 +11,9 @@ type Checkpoint struct {
 	SourceFingerprint string
 	NextOffset        int64
 	NextRecordNumber  int
+	// Header holds the CSV column names (record 1) so a resume from a later offset can name columns without
+	// re-reading the start of the object. Names only, never values. Empty for NDJSON.
+	Header []string `json:",omitempty"`
 }
 
 func NewCheckpoint(sourceFingerprint string) (Checkpoint, error) {

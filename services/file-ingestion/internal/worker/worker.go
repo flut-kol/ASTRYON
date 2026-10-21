@@ -263,18 +263,23 @@ func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) 
 	}
 	defer rc.Close()
 	sc := prof.NewScanner()
-	err = parse.NDJSONFrom(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, func(r parse.Record) error {
+	st := &stream{f: formatOf(j)}
+	err = st.run(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, func(row row) error {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
+		if row.Header {
+			return nil
+		}
+		r := row.Rec
 		if prof.OnInvalid == profile.FailFile && (r.Err != nil || prof.CheckRecord(r.Raw) != nil) {
 			return permanent{code: profile.CodeSchema, blocked: true}
 		}
-		if prof.MaxRecords > 0 && int64(r.Number) > prof.MaxRecords {
+		if prof.MaxRecords > 0 && st.f.dataNumber(r) > prof.MaxRecords {
 			return Permanent(profile.CodeRowLimit)
 		}
 		if r.Err == nil {
-			sc.ScanJSON(r.Raw)
+			st.scan(sc, row)
 		}
 		return nil
 	})
@@ -283,7 +288,7 @@ func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) 
 
 func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) error {
 	prof := profile.Select(j.SourceType)
-	if prof.Parser != "ndjson" {
+	if prof.Parser != "ndjson" && prof.Parser != "csv" {
 		return Permanent("parser_unavailable")
 	}
 	pol := prof.EffectiveCredentialsPolicy(w.Policies, j.TenantID, j.SourceID)
@@ -330,15 +335,21 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		return Permanent("source_changed")
 	}
 
+	st := &stream{f: formatOf(j)}
+	if len(cp.Header) > 0 {
+		st.setHeader(cp.Header)
+	}
 	var valid, invalid []Item
 	var pending []parse.Record
 	flush := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		if err := w.Sink.Accept(ctx, j, valid, invalid); err != nil {
-			w.M.SinkErrors.Add(1)
-			return err
+		if len(valid) > 0 || len(invalid) > 0 {
+			if err := w.Sink.Accept(ctx, j, valid, invalid); err != nil {
+				w.M.SinkErrors.Add(1)
+				return err
+			}
 		}
 		next := cp
 		for _, r := range pending {
@@ -346,6 +357,9 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 			if next, aerr = next.Advance(r); aerr != nil {
 				return Permanent("checkpoint_gap")
 			}
+		}
+		if st.f == formatCSV {
+			next.Header = st.header
 		}
 		raw, _ := json.Marshal(next)
 		var delta classify.Labels
@@ -363,11 +377,16 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		return nil
 	}
 	startOffset, startNumber := cp.NextOffset, cp.NextRecordNumber
-	err = parse.NDJSONFrom(rc, prof.MaxRecord(w.MaxRecordBytes), startOffset, startNumber, func(r parse.Record) error {
+	err = st.run(rc, prof.MaxRecord(w.MaxRecordBytes), startOffset, startNumber, func(rw row) error {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if prof.MaxRecords > 0 && int64(r.Number) > prof.MaxRecords {
+		r := rw.Rec
+		if rw.Header {
+			pending = append(pending, r)
+			return nil
+		}
+		if prof.MaxRecords > 0 && st.f.dataNumber(r) > prof.MaxRecords {
 			return Permanent(profile.CodeRowLimit)
 		}
 		if r.Err == nil {
@@ -376,7 +395,8 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 			}
 		}
 		if scanner != nil && r.Err == nil {
-			scanner.ScanJSON(r.Raw)
+			rw.Rec = r
+			st.scan(scanner, rw)
 		}
 		key, kerr := r.DedupKey(fp)
 		if kerr != nil {

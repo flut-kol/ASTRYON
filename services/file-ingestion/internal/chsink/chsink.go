@@ -141,12 +141,18 @@ func errorCode(err error) string {
 	if errors.Is(err, parse.ErrRecordTooLarge) {
 		return "ERR_RECORD_TOO_LARGE"
 	}
+	if errors.Is(err, parse.ErrCSVMalformed) {
+		return "ERR_CSV_MALFORMED"
+	}
 	return "ERR_JSON_MALFORMED"
 }
 
 func errorMessage(err error) string {
 	if errors.Is(err, parse.ErrRecordTooLarge) {
 		return "record exceeds the configured maximum size"
+	}
+	if errors.Is(err, parse.ErrCSVMalformed) {
+		return "record is not valid CSV for the file header"
 	}
 	return "record is not valid JSON"
 }

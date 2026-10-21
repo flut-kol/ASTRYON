@@ -26,6 +26,7 @@ var (
 type Job struct {
 	ID, TenantID, FileObjectID string
 	SourceID, SourceType       string // SourceType is the file object's processing profile name
+	ContentType                string // the upload's declared MIME type; selects the record parser
 	Fence                      int
 	MaxAttempts                int
 	Checkpoint                 json.RawMessage // last persisted parse checkpoint, nil on first run
@@ -80,7 +81,8 @@ const (
 		locked_until = now() + make_interval(secs => $4), started_at = COALESCE(started_at, now())
 		WHERE id = $1::uuid AND tenant_id = $2::uuid
 		RETURNING attempt_count, max_attempts, COALESCE(file_object_id::text,''), COALESCE(payload->'checkpoint','null')::text,
-		COALESCE(source_id::text,''), COALESCE((SELECT f.source_type FROM file_objects f WHERE f.id = jobs.file_object_id AND f.tenant_id = jobs.tenant_id),'unknown')`
+		COALESCE(source_id::text,''), COALESCE((SELECT f.source_type FROM file_objects f WHERE f.id = jobs.file_object_id AND f.tenant_id = jobs.tenant_id),'unknown'),
+		COALESCE((SELECT f.content_type FROM file_objects f WHERE f.id = jobs.file_object_id AND f.tenant_id = jobs.tenant_id),'')`
 	sqlEnqueue = `INSERT INTO jobs (tenant_id, kind, status, source_id, file_object_id, idempotency_key)
 		VALUES ($1::uuid, '` + Kind + `', 'QUEUED', $2::uuid, $3::uuid, $3)
 		ON CONFLICT (tenant_id, kind, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
@@ -168,7 +170,7 @@ func (s *Store) Claim(ctx context.Context) (Job, error) {
 			}
 			return err
 		}
-		if err := tx.QueryRow(ctx, sqlClaim, j.ID, j.TenantID, s.WorkerID, s.lease()).Scan(&j.Fence, &j.MaxAttempts, &j.FileObjectID, &cp, &j.SourceID, &j.SourceType); err != nil {
+		if err := tx.QueryRow(ctx, sqlClaim, j.ID, j.TenantID, s.WorkerID, s.lease()).Scan(&j.Fence, &j.MaxAttempts, &j.FileObjectID, &cp, &j.SourceID, &j.SourceType, &j.ContentType); err != nil {
 			return err
 		}
 		if cp != "" && cp != "null" {

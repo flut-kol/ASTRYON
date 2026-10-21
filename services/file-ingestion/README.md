@@ -40,7 +40,20 @@ role, migrations applied) proved claim exclusion, expiry fencing, resume and bac
 `Sink.Accept(valid, invalid)` -> `SaveCheckpoint` only after the sink accepted. A heartbeat goroutine cancels the work on `ErrFenced`, and a fenced
 worker writes nothing more. Failures: `Permanent(code)` -> FAILED; source fingerprint differing from the checkpoint -> `source_changed` (FAILED);
 anything else -> retryable with backoff. Shutdown leaves the lease to expire (Sweep re-queues from the checkpoint). Tests with fakes (race-clean);
-the concrete S3 `Source`, ClickHouse/Kafka `Sink` and a `cmd/` executable are not written yet.
+the concrete S3 `Source`, ClickHouse `Sink` and `cmd/file-worker` are below.
+
+### CSV in the worker
+
+The parser is chosen per job from the upload record's `content_type` (`text/csv` -> CSV, anything else NDJSON; `jobs.Job.ContentType`).
+`parse.CSVFrom` reports absolute byte offsets (quoted newlines stay inside their record, so a checkpoint never splits a field), and the
+checkpoint is the same `Offset/NextOffset/RecordNumber` plus `Header` (column names only, never values) so a resume range-reads from
+`NextOffset` and still knows the columns. Record 1 is the header: it advances the checkpoint but is not a data row and does not count towards
+`MaxRecords`; an unparseable or >1024-column header fails the file with `csv_header_invalid`, a checkpoint past the header without names with
+`bad_checkpoint`. Each data row becomes a JSON object keyed by header (BOM stripped, blank -> `colN`, repeats -> `name_2`) so profile checks
+(`RequiredFields`, `MaxColumns`), the ClickHouse sink and `DedupKey` work exactly as for NDJSON; a row with the wrong cell count or invalid quoting
+goes to `processing_errors` as `ERR_CSV_MALFORMED` (no content). Classification uses `classify.ScanCSV(header, cells)`, so labels name header
+columns (never values); pre-scan, quarantine/block/geo/PII policies, `fail_file` profiles and in-flight tagging behave as for NDJSON. Memory: one record
+plus the header. Blank lines are malformed rows. Not live-tested against MinIO/ClickHouse yet (unit tests with fakes only).
 
 ## S3 and verified objects
 

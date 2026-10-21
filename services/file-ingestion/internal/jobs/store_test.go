@@ -43,7 +43,7 @@ func (t *fakeTx) QueryRow(_ context.Context, sql string, a ...any) Row {
 	case sqlClaim:
 		return scan(func(d ...any) error {
 			*d[0].(*int), *d[1].(*int), *d[2].(*string), *d[3].(*string) = 2, 3, "file-1", `{"NextOffset":42}`
-			*d[4].(*string), *d[5].(*string) = "src-1", "geo"
+			*d[4].(*string), *d[5].(*string), *d[6].(*string) = "src-1", "geo", "text/csv"
 			return nil
 		})
 	}

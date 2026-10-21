@@ -38,3 +38,38 @@ func TestCSVOversizedRecordIsQuarantinedAndFollowingRecordContinues(t *testing.T
 		t.Fatalf("records=%+v err=%v", got, err)
 	}
 }
+
+func TestCSVFromOffsetsAreRestartPoints(t *testing.T) {
+	data := "h1,h2\r\na,\"x\ny\"\nbad\"q,1\nlast,9" // quoted newline, malformed row, final row without newline
+	var all []CSVRecord
+	if err := CSV(strings.NewReader(data), 64, func(r CSVRecord) error { all = append(all, r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 || all[0].Offset != 0 || all[3].NextOffset != int64(len(data)) || all[3].Err != nil || all[3].Fields[1] != "9" {
+		t.Fatalf("%+v", all)
+	}
+	if !errors.Is(all[2].Err, ErrCSVMalformed) || all[1].Fields[1] != "x\ny" {
+		t.Fatalf("%+v", all)
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i].Offset != all[i-1].NextOffset {
+			t.Fatalf("gap at %d: %+v", i, all)
+		}
+		var resumed []CSVRecord
+		err := CSVFrom(strings.NewReader(data[all[i].Offset:]), 64, all[i].Offset, all[i].Number, func(r CSVRecord) error { resumed = append(resumed, r); return nil })
+		if err != nil || len(resumed) != len(all)-i || resumed[0].Number != all[i].Number || resumed[0].NextOffset != all[i].NextOffset {
+			t.Fatalf("resume at %d: %+v err=%v", i, resumed, err)
+		}
+	}
+}
+
+func TestCSVOversizedRecordConsumesWholeRecord(t *testing.T) {
+	data := "aaaaaaaaaaaaaaaaaaaa,\"b\nb\"\nok,2\n"
+	var got []CSVRecord
+	if err := CSV(strings.NewReader(data), 8, func(r CSVRecord) error { got = append(got, r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !errors.Is(got[0].Err, ErrRecordTooLarge) || got[1].Offset != got[0].NextOffset || got[1].Fields[0] != "ok" {
+		t.Fatalf("%+v", got)
+	}
+}
