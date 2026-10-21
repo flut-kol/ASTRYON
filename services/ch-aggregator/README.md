@@ -30,6 +30,8 @@ Recomputes the ClickHouse aggregate tables from migration `0003_aggregates` over
 ## Reconcile
     ch-aggregator reconcile [--snapshot snap.json|-] [--compare previous.json]
 
+`AGG_RECONCILE_METRICS_FILE` (optional) makes `reconcile` write a Prometheus textfile (`astryon_ch_reconcile_findings{kind}`, `_last_exit_code`, `_last_run_timestamp_seconds`); alerts `AstryonReconcileDrift` and `AstryonReconcileCheckFailing` in `infra/observability/prometheus-rules.yaml` (DPP-045).
+
 Env (besides `CH_*`): `REGISTRY_PG_URL` (read-only role with SELECT on `ingestion_batches`; NOBYPASSRLS is fine: each query
 runs in a READ ONLY transaction that sets the constant `astryon.platform_admin='on'` locally, same switch as the
 export-worker's cross-tenant paths, plus a 30s statement_timeout), `REGISTRY_GRACE` (15m), `AGG_CHECKSUM_LOOKBACK`

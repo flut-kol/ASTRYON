@@ -100,7 +100,7 @@ func reconcile(c *agg.Client, args []string) int {
 	c.QueryTimeout = dur("AGG_QUERY_TIMEOUT", "120s")
 	ctx := context.Background()
 	o := agg.RunOptions{Window: w, ChecksumWindow: cw, Now: now, FailOnGaps: os.Getenv("AGG_FAIL_ON_GAPS") == "1",
-		Grace: dur("REGISTRY_GRACE", "15m"), SnapshotPath: *snap, ComparePath: *cmp, Limit: 1000, Out: os.Stderr, SnapOut: os.Stdout}
+		Grace: dur("REGISTRY_GRACE", "15m"), MetricsPath: os.Getenv("AGG_RECONCILE_METRICS_FILE"), SnapshotPath: *snap, ComparePath: *cmp, Limit: 1000, Out: os.Stderr, SnapOut: os.Stdout}
 	if u := os.Getenv("REGISTRY_PG_URL"); u != "" {
 		r, err := agg.NewPGRegistry(ctx, u)
 		if err != nil {

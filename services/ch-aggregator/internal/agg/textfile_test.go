@@ -29,3 +29,17 @@ func TestRunStatsTextfile(t *testing.T) {
 		t.Fatalf("temp files left: %v", m)
 	}
 }
+
+func TestReconcileStatsTextfile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "rec.prom")
+	r := ReconcileStats{Duplicates: 2, SilentChecksum: 1}
+	if err := r.Write(p, time.Unix(1_800_000_000, 0), 2); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	for _, want := range []string{`findings{kind="duplicate_rows"} 2`, `findings{kind="aggregate_drift"} 0`, `findings{kind="silent_checksum"} 1`, "last_exit_code 2", "last_run_timestamp_seconds 1800000000"} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("missing %q in\n%s", want, b)
+		}
+	}
+}

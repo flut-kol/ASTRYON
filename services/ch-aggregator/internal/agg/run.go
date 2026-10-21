@@ -19,6 +19,7 @@ type RunOptions struct {
 	SnapshotPath   string        // write the checksum snapshot here ("" = none, "-" = JSON on Out)
 	ComparePath    string        // previous snapshot to diff against ("" = none)
 	Limit          int
+	MetricsPath    string    // Prometheus textfile for the reconcile result ("" = none)
 	Out            io.Writer // human log lines
 	SnapOut        io.Writer // receives the JSON snapshot for SnapshotPath "-"
 }
@@ -27,6 +28,17 @@ type RunOptions struct {
 // registry mismatch or a silent checksum change (gaps and transient mismatches are informational), 1 for failures to
 // run a check, else 0.
 func (c *Client) Run(ctx context.Context, o RunOptions) int {
+	var rs ReconcileStats
+	code := c.run(ctx, o, &rs)
+	if o.MetricsPath != "" {
+		if err := rs.Write(o.MetricsPath, o.Now, code); err != nil {
+			fmt.Fprintf(o.Out, "reconcile metrics file: %v\n", err)
+		}
+	}
+	return code
+}
+
+func (c *Client) run(ctx context.Context, o RunOptions, rs *ReconcileStats) int {
 	logf := func(f string, a ...any) { fmt.Fprintf(o.Out, f+"\n", a...) }
 	if o.Limit <= 0 {
 		o.Limit = 100
@@ -56,6 +68,7 @@ func (c *Client) Run(ctx context.Context, o RunOptions) int {
 		logf("gap (informational) tenant=%s source=%s pv=%d empty-hour=%s", g.TenantID, g.SourceID, g.ProcessingVersion, g.Hour)
 	}
 	bad += len(dups) + len(ad)
+	rs.Duplicates, rs.AggregateDrift = len(dups), len(ad)
 
 	if o.Registry == nil {
 		logf("registry-check skipped: REGISTRY_PG_URL not set")
@@ -73,6 +86,7 @@ func (c *Client) Run(ctx context.Context, o RunOptions) int {
 		}
 		logf("registry-check: %d batch/version pairs compared, %d mismatches (%d persistent)", rr.Checked, len(rr.Mismatches), rr.Persistent())
 		bad += rr.Persistent()
+		rs.RegistryPersistent = rr.Persistent()
 	}
 
 	snap, err := c.Checksums(ctx, o.ChecksumWindow, o.Limit*50, o.Now)
@@ -113,6 +127,7 @@ func (c *Client) Run(ctx context.Context, o RunOptions) int {
 		}
 		logf("compare: %d changed (%d silent), %d missing, %d new", len(cr.Changes), cr.SilentCount(), len(cr.Missing), cr.Added)
 		bad += cr.SilentCount()
+		rs.SilentChecksum = cr.SilentCount()
 	}
 
 	if bad > 0 || (len(gaps) > 0 && o.FailOnGaps) {
