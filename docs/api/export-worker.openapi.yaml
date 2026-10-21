@@ -76,7 +76,7 @@ components:
       description: |
         400 invalid_request (malformed JSON, unknown field such as tenant_id) | invalid_spec; 401 unauthenticated;
         403 forbidden; 404 not_found (also for another tenant's id); 413 body_too_large;
-        429 quota_exceeded | too_many_concurrent (with `Retry-After`); 503 queue_full | shutting_down (with `Retry-After`);
+        429 quota_exceeded | too_many_concurrent (with `Retry-After`); 503 queue_full | shutting_down | unavailable (PostgreSQL job store unreachable; with `Retry-After`);
         500 internal; 502 presign_failed.
       content:
         application/json:

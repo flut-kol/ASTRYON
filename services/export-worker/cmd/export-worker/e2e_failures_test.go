@@ -670,7 +670,9 @@ func TestE2ETimeoutsAndLeaseLoss(t *testing.T) {
 	t.Run("zombie_finish_rejected_object_deleted", func(t *testing.T) {
 		px := newPGProxy(t, strings.SplitN(strings.SplitN(e.pgURL, "@", 2)[1], "/", 2)[0])
 		pgViaProxy := strings.Replace(e.pgURL, strings.SplitN(strings.SplitN(e.pgURL, "@", 2)[1], "/", 2)[0], px.addr(), 1)
-		wA := e.startWorker("wFA", tok, ten, "EXPORT_SWEEP_SECONDS=0", "EXPORT_PG_URL="+pgViaProxy)
+		// A's lease is longer than the 3 s default so the "no heartbeat for a full lease" outage cancel cannot fire before
+		// the run has written its whole object (1.5-4 s depending on load); B fails the row once that lease expires.
+		wA := e.startWorker("wFA", tok, ten, "EXPORT_SWEEP_SECONDS=0", "EXPORT_PG_URL="+pgViaProxy, "EXPORT_LEASE_SECONDS=10")
 		id := e.post(wA, tok, mid)
 		waitFor(t, "job running", 30*time.Second, func() bool { return strings.HasPrefix(e.row(id), "RUNNING|") })
 		wB := e.startWorker("wFB", tok, ten, "EXPORT_SWEEP_SECONDS=0")

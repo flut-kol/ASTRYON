@@ -127,6 +127,9 @@ func (s *Server) wrap(scope string, h handler) http.HandlerFunc {
 			var ae *apiError
 			if errors.As(err, &ae) {
 				fail(ae)
+			} else if isStoreUnavailable(err) {
+				log.Printf("request_id=%q store unavailable: %v", rid, err) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
+				fail(&apiError{status: 503, retryAfter: 5, Code: "unavailable", Message: "job store temporarily unavailable"})
 			} else {
 				log.Printf("request_id=%q internal error: %v", rid, err) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 				fail(&apiError{status: 500, Code: "internal", Message: "internal error"})

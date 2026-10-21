@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -455,4 +459,24 @@ func (q *PGQuota) Acquire(tenantID string) (func(), error) {
 		return nil, err
 	}
 	return func() {}, nil
+}
+
+// isStoreUnavailable reports whether err means PostgreSQL cannot be reached or is not accepting work right
+// now (connect/IO failure, operation timeout, shutdown or connection-class SQLSTATE): the client should
+// retry later (503) rather than see an internal error (500).
+func isStoreUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	var ce *pgconn.ConnectError
+	var pe *pgconn.PgError
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.As(err, &ne), errors.As(err, &ce), pgconn.SafeToRetry(err):
+		return true
+	case errors.As(err, &pe):
+		return strings.HasPrefix(pe.Code, "08") || strings.HasPrefix(pe.Code, "57P") || pe.Code == "53300"
+	}
+	return false
 }

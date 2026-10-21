@@ -3,6 +3,8 @@ package export
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type gateStore struct {
@@ -356,5 +360,33 @@ func TestShutdownWaitsForRunning(t *testing.T) {
 	wg.Wait()
 	if m := decodeMap(t, e.do("GET", "/v1/exports/"+id, "a", "")); m["status"] != "SUCCEEDED" {
 		t.Errorf("graceful shutdown should let it finish: %v", m)
+	}
+}
+
+// downJobs simulates an unreachable PostgreSQL behind the job store.
+type downJobs struct {
+	*MemoryJobStore
+	err error
+}
+
+func (d downJobs) Create(Job) error                { return d.err }
+func (d downJobs) Get(string, string) (Job, error) { return Job{}, d.err }
+
+func TestStoreOutageIs503(t *testing.T) {
+	e := newEnv(t, newMemStore(), nil, 1)
+	e.srv.Jobs = downJobs{e.jobs, fmt.Errorf("begin: %w", &pgconn.ConnectError{Config: &pgconn.Config{}})}
+	e.h = e.srv.Handler()
+	for _, w := range []*httptest.ResponseRecorder{
+		e.do("POST", "/v1/exports", "a", specBody),
+		e.do("GET", "/v1/exports/"+strings.Repeat("a", 12), "a", ""),
+	} {
+		if w.Code != 503 || errCodeOf(t, w) != "unavailable" || w.Header().Get("Retry-After") == "" {
+			t.Fatalf("%d %v %s", w.Code, w.Header(), w.Body.String())
+		}
+	}
+	e.srv.Jobs = downJobs{e.jobs, errors.New("syntax error")}
+	e.h = e.srv.Handler()
+	if w := e.do("POST", "/v1/exports", "a", specBody); w.Code != 500 {
+		t.Fatalf("non-outage error: %d", w.Code)
 	}
 }
