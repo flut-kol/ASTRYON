@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/quota"
 	"github.com/astryon/file-ingestion/internal/s3"
 	"github.com/astryon/file-ingestion/internal/upload"
 )
@@ -224,5 +225,41 @@ func TestMetricsCountResponsesByRouteAndCode(t *testing.T) {
 		if !strings.Contains(b.String(), want) {
 			t.Errorf("missing %s in\n%s", want, b.String())
 		}
+	}
+}
+
+type fakeQuota struct{ err error }
+
+func (q fakeQuota) Check(context.Context, string, int64) error { return q.err }
+
+func TestQuotaMapsTo413And429AndFailsClosed(t *testing.T) {
+	for _, c := range []struct {
+		err   error
+		code  int
+		id    string
+		retry bool
+	}{
+		{quota.ErrFileTooLarge, 413, "FILE_TOO_LARGE", false},
+		{quota.ErrTooManyOpen, 429, "TOO_MANY_UPLOADS", true},
+		{quota.ErrDailyBytesFull, 429, "UPLOAD_QUOTA", true},
+		{errors.New("db down"), 503, "UNAVAILABLE", false},
+	} {
+		s, fs, m, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+		s.Quota = fakeQuota{c.err}
+		w := call(s.Handler(), "/v1/files/uploads", okBody)
+		if w.Code != c.code || !strings.Contains(w.Body.String(), c.id) || (w.Header().Get("Retry-After") != "") != c.retry {
+			t.Errorf("%v: %d %s %v", c.err, w.Code, w.Body, w.Header())
+		}
+		if len(fs.tenants) != 0 || m.aborted != 0 {
+			t.Errorf("%v: nothing may be registered or started", c.err)
+		}
+	}
+	s, _, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	s.Quota = fakeQuota{quota.ErrTooManyOpen}
+	call(s.Handler(), "/v1/files/uploads", okBody)
+	var b bytes.Buffer
+	s.WritePrometheus(&b)
+	if !strings.Contains(b.String(), `astryon_file_api_quota_denied_total{reason="open_uploads"} 1`) {
+		t.Fatal(b.String())
 	}
 }

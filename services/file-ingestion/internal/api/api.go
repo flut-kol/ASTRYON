@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/quota"
 	"github.com/astryon/file-ingestion/internal/s3"
 	"github.com/astryon/file-ingestion/internal/upload"
 )
@@ -53,9 +54,14 @@ type Server struct {
 	Multipart Multipart
 	Jobs      Enqueuer
 	Bucket    string
+	// Quota enforces per-tenant upload quotas (nil = unlimited). Store errors fail closed with 503.
+	Quota interface {
+		Check(ctx context.Context, tenant string, size int64) error
+	}
 
 	mu     sync.Mutex
 	counts map[string]int64
+	denied map[string]int64
 }
 
 var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -102,6 +108,15 @@ func (s *Server) WritePrometheus(w io.Writer) {
 		route, code, _ := strings.Cut(k, "|")
 		fmt.Fprintf(w, "astryon_file_api_requests_total{route=%q,code=%q} %d\n", route, code, s.counts[k])
 	}
+	fmt.Fprint(w, "# HELP astryon_file_api_quota_denied_total Uploads refused by tenant quota\n# TYPE astryon_file_api_quota_denied_total counter\n")
+	reasons := make([]string, 0, len(s.denied))
+	for k := range s.denied {
+		reasons = append(reasons, k)
+	}
+	sort.Strings(reasons)
+	for _, k := range reasons {
+		fmt.Fprintf(w, "astryon_file_api_quota_denied_total{reason=%q} %d\n", k, s.denied[k])
+	}
 }
 
 func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, bool) {
@@ -130,6 +145,9 @@ var messages = map[string]string{
 	"ALREADY_REGISTERED":  "This file was already registered for the tenant.",
 	"UNAVAILABLE":         "Temporarily unavailable; retry later.",
 	"CHECKSUM_MISMATCH":   "Uploaded content does not match the declared SHA-256 or size; the object was discarded.",
+	"FILE_TOO_LARGE":      "File exceeds the maximum upload size for this tenant.",
+	"TOO_MANY_UPLOADS":    "Too many uploads are open for this tenant; complete or wait for them to expire, then retry.",
+	"UPLOAD_QUOTA":        "The tenant's upload byte quota for the last 24 hours is exhausted.",
 	"UPLOAD_INCOMPLETE":   "Parts are missing or their ETags do not match.",
 }
 
@@ -191,6 +209,11 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BODY_INVALID")
 		return
 	}
+	if s.Quota != nil {
+		if !s.checkQuota(w, r, p.TenantID, in.SizeBytes) {
+			return
+		}
+	}
 	sess, err := s.Uploads.Create(r.Context(), p.TenantID, upload.Request{Filename: in.Filename, ContentType: in.ContentType,
 		SHA256: in.SHA256, SizeBytes: in.SizeBytes, Parts: in.Parts})
 	if errors.Is(err, upload.ErrInvalid) {
@@ -215,6 +238,37 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, createResp{FileObjectID: id, UploadID: sess.UploadID, PartURLs: sess.PartURLs, ExpiresAt: sess.ExpiresAt})
+}
+
+// checkQuota maps quota results to 413 (file size) or 429 (open uploads, daily bytes, with Retry-After).
+func (s *Server) checkQuota(w http.ResponseWriter, r *http.Request, tenant string, size int64) bool {
+	err := s.Quota.Check(r.Context(), tenant, size)
+	reason := ""
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, quota.ErrFileTooLarge):
+		reason = "file_size"
+		writeErr(w, 413, "FILE_TOO_LARGE")
+	case errors.Is(err, quota.ErrTooManyOpen):
+		reason = "open_uploads"
+		w.Header().Set("Retry-After", "60")
+		writeErr(w, 429, "TOO_MANY_UPLOADS")
+	case errors.Is(err, quota.ErrDailyBytesFull):
+		reason = "daily_bytes"
+		w.Header().Set("Retry-After", "3600")
+		writeErr(w, 429, "UPLOAD_QUOTA")
+	default:
+		writeErr(w, 503, "UNAVAILABLE")
+		return false
+	}
+	s.mu.Lock()
+	if s.denied == nil {
+		s.denied = map[string]int64{}
+	}
+	s.denied[reason]++
+	s.mu.Unlock()
+	return false
 }
 
 type completeReq struct {

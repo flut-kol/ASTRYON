@@ -31,8 +31,20 @@ paths:
         '409':
           description: The same tenant, filename and SHA-256 were already registered (`ALREADY_REGISTERED`).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '413':
+          description: The declared `size_bytes` exceeds the tenant's maximum file size (`FILE_TOO_LARGE`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '422':
           description: The source does not exist for this tenant (`SOURCE_UNKNOWN`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '429':
+          description: |
+            Per-tenant upload quota reached: `TOO_MANY_UPLOADS` (too many concurrently open, uncompleted uploads; `Retry-After: 60`)
+            or `UPLOAD_QUOTA` (declared bytes in the last 24 hours would exceed the daily quota; `Retry-After: 3600`).
+            Defaults come from service configuration and can be overridden per tenant in `tenant_quotas`
+            (`upload_file_max_bytes`/`upload_open_max` with period `total`, `upload_bytes` with period `day`).
+          headers:
+            Retry-After: { schema: { type: integer }, description: Seconds before retrying }
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         default: { $ref: '#/components/responses/Error' }
   /v1/files/uploads/{id}/complete:
@@ -71,7 +83,7 @@ components:
     Error:
       description: |
         400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type); 401 UNAUTHENTICATED;
-        403 FORBIDDEN; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
+        403 FORBIDDEN; 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

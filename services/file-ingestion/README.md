@@ -60,7 +60,7 @@ Scope `astryon:uploads:write`; tenant only from the Principal (bodies with `tena
   row and enqueues the `process_file` job (idempotent: repeating returns the same job). 422 `checksum_mismatch` (object deleted) / `upload_incomplete`.
 Env: see `cmd/file-api/main.go` (`FILE_API_PG_URL`, `FILE_S3_*`, AAS + optional DPoP like query-api, dev token for local use only).
 Proven end to end with the built binary against MinIO + PostgreSQL 16: create, part PUT, complete, job QUEUED, repeat idempotent, 401 without token.
-Contract: `docs/api/file-ingestion.openapi.yaml`; errors in `docs/errors/api-error-catalog.md` (`{code, message}`). Not yet: rate limits/quotas, malware scan.
+Contract: `docs/api/file-ingestion.openapi.yaml`; errors in `docs/errors/api-error-catalog.md` (`{code, message}`). Upload quotas: see below. Not yet: malware scan.
 
 ## Direct ClickHouse path (`internal/chsink`, `cmd/file-worker`)
 
@@ -86,7 +86,16 @@ Alert rules are in `infra/observability/prometheus-rules.yaml` (group `astryon-f
 
 ## Remaining work
 
-- malware/content scanning, object lifecycle rules, rate limits/quotas for uploads;
+- malware/content scanning, object lifecycle rules, request rate limits;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
 - per-source mapping/config for the sink (event type, time and entity fields), Parquet output;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.
+
+## Upload quotas (file-api)
+
+Per tenant (tenant from the Principal only): max file size (413 `FILE_TOO_LARGE`), max concurrently open uploads (429 `TOO_MANY_UPLOADS`),
+max declared bytes in a rolling 24 h (429 `UPLOAD_QUOTA`). Usage is derived from `file_objects` (open = uncommitted, not deleted, < 1 h old), so no
+new migration. Defaults: `FILE_MAX_BYTES`, `FILE_QUOTA_OPEN` (20), `FILE_QUOTA_BYTES_PER_DAY` (100 GiB); 0-valued overrides mean unlimited. Per-tenant
+overrides in `tenant_quotas`: `upload_file_max_bytes`/`upload_open_max` (period `total`), `upload_bytes` (period `day`). Quota store errors fail
+closed (503). The check precedes registration, so concurrent requests can overshoot by at most the in-flight count. Metric:
+`astryon_file_api_quota_denied_total{reason}`. Live test: `FILEQUOTA_PG_URL`.

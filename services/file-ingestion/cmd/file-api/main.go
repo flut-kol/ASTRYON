@@ -3,6 +3,8 @@
 // Required: FILE_API_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY.
 // Optional: FILE_S3_REGION, LISTEN_ADDR (:8085), FILE_MAX_BYTES (default 5 GiB), FILE_MAX_PARTS (default 1000),
 // FILE_CONTENT_TYPES (comma list, default application/x-ndjson,text/csv).
+// Tenant upload quota defaults (override per tenant in tenant_quotas): FILE_MAX_BYTES per file, FILE_QUOTA_OPEN (20) concurrently open
+// uploads, FILE_QUOTA_BYTES_PER_DAY (100 GiB) declared bytes in the last 24h.
 // FILE_METRICS_ADDR serves /metrics (off when unset). AAS: see aas.go. DEV ONLY: FILE_API_DEV_TOKEN + FILE_API_DEV_TENANT. Without AAS or the dev token every request is rejected.
 package main
 
@@ -20,6 +22,7 @@ import (
 	"github.com/astryon/file-ingestion/internal/api"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/quota"
 	"github.com/astryon/file-ingestion/internal/s3"
 	"github.com/astryon/file-ingestion/internal/upload"
 	goauth "github.com/astryon/go-common/auth"
@@ -98,7 +101,9 @@ func main() {
 		types[strings.TrimSpace(t)] = true
 	}
 	db := jobs.PoolDB{Pool: pool}
-	s := &api.Server{Auth: auth, Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c,
+	s := &api.Server{Auth: auth, Quota: quota.Checker{Store: quota.PGStore{DB: db}, Defaults: quota.Limits{
+		MaxFileBytes: num("FILE_MAX_BYTES", 5<<30), MaxOpen: num("FILE_QUOTA_OPEN", 20), BytesPerDay: num("FILE_QUOTA_BYTES_PER_DAY", 100<<30)}},
+		Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c,
 		Jobs: &jobs.Store{DB: db, WorkerID: "file-api"},
 		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
 			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
