@@ -67,6 +67,10 @@ type Enqueuer interface {
 	Enqueue(ctx context.Context, tenant, source, fileObject string) (string, error)
 }
 
+type Retryer interface {
+	Retry(ctx context.Context, tenant, source, fileObject string) (string, error)
+}
+
 type Server struct {
 	Auth      Authenticator
 	Uploads   upload.Service
@@ -737,8 +741,17 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"file_object_id": id, "status": "committed", "mode": "archive_inspect"})
 		return
 	}
-	job, err := s.Jobs.Enqueue(r.Context(), p.TenantID, f.SourceID, id)
+	var job string
+	if retryer, supported := s.Jobs.(Retryer); supported {
+		job, err = retryer.Retry(r.Context(), p.TenantID, f.SourceID, id)
+	} else {
+		job, err = s.Jobs.Enqueue(r.Context(), p.TenantID, f.SourceID, id)
+	}
 	if err != nil {
+		if errors.Is(err, jobs.ErrNoJob) {
+			writeErr(w, 404, "NOT_FOUND")
+			return
+		}
 		writeErr(w, 503, "UNAVAILABLE")
 		return
 	}

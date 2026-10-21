@@ -87,6 +87,10 @@ const (
 		VALUES ($1::uuid, '` + Kind + `', 'QUEUED', $2::uuid, $3::uuid, $3)
 		ON CONFLICT (tenant_id, kind, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
 		RETURNING id::text`
+	sqlRetryExisting = `UPDATE jobs SET status = 'QUEUED', attempt_count = 0, run_after = now(), finished_at = NULL,
+		last_error = NULL, locked_by = NULL, locked_until = NULL
+		WHERE tenant_id = $1::uuid AND kind = '` + Kind + `' AND file_object_id = $3::uuid AND status IN ('FAILED','QUARANTINED')
+		RETURNING id::text`
 	sqlAttempt = `INSERT INTO job_attempts (tenant_id, job_id, attempt_no, status, worker_id) VALUES ($1::uuid, $2::uuid, $3, 'RUNNING', $4)`
 
 	fenced = ` WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND attempt_count = $4 AND status = 'RUNNING' AND locked_until > now()`
@@ -340,5 +344,18 @@ func (s *Store) Enqueue(ctx context.Context, tenant, source, fileObject string) 
 	err := s.inTx(ctx, false, tenant, func(tx Tx) error {
 		return tx.QueryRow(ctx, sqlEnqueue, tenant, source, fileObject).Scan(&id)
 	})
+	return id, err
+}
+
+// Retry re-queues an exhausted terminal job for a committed file. It resets only
+// run state; the persisted parser checkpoint remains available for resumable work.
+func (s *Store) Retry(ctx context.Context, tenant, source, fileObject string) (string, error) {
+	var id string
+	err := s.inTx(ctx, false, tenant, func(tx Tx) error {
+		return tx.QueryRow(ctx, sqlRetryExisting, tenant, source, fileObject).Scan(&id)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNoJob
+	}
 	return id, err
 }
