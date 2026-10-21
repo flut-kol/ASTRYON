@@ -51,4 +51,4 @@ Auth: external AAS (`/var/apps/astranex/aas-auth`), contract in `docs/architectu
 | `libs/go-common/` | logging, shared AAS JWT verification, HTTP auth middleware | DPP-014 | in progress; `auth.Introspector`/`RequireActive` (opt-in L3, live-verified, wired into query-api via `AAS_INTROSPECTION_KEY_FILE`); DPoP core implemented (memory replay store; Redis store/live test pending), see `docs/architecture/dpop-plan.md` |
 
 ## Conventions
-Go 1.22 workspace (`go.work`), one module per service/lib; module prefix `github.com/astryon/<name>`. Ownership: one agent per subtree.
+Go 1.25 workspace (`go.work`), one module per service/lib; module prefix `github.com/astryon/<name>`. Ownership: one agent per subtree.

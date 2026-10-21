@@ -49,14 +49,10 @@ The source SBOM job currently proves generation without publishing an artifact.
 The release workflow will retain and attach the image SBOM, because that is the
 artifact consumers actually deploy.
 
-## Local govulncheck result (2026-10-21)
+## Go toolchain and govulncheck (2026-10-21)
 
-`govulncheck ./...` (Go 1.27.3, database of that date) was clean for `libs/go-common`, `services/gateway`,
-`services/clickhouse-sink` and `services/quarantine`. For `services/query-api` it reports code reachable
-through `golang.org/x/text` (GO-2026-6629 fixed in v0.41.0, GO-2026-5970 fixed in v0.39.0) and
-`github.com/jackc/pgx/v5` (GO-2026-5004 fixed in v5.9.2). Both fixed releases declare `go 1.25.0`, which conflicts
-with the repository rule "Go 1.22", so the upgrade needs a decision to raise the toolchain
-(go.work and every module `go` directive) and was not applied. The other pgx users (`ch-aggregator`,
-`export-worker`, `retry-controller`, `file-ingestion`, `replay-controller`, `replay-worker`) carry
-pgx 5.5.5 and were not scanned individually; expect the same finding. The CI `govulncheck` job will fail
-on these until the toolchain decision is made.
+The repository moved from Go 1.22 to Go 1.25 (`go.work` and every module `go 1.25.0`, CI `1.25.x`, Dockerfiles
+`golang:1.25`) because the fixes for GO-2026-6629, GO-2026-5970 (`golang.org/x/text` v0.41.0) and GO-2026-5004
+(`github.com/jackc/pgx/v5` v5.9.2) require `go 1.25.0`. After the upgrade `govulncheck ./...` reports no
+vulnerabilities in any of the 15 Go modules and `make test` and `make lint` pass. Container images were not
+rebuilt in this change.

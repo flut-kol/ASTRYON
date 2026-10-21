@@ -1,5 +1,5 @@
 # Build context: repository root.  docker build -f services/ch-aggregator/Dockerfile -t astryon/ch-aggregator .
-FROM golang:1.22 AS build
+FROM golang:1.25 AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOWORK=off
 COPY services/ch-aggregator services/ch-aggregator

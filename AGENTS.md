@@ -8,7 +8,7 @@ Distributed data platform. Source of truth: `DEVELOPMENT_PLAN.md` (sections refe
 3. After adding/removing top-level modules, update `PROJECT_INDEX.md`.
 
 ## Rules
-- Go 1.22, Go workspace (`go.work`); one module per service/lib. No secrets in repo; env vars only.
+- Go 1.25, Go workspace (`go.work`); one module per service/lib. No secrets in repo; env vars only.
 - tenant_id comes only from validated token claims, never headers/body.
 - No per-event status in PostgreSQL. Migrations forward-only + rollback note.
 - Tests next to code; `make test` must pass before reporting done.
