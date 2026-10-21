@@ -1,0 +1,228 @@
+{{- $root := . }}
+{{- range $key, $s := .Values.services }}
+{{- if $s.enabled }}
+{{- $ctx := dict "root" $root "key" $key "svc" $s }}
+{{- $fn := include "astryon.fullname" $ctx }}
+{{- $env := include "astryon.env" $ctx | fromYaml }}
+{{- $probe := default (dict "type" "none") $s.probe }}
+{{- $secretVols := default (list) $s.secretVolumes }}
+{{- $podSC := mergeOverwrite (deepCopy $root.Values.securityContext) (default (dict) $s.securityContext) }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fn }}
+  labels: {{- include "astryon.labels" $ctx | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fn }}
+  labels: {{- include "astryon.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ default 1 $s.replicas }}
+  revisionHistoryLimit: 5
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels: {{- include "astryon.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "astryon.labels" $ctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fn }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ $podSC.runAsUser }}
+        runAsGroup: {{ $podSC.runAsGroup }}
+        seccompProfile: {type: RuntimeDefault}
+      {{- if gt (int (default 1 $s.replicas)) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "astryon.selector" $ctx | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: {{ $key }}
+          image: "{{ $root.Values.image.registry }}/{{ $s.image.name }}@{{ $s.image.digest }}"
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+          {{- if or $s.port $s.metricsPort }}
+          ports:
+            {{- if $s.port }}
+            - {name: http, containerPort: {{ $s.port }}}
+            {{- end }}
+            {{- if $s.metricsPort }}
+            - {name: metrics, containerPort: {{ $s.metricsPort }}}
+            {{- end }}
+          {{- end }}
+          env:
+            {{- range $k, $v := $env }}
+            - {name: {{ $k }}, value: {{ $v | toString | quote }}}
+            {{- end }}
+            {{- range $k := default (list) $s.podNameEnv }}
+            - name: {{ $k }}
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            {{- end }}
+            {{- if and $s.kafka $root.Values.kafka.saslMechanism }}
+            {{- $ss := required "kafka.saslSecret is required when kafka.saslMechanism is set" $root.Values.kafka.saslSecret }}
+            - name: ASTRYON_KAFKA_SASL_USERNAME
+              valueFrom: {secretKeyRef: {name: {{ $ss }}, key: username}}
+            - name: ASTRYON_KAFKA_SASL_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ $ss }}, key: password}}
+            {{- end }}
+            {{- range $e := default (list) $s.secretEnv }}
+            {{- $se := ternary (dict "name" $e) $e (kindIs "string" $e) }}
+            {{- if contains "_DEV_" $se.name }}{{ fail (printf "service %s: secret env %s is dev-only" $key $se.name) }}{{ end }}
+            - name: {{ $se.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s%s" $root.Values.secretPrefix $key) $se.secretName }}
+                  key: {{ default $se.name $se.key }}
+                  {{- if $se.optional }}
+                  optional: true
+                  {{- end }}
+            {{- end }}
+          {{- if ne $probe.type "none" }}
+          {{- $pp := ternary "metrics" "http" (eq (default "port" $probe.port) "metrics") }}
+          {{- if eq $probe.type "http" }}
+          readinessProbe: {httpGet: {path: {{ $probe.path }}, port: {{ $pp }}}, initialDelaySeconds: 3, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: {{ $probe.path }}, port: {{ $pp }}}, initialDelaySeconds: 10, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+          {{- else }}
+          readinessProbe: {tcpSocket: {port: {{ $pp }}}, initialDelaySeconds: 3, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 3}
+          livenessProbe: {tcpSocket: {port: {{ $pp }}}, initialDelaySeconds: 10, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+          {{- end }}
+          {{- end }}
+          resources: {{- toYaml $s.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- range $i, $d := default (list) $s.tmpDirs }}
+            - {name: tmp-{{ $i }}, mountPath: {{ $d }}}
+            {{- end }}
+            {{- range $secretVols }}
+            - {name: {{ .name }}, mountPath: {{ .mountPath }}, readOnly: true}
+            {{- end }}
+            {{- if and $s.kafka $root.Values.kafka.caSecret }}
+            - {name: kafka-ca, mountPath: /var/run/secrets/astryon/kafka-ca, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 128Mi}}
+        {{- range $i, $d := default (list) $s.tmpDirs }}
+        - {name: tmp-{{ $i }}, emptyDir: {sizeLimit: 64Mi}}
+        {{- end }}
+        {{- range $secretVols }}
+        - name: {{ .name }}
+          secret: {secretName: {{ .secretName }}, defaultMode: 0440, items: [{key: {{ .key }}, path: {{ .key }}}]}
+        {{- end }}
+        {{- if and $s.kafka $root.Values.kafka.caSecret }}
+        - name: kafka-ca
+          secret: {secretName: {{ $root.Values.kafka.caSecret }}, defaultMode: 0444, items: [{key: ca.crt, path: ca.crt}]}
+        {{- end }}
+{{- if $s.port }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fn }}
+  labels: {{- include "astryon.labels" $ctx | nindent 4 }}
+spec:
+  selector: {{- include "astryon.selector" $ctx | nindent 4 }}
+  ports:
+    - {name: http, port: {{ $s.port }}, targetPort: http}
+{{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fn }}
+  labels: {{- include "astryon.labels" $ctx | nindent 4 }}
+spec:
+  {{- if gt (int (default 1 $s.replicas)) 1 }}
+  minAvailable: 1
+  {{- else }}
+  maxUnavailable: 1
+  {{- end }}
+  selector:
+    matchLabels: {{- include "astryon.selector" $ctx | nindent 6 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fn }}
+  labels: {{- include "astryon.labels" $ctx | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "astryon.selector" $ctx | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: {{- toYaml $root.Values.network.dns.to | nindent 8 }}
+      ports: {{- toYaml $root.Values.network.dns.ports | nindent 8 }}
+    {{- range $t := default (list) $s.egressTo }}
+    {{- $tg := required (printf "network.targets.%s is not defined" $t) (get $root.Values.network.targets $t) }}
+    {{- if not $tg.to }}{{ fail (printf "service %s: network.targets.%s.to is empty; set the real peers in the environment values file" $key $t) }}{{ end }}
+    - to: {{- toYaml $tg.to | nindent 8 }}
+      {{- with $tg.ports }}
+      ports: {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- range $p := default (list) $s.egressPods }}
+    {{- $ps := get $root.Values.services $p }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: astryon
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $p }}
+      ports: [{protocol: TCP, port: {{ $ps.port }}}]
+    {{- end }}
+    {{- with $s.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- $fromPods := default (list) $s.ingressFrom }}
+  {{- if or $fromPods (and $s.exposed $root.Values.network.ingressController.from) (and $s.metricsPort $root.Values.network.monitoring.from) }}
+  ingress:
+    {{- if and $s.exposed $root.Values.network.ingressController.from }}
+    - from: {{- toYaml $root.Values.network.ingressController.from | nindent 8 }}
+      ports: [{protocol: TCP, port: {{ $s.port }}}]
+    {{- end }}
+    {{- if $fromPods }}
+    - from:
+        {{- range $p := $fromPods }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: astryon
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              app.kubernetes.io/component: {{ $p }}
+        {{- end }}
+      ports: [{protocol: TCP, port: {{ $s.port }}}]
+    {{- end }}
+    {{- if and $s.metricsPort $root.Values.network.monitoring.from }}
+    - from: {{- toYaml $root.Values.network.monitoring.from | nindent 8 }}
+      ports: [{protocol: TCP, port: {{ $s.metricsPort }}}]
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.network.defaultDeny }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+  labels:
+    app.kubernetes.io/part-of: astryon
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}

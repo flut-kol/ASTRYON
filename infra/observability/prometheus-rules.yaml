@@ -156,3 +156,315 @@ groups:
         labels: { severity: page }
         annotations:
           summary: more than 5 percent of upload API responses are 5xx (storage or database unavailable)
+  - name: astryon-recording
+    rules:
+      - record: astryon:gateway_client_error_ratio:5m
+        expr: sum(rate(astryon_gateway_client_errors_total[5m])) / clamp_min(sum(rate(astryon_gateway_ack_total[5m])), 1)
+      - record: astryon:sink_consumed:rate5m
+        expr: sum(rate(astryon_clickhouse_sink_consumed_total[5m]))
+      - record: astryon:sink_inserted_rows:rate5m
+        expr: sum(rate(astryon_clickhouse_sink_inserted_rows_total[5m]))
+      - record: astryon:sink_quarantined:rate30m
+        expr: sum(rate(astryon_clickhouse_sink_quarantined_total[30m]))
+      - record: astryon:sink_quarantine_ratio:15m
+        expr: sum(rate(astryon_clickhouse_sink_quarantined_total[15m])) / clamp_min(sum(rate(astryon_clickhouse_sink_consumed_total[15m])), 1)
+      - record: astryon:sink_insert_retry_ratio:10m
+        expr: sum(rate(astryon_clickhouse_sink_insert_retries_total[10m])) / clamp_min(sum(rate(astryon_clickhouse_sink_batches_total[10m])), 0.001)
+      - record: astryon:file_worker_invalid_ratio:15m
+        expr: sum(rate(astryon_file_worker_invalid_records_total[15m])) / clamp_min(sum(rate(astryon_file_worker_records_total[15m])) + sum(rate(astryon_file_worker_invalid_records_total[15m])), 1)
+      - record: astryon:file_worker_failed:increase1h
+        expr: sum(increase(astryon_file_worker_jobs_failed_total[1h]))
+      - record: astryon:file_worker_retried:increase1h
+        expr: sum(increase(astryon_file_worker_jobs_retried_total[1h]))
+      - record: astryon:connector_failure_ratio:15m
+        expr: sum(rate(astryon_connector_runner_failures_total[15m])) / clamp_min(sum(rate(astryon_connector_runner_pulls_total[15m])), 0.001)
+      - record: astryon:retry_released:rate5m
+        expr: sum(rate(astryon_retry_released_total[5m]))
+      - record: astryon:query_backend_error_ratio:5m
+        expr: sum(rate(astryon_query_api_requests_total{outcome="backend_error"}[5m])) / clamp_min(sum(rate(astryon_query_api_requests_total[5m])), 1)
+  - name: astryon-pipeline-extra
+    rules:
+      - alert: AstryonGatewayAckErrorsFast
+        expr: astryon:gateway_ack_error_ratio:5m > 0.05
+        for: 3m
+        labels: { severity: page }
+        annotations:
+          summary: more than 5 percent of gateway event writes fail with 5xx (fast burn)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonGatewayClientErrorsHigh
+        expr: astryon:gateway_client_error_ratio:5m > 0.25 and sum(rate(astryon_gateway_ack_total[5m])) > 1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 25 percent of gateway event writes are rejected with 4xx (bad client, auth or schema rollout)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonSinkInsertRetriesSustained
+        expr: sum(rate(astryon_clickhouse_sink_insert_retries_total[10m])) > 0
+        for: 20m
+        labels: { severity: warning }
+        annotations:
+          summary: clickhouse-sink keeps retrying ClickHouse inserts (ClickHouse slow or unavailable)
+          runbook: docs/operations/runbooks/stuck-consumer.md
+      - alert: AstryonSinkCommitsStalled
+        expr: sum(rate(astryon_clickhouse_sink_commits_total[10m])) == 0 and sum(astryon_clickhouse_sink_buffered) > 0
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: clickhouse-sink holds buffered messages but commits no offsets
+          runbook: docs/operations/runbooks/stuck-consumer.md
+      - alert: AstryonSinkQuarantineGrowth
+        expr: astryon:sink_quarantined:rate30m > 0.1 and astryon:sink_quarantined:rate30m > 3 * sum(rate(astryon_clickhouse_sink_quarantined_total[6h]))
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: quarantine rate of clickhouse-sink is more than 3x its 6 hour average (DLQ growth)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonSinkQuarantineRisingFast
+        expr: astryon:sink_quarantine_ratio:15m > 0.10
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: more than 10 percent of processed events are quarantined by the sink
+          runbook: docs/operations/runbooks/ingestion-failures.md
+  - name: astryon-retry-connectors
+    rules:
+      - alert: AstryonRetryControllerErrors
+        expr: sum(increase(astryon_retry_errors_total[15m])) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: retry-controller polls fail (PostgreSQL unreachable or release error); scheduled retries are not released
+          runbook: docs/operations/runbooks/retry-controller.md
+      - alert: AstryonRetryControllerStalled
+        expr: sum(rate(astryon_retry_polls_total[10m])) == 0
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: retry-controller performs no polls (process down, scraped target missing or loop stuck)
+          runbook: docs/operations/runbooks/retry-controller.md
+      - alert: AstryonFileJobRetriesHigh
+        expr: astryon:file_worker_retried:increase1h > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 10 file job attempts ended in a scheduled retry in the last hour (retry backlog building; no backlog gauge exists)
+          runbook: docs/operations/runbooks/retry-controller.md
+      - alert: AstryonFileWorkerPolicyHold
+        expr: sum(increase(astryon_file_worker_policy_actions_total[1h])) > 0
+        for: 5m
+        labels: { severity: info }
+        annotations:
+          summary: file jobs were quarantined or blocked by a content policy (credentials, PII or geo labels); review before release
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonConnectorPullFailures
+        expr: astryon:connector_failure_ratio:15m > 0.20
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 20 percent of connector pulls fail (retry is scheduled per connector)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonConnectorLeaseLosses
+        expr: sum(increase(astryon_connector_runner_fenced_total[30m])) > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: connector-manager keeps abandoning pulls because the lease was lost
+  - name: astryon-slo-recording
+    rules:
+      - record: astryon:gateway_ack_slow_ratio:5m
+        expr: |
+          '1 - (sum(rate(astryon_gateway_ack_duration_seconds_bucket{outcome="ok",le="0.25"}[5m])) / clamp_min(sum(rate(astryon_gateway_ack_duration_seconds_count{outcome="ok"}[5m])), 1e-9))'
+      - record: astryon:gateway_ack_latency_burn:5m
+        expr: |
+          astryon:gateway_ack_slow_ratio:5m / 0.05
+      - record: astryon:gateway_ack_slow_ratio:30m
+        expr: |
+          '1 - (sum(rate(astryon_gateway_ack_duration_seconds_bucket{outcome="ok",le="0.25"}[30m])) / clamp_min(sum(rate(astryon_gateway_ack_duration_seconds_count{outcome="ok"}[30m])), 1e-9))'
+      - record: astryon:gateway_ack_latency_burn:30m
+        expr: |
+          astryon:gateway_ack_slow_ratio:30m / 0.05
+      - record: astryon:gateway_ack_slow_ratio:1h
+        expr: |
+          '1 - (sum(rate(astryon_gateway_ack_duration_seconds_bucket{outcome="ok",le="0.25"}[1h])) / clamp_min(sum(rate(astryon_gateway_ack_duration_seconds_count{outcome="ok"}[1h])), 1e-9))'
+      - record: astryon:gateway_ack_latency_burn:1h
+        expr: |
+          astryon:gateway_ack_slow_ratio:1h / 0.05
+      - record: astryon:gateway_ack_slow_ratio:6h
+        expr: |
+          '1 - (sum(rate(astryon_gateway_ack_duration_seconds_bucket{outcome="ok",le="0.25"}[6h])) / clamp_min(sum(rate(astryon_gateway_ack_duration_seconds_count{outcome="ok"}[6h])), 1e-9))'
+      - record: astryon:gateway_ack_latency_burn:6h
+        expr: |
+          astryon:gateway_ack_slow_ratio:6h / 0.05
+      - record: astryon:gateway_ack_p95_seconds:5m
+        expr: |
+          'histogram_quantile(0.95, sum by (le) (rate(astryon_gateway_ack_duration_seconds_bucket{outcome="ok"}[5m])))'
+      - record: astryon:gateway_ack_p99_seconds:5m
+        expr: |
+          'histogram_quantile(0.99, sum by (le) (rate(astryon_gateway_ack_duration_seconds_bucket{outcome="ok"}[5m])))'
+      - record: astryon:export_failure_ratio:30m
+        expr: |
+          sum(rate(astryon_export_failed_total[30m])) / clamp_min(sum(rate(astryon_export_started_total[30m])), 1e-9)
+      - record: astryon:export_duration_p95_seconds:30m
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(astryon_export_duration_seconds_bucket[30m])))
+      - record: astryon:replay_failed:increase1h
+        expr: |
+          sum(increase(astryon_replay_worker_replays_failed_total[1h]))
+      - record: astryon:quarantine_publish_failure_ratio:15m
+        expr: |
+          'sum(rate(astryon_quarantine_replay_publishes_total{outcome=~"publish_failed|audit_unavailable|unavailable"}[15m])) / clamp_min(sum(rate(astryon_quarantine_replay_publishes_total[15m])), 1e-9)'
+      - record: astryon:query_api_p95_seconds:5m
+        expr: |
+          histogram_quantile(0.95, sum by (le, route) (rate(astryon_query_api_request_duration_seconds_bucket[5m])))
+      - record: astryon:query_api_auth_failures:rate5m
+        expr: |
+          sum by (reason) (rate(astryon_query_api_auth_failures_total[5m]))
+      - record: astryon:retry_oldest_due_age_seconds
+        expr: |
+          max(astryon_retry_oldest_due_age_seconds)
+      - record: astryon:retry_backlog_pending
+        expr: |
+          sum(astryon_retry_backlog_pending)
+  - name: astryon-slo-alerts
+    rules:
+      - alert: AstryonGatewayAckLatencyFastBurn
+        expr: |
+          astryon:gateway_ack_latency_burn:1h > 6 and astryon:gateway_ack_latency_burn:5m > 6
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: more than 30 percent of successful gateway ACKs exceed 250 ms (p95 SLO target 250 ms, section 2; fast burn of a 5 percent slow budget)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonGatewayAckLatencySlowBurn
+        expr: |
+          astryon:gateway_ack_latency_burn:6h > 2 and astryon:gateway_ack_latency_burn:30m > 2
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 10 percent of successful gateway ACKs exceed 250 ms over 6h (slow burn of the p95 250 ms target)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonGatewayAckP99High
+        expr: |
+          astryon:gateway_ack_p99_seconds:5m > 1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: gateway ACK p99 above 1 s (p99 has no formal target; initial guardrail)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonRetryBacklogHigh
+        expr: |
+          astryon:retry_backlog_pending > 1000
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 1000 scheduled retries are pending release
+          runbook: docs/operations/runbooks/retry-controller.md
+      - alert: AstryonRetryOldestDueStale
+        expr: |
+          astryon:retry_oldest_due_age_seconds > 600
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: oldest due retry is older than 10 minutes (controller not releasing, or release blocked)
+          runbook: docs/operations/runbooks/retry-controller.md
+      - alert: AstryonRetryBacklogReadErrors
+        expr: |
+          sum(increase(astryon_retry_backlog_read_errors_total[15m])) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: retry-controller cannot read the backlog; backlog gauges are missing for those scrapes
+          runbook: docs/operations/runbooks/retry-controller.md
+      - alert: AstryonExportFailureRatioHigh
+        expr: |
+          astryon:export_failure_ratio:30m > 0.10 and sum(increase(astryon_export_started_total[30m])) >= 3
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 10 percent of exports fail (see code label of astryon_export_failed_total)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonExportSlow
+        expr: |
+          astryon:export_duration_p95_seconds:30m > 900
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: export p95 duration exceeds 15 minutes (bucket boundary 900 s)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonExportQueueErrors
+        expr: |
+          sum by (op) (increase(astryon_export_queue_errors_total[15m])) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: export-worker queue operations fail (PostgreSQL unreachable, or lease heartbeat/finish errors)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonReplayFailures
+        expr: |
+          astryon:replay_failed:increase1h > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: replay-worker reported failed replays in the last hour (code label of astryon_replay_worker_replays_failed_total)
+          runbook: docs/operations/runbooks/replay.md
+      - alert: AstryonReplayPublishErrors
+        expr: |
+          sum(increase(astryon_replay_worker_publish_errors_total[15m])) > 0 or sum(increase(astryon_replay_controller_publish_errors_total[15m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: replay job or replayed event publish to Kafka fails
+          runbook: docs/operations/runbooks/replay.md
+      - alert: AstryonReplayStuckActive
+        expr: |
+          min_over_time(astryon_replay_worker_active_replays[2h]) > 0 and sum(increase(astryon_replay_worker_replays_completed_total[2h])) == 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: a replay has been active for 2 hours with no completion (longest duration bucket is 2 h; may be a stuck replay)
+          runbook: docs/operations/runbooks/replay.md
+      - alert: AstryonQuarantineReplayPublishFailing
+        expr: |
+          astryon:quarantine_publish_failure_ratio:15m > 0.05 and sum(increase(astryon_quarantine_replay_publishes_total[15m])) >= 2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 5 percent of quarantine replay publishes fail (publish_failed, audit_unavailable or unavailable)
+          runbook: docs/operations/runbooks/replay.md
+      - alert: AstryonQuarantineAuditUnavailable
+        expr: |
+          sum(increase(astryon_quarantine_replay_publishes_total{outcome="audit_unavailable"}[15m])) > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: quarantine replay refused because the audit trail is unavailable (replays are blocked by design)
+          runbook: docs/operations/runbooks/replay.md
+      - alert: AstryonQuarantineBrowseUnavailable
+        expr: |
+          sum(rate(astryon_quarantine_browse_requests_total{outcome="unavailable"}[10m])) / clamp_min(sum(rate(astryon_quarantine_browse_requests_total[10m])), 1e-9) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 5 percent of quarantine browse requests fail with 5xx
+          runbook: docs/operations/runbooks/replay.md
+      - alert: AstryonQueryLatencyP95High
+        expr: |
+          astryon:query_api_p95_seconds:5m{route=~"events|aggregate|metrics_summary|quality_summary"} > 2.5 and on (route) sum by (route) (rate(astryon_query_api_request_duration_seconds_count[5m])) > 0.05
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: query-api p95 above 2.5 s on a route (no formal query SLO in section 2; initial guardrail)
+      - alert: AstryonQueryAuthFailureSpike
+        expr: |
+          sum(astryon:query_api_auth_failures:rate5m) > 1 and sum(astryon:query_api_auth_failures:rate5m) > 5 * sum(rate(astryon_query_api_auth_failures_total[6h]))
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: query-api authentication/authorization failures above 1/s and 5x the 6h average (credential stuffing, expired keys or client misconfiguration)
+      - alert: AstryonQueryInvalidTenant
+        expr: |
+          sum(increase(astryon_query_api_auth_failures_total{reason="invalid_tenant"}[15m])) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: repeated invalid_tenant rejections in query-api (token without valid tenant claim)

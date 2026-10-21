@@ -1,0 +1,24 @@
+# Placeholder, non-secret values so helm lint/template can render. Never deploy with this file.
+aas: {baseUrl: "https://aas.example.invalid", issuer: "https://aas.example.invalid", audience: astryon, env: dev, tokenType: at+jwt}
+kafka: {brokers: "kafka.example.invalid:9093", saslMechanism: SCRAM-SHA-512, saslSecret: astryon-kafka, caSecret: astryon-kafka-ca}
+common: {CH_URL: "http://clickhouse.example.invalid:8123"}
+network:
+  targets:
+    kafka: {to: [{ipBlock: {cidr: 192.0.2.0/24}}]}
+    postgres: {to: [{ipBlock: {cidr: 192.0.2.0/24}}]}
+    clickhouse: {to: [{ipBlock: {cidr: 192.0.2.0/24}}]}
+    s3: {to: [{ipBlock: {cidr: 192.0.2.0/24}}]}
+    aas: {to: [{ipBlock: {cidr: 192.0.2.0/24}}]}
+    connectorSources: {to: [{ipBlock: {cidr: 198.51.100.0/24}}], ports: [{protocol: TCP, port: 5432}]}
+  ingressController: {from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress}}}]}
+  monitoring: {from: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}]}
+services:
+  file-api: {env: {FILE_S3_BUCKET: b, FILE_S3_ENDPOINT: "https://s3.example.invalid"}}
+  file-worker: {env: {FILE_S3_BUCKET: b, FILE_S3_ENDPOINT: "https://s3.example.invalid"}}
+  export-worker: {env: {S3_BUCKET: b, S3_ENDPOINT: "https://s3.example.invalid"}}
+  replay-worker: {env: {REPLAYW_CH_URL: "http://clickhouse.example.invalid:8123"}}
+  admin-bff:
+    env:
+      BFF_PUBLIC_ORIGIN: "https://admin.example.invalid"
+      BFF_CLIENT_KEY_ID: key-1
+      BFF_UPSTREAMS: "gateway=http://r-gateway:8080,files=http://r-file-api:8085,query=http://r-query-api:8082"

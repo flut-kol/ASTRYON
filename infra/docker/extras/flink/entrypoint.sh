@@ -11,6 +11,9 @@ s3.access-key: ${S3_ACCESS_KEY:-demo}
 s3.secret-key: ${S3_SECRET_KEY:-demo-dev-only}
 taskmanager.numberOfTaskSlots: 2
 rest.bind-address: 0.0.0.0
+metrics.reporters: prom
+metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+metrics.reporter.prom.port: ${FLINK_METRICS_PORT:-9249-9250}
 CONF
 /opt/flink/bin/start-cluster.sh
 for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8081/overview >/dev/null 2>&1 && break; sleep 2; done

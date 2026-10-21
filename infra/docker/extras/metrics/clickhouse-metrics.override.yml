@@ -1,0 +1,10 @@
+# DEV ONLY, optional. Enables ClickHouse's built-in /metrics on the dev stack's clickhouse service (not on by default):
+#   docker compose -f infra/docker/docker-compose.dev.yml -f infra/docker/extras/metrics/clickhouse-metrics.override.yml up -d clickhouse
+# Scrape: http://127.0.0.1:${CLICKHOUSE_METRICS_HOST_PORT:-19363}/metrics
+# (relative paths resolve against the first -f file, i.e. infra/docker/)
+services:
+  clickhouse:
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_METRICS_HOST_PORT:-19363}:9363"
+    volumes:
+      - ./extras/metrics/clickhouse-prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro

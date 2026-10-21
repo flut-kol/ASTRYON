@@ -1,0 +1,6 @@
+apiVersion: v2
+name: astryon-services
+description: ASTRYON Go services and the admin-ui static site (one Deployment, ServiceAccount, PDB and NetworkPolicy per service); no secret values
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
