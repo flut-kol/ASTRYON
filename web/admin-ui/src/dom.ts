@@ -17,3 +17,12 @@ export function h<K extends keyof HTMLElementTagNameMap>(
   return el;
 }
 export function clear(el: Element) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+const NS = 'http://www.w3.org/2000/svg';
+/** Decorative stroke icon from static path data (24x24 grid); hidden from assistive tech, built without innerHTML. */
+export function svg(paths: string[], size = 24): SVGSVGElement {
+  const el = document.createElementNS(NS, 'svg');
+  for (const [k, v] of Object.entries({ viewBox: '0 0 24 24', width: String(size), height: String(size), fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) el.setAttribute(k, v);
+  for (const d of paths) { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', d); el.append(p); }
+  return el;
+}

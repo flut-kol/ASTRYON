@@ -71,6 +71,19 @@ describe('axe: BFF mode', () => {
   });
 });
 
+describe('axe: Ukrainian UI', () => {
+  it('main routes have no serious or critical violations and lang=uk', async () => {
+    localStorage.setItem('astryon_admin_lang', 'ua');
+    try {
+      for (const route of ['overview', 'uploads', 'events', 'quarantine']) {
+        await mount(route);
+        expect(document.documentElement.lang).toBe('uk');
+        expect(await violations(), route).toEqual([]);
+      }
+    } finally { localStorage.removeItem('astryon_admin_lang'); }
+  });
+});
+
 describe('page structure', () => {
   it('has skip link, one h1, labelled nav, focusable main, and sets the document title', async () => {
     await mount('uploads');

@@ -29,6 +29,9 @@ export function mockApi(method: string, pathname: string, opts: { fail?: number 
   if (base === 'quarantine' && p === '/v1/quarantine/replays/dry-run' && method === 'POST') {
     return { status: 200, json: { dry_run: true, candidate_count: 17, candidate_count_is_lower_bound: false, executable: true } };
   }
+  if (base === 'quarantine' && p === '/v1/quarantine/replays' && method === 'POST') return { status: 202, json: { job_id: 'a'.repeat(32), status: 'queued', candidate_count: 17 } };
+  if (base === 'files' && p === '/v1/jobs') return { status: 200, json: { items: [{ id: 'j1', kind: 'process_file', status: 'QUARANTINED', source_id: SRC, file_object_id: UP, attempt_count: 1, max_attempts: 5, events_processed: 0, events_failed: 0, error: 'CREDENTIALS_DETECTED', labels: { contains_pii: 3 }, created_at: T, started_at: T, finished_at: T }], next_cursor: '' } };
+  if (base === 'connectors' && p === '/v1/sources') return { status: 200, json: { items: [{ id: SRC, name: 'Orders', kind: 'api_pull', enabled: true, connector_count: 2, created_at: T, updated_at: T }], next_cursor: '' } };
   if (base === 'replays' && p === '/v1/replays') {
     return { status: 200, json: { items: [{ id: 'r1', source_id: SRC, processing_version: 2, status: 'COMPLETED', time_from: T, time_to: T, job_id: 'j1', created_at: T, updated_at: T, completed_at: T }], next_cursor: '' } };
   }

@@ -37,3 +37,9 @@ BFF mode: build/run with `VITE_AUTH_MODE=bff` behind `services/admin-bff` (dev: 
 - `npm test`: vitest, including `src/a11y.test.ts` (axe-core 4.10.2 under jsdom over all 10 routes, token and BFF mode, error state; fails on serious/critical; jsdom cannot compute colour contrast).
 - `npm run e2e`: Playwright 1.49.1 against its own Vite server (port 15174, BFF mode) with a mocked backend (`src/mockApi.ts`, `page.route`); no AAS, services or tokens. One-time: `npx playwright install chromium`.
   `e2e/smoke.spec.ts` (sign-in states, overview, events query, quarantine + dry-run, uploads, 403 and 503 states, focus on route change) and `e2e/contrast.spec.ts` (axe with colour contrast in the real browser, light and dark, all pages).
+
+## Design, themes and languages
+- Layout: top bar (brand, session, language and theme switchers) + sidebar navigation (horizontal bar below 820 px). Styles live in `src/style.css` as CSS tokens (no inline style, no UI dependencies); icons are static SVG paths built in `src/dom.ts` (`svg()`).
+- Themes: System (follows `prefers-color-scheme`), Light, Dark; forced theme is `<html data-theme>`, kept in `localStorage` (`astryon_admin_theme`) and applied by a tiny inline script before first paint (`src/theme.ts`).
+- Languages: English and Ukrainian (`src/i18n.ts`). Code passes the English text to `t()`; the UA dictionary is keyed by it and missing entries fall back to English. Default: stored choice, else browser language `uk*` -> UA, else EN; kept in `localStorage` (`astryon_admin_lang`); `<html lang>` is `en`/`uk`. Server strings (ids, error messages, payloads) are not translated. To add a string: use `t('English text')` and add the UA entry.
+- Tests: `src/i18n.test.ts` (switching, persistence, placeholders), e2e switcher test, and contrast/axe runs in UA, in both OS schemes and with each forced theme against the opposite OS scheme.

@@ -58,7 +58,7 @@ test('events query sends a whitelisted body without tenant and renders rows', as
 test('quarantine list and replay dry-run', async ({ page }) => {
   await backend(page, { authed: true });
   await page.goto('/#/quarantine');
-  await expect(page.getByRole('cell', { name: 'BAD_VALUE' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Invalid value' })).toBeVisible();
   await page.getByLabel('Source ID').fill('00000000-0000-0000-0000-0000000000b1');
   await page.getByLabel('Pipeline version').fill('1');
   await page.getByRole('button', { name: 'Count candidates' }).click();
@@ -80,7 +80,7 @@ test('uploads list renders and the detail opens from a real button', async ({ pa
 test('401 from an API shows the sign-in prompt in an alert', async ({ page }) => {
   await backend(page, { fail: 403 });
   await page.goto('/#/replays');
-  await expect(page.getByRole('alert')).toContainText('sign in again');
+  await expect(page.getByRole('alert')).toContainText('You do not have permission for this action. Sign in again.');
 });
 
 test('503 from an API shows "not available" instead of a crash', async ({ page }) => {
@@ -101,4 +101,44 @@ test('route change moves focus to main content', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Replays' })).toBeVisible();
   await expect(page.getByRole('main')).toBeFocused();
   await expect(page).toHaveTitle('Replays - ASTRYON Admin');
+});
+
+test('language and theme switchers: UA/EN labels, forced theme, preference survives reload', async ({ page }) => {
+  await backend(page, { authed: true });
+  await page.goto('/#/overview');
+  await page.getByRole('button', { name: 'Українська' }).click();
+  await expect(page.getByRole('heading', { name: 'Огляд' })).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'uk');
+  await expect(page.getByRole('banner')).toContainText('виконано вхід як ops@example');
+  await expect(page.getByRole('button', { name: 'Вийти' })).toBeVisible();
+  await page.getByRole('button', { name: 'Темна', exact: true }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(13, 16, 23)');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Огляд' })).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: 'English' }).click();
+  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+});
+
+test('replay publish needs a dry run, an explicit confirmation, and is withdrawn when inputs change', async ({ page }) => {
+  const calls = await backend(page, { authed: true });
+  await page.goto('/#/quarantine');
+  await expect(page.getByRole('button', { name: 'Publish replay' })).toHaveCount(0);
+  await page.getByLabel('Source ID').fill('00000000-0000-0000-0000-0000000000b1');
+  await page.getByLabel('Pipeline version').fill('1');
+  await page.getByRole('button', { name: 'Count candidates' }).click();
+  const publish = page.getByRole('button', { name: 'Publish replay' });
+  await expect(publish).toBeDisabled();
+  await page.getByLabel('I understand and confirm the publication').check();
+  await expect(publish).toBeEnabled();
+  await page.getByLabel('Pipeline version').fill('2'); // editing withdraws the offer
+  await expect(publish).toHaveCount(0);
+  await page.getByRole('button', { name: 'Count candidates' }).click();
+  await page.getByLabel('I understand and confirm the publication').check();
+  await publish.click();
+  await expect(page.getByText('Replay queued')).toContainText('17 record(s)');
+  const post = calls.filter((c) => c.method === 'POST' && c.path.endsWith('/v1/quarantine/replays'));
+  expect(post).toHaveLength(1);
+  expect(post[0].headers['x-requested-with']).toBe('astryon-admin');
 });

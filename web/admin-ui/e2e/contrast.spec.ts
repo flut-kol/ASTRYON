@@ -8,8 +8,9 @@ const PAGES = ['overview', 'uploads', 'events', 'quality', 'connectors', 'export
 
 for (const scheme of ['light', 'dark'] as const) {
   for (const authed of [true, false]) {
-  test(`axe incl. color-contrast, ${scheme} scheme, ${authed ? 'signed in' : 'signed out'}, all pages`, async ({ page }) => {
+  test(`axe incl. color-contrast (UA), ${scheme} scheme, ${authed ? 'signed in' : 'signed out'}, all pages`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: scheme });
+    await page.addInitScript(() => { try { localStorage.setItem('astryon_admin_lang', 'ua'); } catch { /* ignore */ } });
     await page.route('**/auth/me', (r) => r.fulfill({ json: authed ? { authenticated: true, subject: 'ops@example' } : { authenticated: false } }));
     await page.route('**/api/**', (r) => {
       const m = mockApi(r.request().method(), new URL(r.request().url()).pathname);
@@ -19,7 +20,7 @@ for (const scheme of ['light', 'dark'] as const) {
     for (const p of PAGES) {
       await page.goto(`/#/${p}`);
       await page.getByRole('main').getByRole('heading').first().waitFor();
-      await page.waitForFunction(() => !document.querySelector('main')?.textContent?.includes('Loading...'));
+      await page.waitForFunction(() => !/Loading\.\.\.|Завантаження\.\.\./.test(document.querySelector('main')?.textContent ?? ''));
       await page.addScriptTag({ path: axeSource });
       const res = await page.evaluate(async () => {
         // @ts-expect-error axe is injected
@@ -32,4 +33,30 @@ for (const scheme of ['light', 'dark'] as const) {
     expect(bad).toEqual([]);
   });
   }
+}
+
+// A forced theme must be as accessible as the system one, whatever the OS prefers.
+for (const forced of ['light', 'dark'] as const) {
+  test(`axe incl. color-contrast, forced ${forced} theme against the opposite OS scheme`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme: forced === 'light' ? 'dark' : 'light' });
+    await page.addInitScript((v) => { try { localStorage.setItem('astryon_admin_theme', v); } catch { /* ignore */ } }, forced);
+    await page.route('**/auth/me', (r) => r.fulfill({ json: { authenticated: true, subject: 'ops@example' } }));
+    await page.route('**/api/**', (r) => {
+      const m = mockApi(r.request().method(), new URL(r.request().url()).pathname);
+      return r.fulfill({ status: m.status, contentType: m.text ? 'text/plain' : 'application/json', body: m.text ?? JSON.stringify(m.json ?? {}) });
+    });
+    const bad: string[] = [];
+    for (const p of PAGES) {
+      await page.goto(`/#/${p}`);
+      await page.getByRole('main').getByRole('heading').first().waitFor();
+      await page.waitForFunction(() => !/Loading\.\.\.|Завантаження\.\.\./.test(document.querySelector('main')?.textContent ?? ''));
+      await page.addScriptTag({ path: axeSource });
+      bad.push(...(await page.evaluate(async () => {
+        // @ts-expect-error axe is injected
+        const r = await window.axe.run(document, { resultTypes: ['violations'] });
+        return r.violations.filter((v: { impact: string }) => v.impact === 'serious' || v.impact === 'critical').map((v: { id: string }) => v.id);
+      })).map((x: string) => `${forced} #/${p} ${x}`));
+    }
+    expect(bad).toEqual([]);
+  });
 }
