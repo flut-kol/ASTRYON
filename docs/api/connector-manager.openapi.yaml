@@ -58,6 +58,7 @@ paths:
   /v1/connectors/{id}:
     get:
       operationId: getConnector
+      summary: Get a connector
       parameters: [{$ref: '#/components/parameters/Id'}]
       responses:
         '200':

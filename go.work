@@ -3,6 +3,11 @@ go 1.27.0
 use (
 	./libs/event-contracts
 	./libs/go-common
+	./libs/sdk-connector-manager
+	./libs/sdk-export-worker
+	./libs/sdk-file-ingestion
+	./libs/sdk-quarantine
+	./libs/sdk-query
 	./services/ch-aggregator
 	./services/clickhouse-sink
 	./services/connector-manager

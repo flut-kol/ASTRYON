@@ -152,10 +152,10 @@ components:
       properties:
         source_id: { type: string, format: uuid }
         filename: { type: string, description: A plain file name; path separators and `..` are rejected. }
-        content_type: { type: string, description: Must be allow-listed by the deployment (default application/x-ndjson, text/csv). }
+        content_type: { type: string, description: 'Must be allow-listed by the deployment (default application/x-ndjson, text/csv).' }
         sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
         size_bytes: { type: integer, minimum: 1, description: Bounded by the deployment (default 5 GiB). }
-        parts: { type: integer, minimum: 1, description: Bounded by the deployment (default 1000, S3 maximum 10000); every part except the last must be at least 5 MiB. }
+        parts: { type: integer, minimum: 1, description: 'Bounded by the deployment (default 1000, S3 maximum 10000); every part except the last must be at least 5 MiB.' }
         source_type:
           type: string
           description: |

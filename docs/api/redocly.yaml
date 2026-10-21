@@ -1,0 +1,10 @@
+extends:
+  - recommended
+rules:
+  # Internal API: no public licence, dev servers are localhost by design (real URLs are deployment-specific).
+  info-license: off
+  no-server-example.com: off
+  # Errors are documented through the shared `default` Error response (generated clients expose it as JSONDefault);
+  # health endpoints legitimately have no 4XX. Adding 4XX entries would rename the generated client fields.
+  operation-4xx-response: off
+  no-unused-components: error

@@ -125,6 +125,8 @@ components:
         `Retry-After` header (integer seconds) and the standard error body. Limits are per tenant (from the token); per instance, or shared
         across replicas when the service runs with `QUERY_REDIS_URL`.
         503 limiter_unavailable only when the shared limiter store is down and the service runs with `QUERY_REDIS_FAILURE=closed` (`Retry-After: 1`).
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }

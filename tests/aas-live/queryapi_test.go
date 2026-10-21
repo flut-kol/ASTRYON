@@ -14,6 +14,43 @@ import (
 	"time"
 )
 
+// startQueryAPI builds and runs services/query-api against the live AAS and returns its listen address.
+func startQueryAPI(t *testing.T, l *live, allowedAZP, chURL string) (addr string, logs *bytes.Buffer) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "query-api")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "../../services/query-api/cmd/query-api"
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build query-api: %v\n%s", err, out)
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr = ln.Addr().String()
+	ln.Close()
+	cmd := exec.Command(bin)
+	cmd.Env = append(os.Environ(), "LISTEN_ADDR="+addr, "AAS_BASE_URL="+l.base, "AAS_AUDIENCE="+l.audience, "AAS_ENV="+l.env,
+		"AAS_ALLOWED_AZP="+allowedAZP, "CH_URL="+chURL, "QUERY_DEV_TOKEN=", "QUERY_REDIS_URL=")
+	if ca := os.Getenv("AAS_LIVE_CA_FILE"); ca != "" {
+		cmd.Env = append(cmd.Env, "SSL_CERT_FILE="+ca)
+	}
+	logs = &bytes.Buffer{}
+	cmd.Stdout, cmd.Stderr = logs, logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	for i := 0; ; i++ {
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			break
+		}
+		if i > 100 {
+			t.Fatalf("query-api did not start: %s", logs.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return addr, logs
+}
+
 // TestLiveQueryAPIAdapter builds services/query-api and calls it with real AAS tokens. ClickHouse is
 // replaced by a recording stub: the only thing asserted is which tenant reaches the query layer.
 func TestLiveQueryAPIAdapter(t *testing.T) {
@@ -31,37 +68,7 @@ func TestLiveQueryAPIAdapter(t *testing.T) {
 	}))
 	defer ch.Close()
 
-	bin := filepath.Join(t.TempDir(), "query-api")
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "../../services/query-api/cmd/query-api"
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build query-api: %v\n%s", err, out)
-	}
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	ln.Close()
-	cmd := exec.Command(bin)
-	cmd.Env = append(os.Environ(), "LISTEN_ADDR="+addr, "AAS_BASE_URL="+l.base, "AAS_AUDIENCE="+l.audience, "AAS_ENV="+l.env,
-		"AAS_ALLOWED_AZP="+good.ID+","+noScope.ID, "CH_URL="+ch.URL, "QUERY_DEV_TOKEN=", "QUERY_REDIS_URL=")
-	if ca := os.Getenv("AAS_LIVE_CA_FILE"); ca != "" {
-		cmd.Env = append(cmd.Env, "SSL_CERT_FILE="+ca)
-	}
-	var logs bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &logs, &logs
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-	for i := 0; ; i++ {
-		if c, err := net.Dial("tcp", addr); err == nil {
-			c.Close()
-			break
-		}
-		if i > 100 {
-			t.Fatalf("query-api did not start: %s", logs.String())
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	addr, logs := startQueryAPI(t, l, good.ID+","+noScope.ID, ch.URL)
 	post := func(token string, body string) int {
 		req, _ := http.NewRequest("POST", "http://"+addr+"/v1/query/events", bytes.NewBufferString(body))
 		if token != "" {

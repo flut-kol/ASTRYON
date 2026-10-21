@@ -25,6 +25,50 @@ jobs:
       - name: Unit and contract tests
         run: make test
 
+  openapi:
+    name: OpenAPI lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint every spec (docs/api/redocly.yaml)
+        run: |
+          for f in docs/api/*.openapi.yaml; do
+            docker run --rm -v "$PWD/docs/api:/spec:ro" redocly/cli:1.25.5 lint --config /spec/redocly.yaml "/spec/$(basename "$f")"
+          done
+
+  sdk-drift:
+    name: Generated SDK is up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Regenerate and fail on any diff
+        run: |
+          for d in libs/sdk-*/; do (cd "$d" && GOWORK=off go generate ./...); done
+          git diff --exit-code -- libs/
+
+  openapi-breaking:
+    name: OpenAPI breaking changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Diff every spec against the base branch
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          for f in docs/api/*.openapi.yaml; do
+            n=$(basename "$f")
+            if ! git show "origin/${{ github.base_ref }}:$f" > "$RUNNER_TEMP/base/$n" 2>/dev/null; then
+              echo "$n is new, nothing to compare"; continue
+            fi
+            docker run --rm -v "$RUNNER_TEMP/base:/base:ro" -v "$PWD/docs/api:/cur:ro" tufin/oasdiff:v1.10.25 \
+              breaking "/base/$n" "/cur/$n" --fail-on ERR
+          done
+
   security:
     name: Go SAST and dependency vulnerabilities
     runs-on: ubuntu-24.04

@@ -32,6 +32,12 @@ using keys generated in the test; no secret is stored in the repo. Everything cr
 - query-api built and run: 401 without token, 403 without `astryon:query:read`, 200 with it; tenant reaching the
   ClickHouse stub equals the claim even when a conflicting `X-Tenant-ID` header is sent.
 
+## Tenant isolation through the generated client, `tenant_isolation_test.go`
+
+Two throw-away clients with different `tenant_id` (A, B) call query-api through `libs/sdk-query` with real AAS tokens. Proven
+(Keycloak 26.8.1, 2026-10-21): the tenant reaching the (stubbed) ClickHouse is always the token's own, also when token B sends
+`X-Tenant-ID=A` and token A sends `X-Tenant-ID=B`. Stored-data isolation in a real ClickHouse is covered separately by `services/query-api` `TestIntegrationTenantIsolationRealClickHouse` (`QUERY_CH_IT_URL`), without AAS.
+
 ## Introspection and revocation (L3), `introspect_test.go`
 
 `auth.Introspector` (`libs/go-common/auth/introspect.go`) against the real AAS, `private_key_jwt` ES256, endpoints from discovery
