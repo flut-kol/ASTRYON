@@ -209,3 +209,60 @@ func TestIntegrationDedupTokenMultiShard(t *testing.T) {
 		t.Fatalf("multi-shard dedup: total=%s uniq=%s, want 40/40", total, uniq)
 	}
 }
+
+// TestIntegrationDedupTokenReplicaFailover needs two replicas of one shard with Keeper and migration 0001 using
+// ReplicatedMergeTree (CHSINK_IT_URL = replica 1, CHSINK_IT_URL2 = replica 2). The same chunk is inserted into
+// replica 1 and then retried against replica 2, as after a sink failover; replicated block dedup must drop it.
+func TestIntegrationDedupTokenReplicaFailover(t *testing.T) {
+	u1, u2 := os.Getenv("CHSINK_IT_URL"), os.Getenv("CHSINK_IT_URL2")
+	if u1 == "" || u2 == "" {
+		t.Skip("CHSINK_IT_URL / CHSINK_IT_URL2 not set")
+	}
+	mk := func(u string) *CHSink {
+		s, err := NewCHSink(Config{CHURL: u, CHDatabase: os.Getenv("CHSINK_IT_DB"), CHUser: os.Getenv("CHSINK_IT_USER"),
+			CHPassword: os.Getenv("CHSINK_IT_PASSWORD"), CHTable: "events_normalized_local"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	run := func(u, query string) string {
+		q := url.Values{"database": {os.Getenv("CHSINK_IT_DB")}}
+		req, _ := http.NewRequest("POST", u+"/?"+q.Encode(), strings.NewReader(query))
+		req.Header.Set("X-ClickHouse-User", os.Getenv("CHSINK_IT_USER"))
+		req.Header.Set("X-ClickHouse-Key", os.Getenv("CHSINK_IT_PASSWORD"))
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		if r.StatusCode/100 != 2 {
+			t.Fatalf("%s: %s", query, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	part := int32(time.Now().UnixNano() % 1_000_000)
+	var rows [][]byte
+	for i := 1; i <= 5; i++ {
+		line, code, why := MapMessage(Message{Topic: "processed.events.v1", Partition: part, Offset: int64(i), Value: good(300 + i)}, fixedNow)
+		if code != "" {
+			t.Fatal(code, why)
+		}
+		rows = append(rows, line)
+	}
+	c := Chunk{Token: Token("processed.events.v1", part, 1, 5), Rows: rows}
+	for _, u := range []string{u1, u2, u1} {
+		if err := mk(u).Insert(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(u1, "SYSTEM SYNC REPLICA events_normalized_local")
+	run(u2, "SYSTEM SYNC REPLICA events_normalized_local")
+	like := fmt.Sprintf("SELECT count() FROM events_normalized_local WHERE raw_ref LIKE 'kafka:processed.events.v1/%d/%%'", part)
+	n1, n2 := run(u1, like), run(u2, like)
+	t.Logf("replica failover: r1=%s r2=%s (5 rows sent r1,r2,r1)", n1, n2)
+	if n1 != "5" || n2 != "5" {
+		t.Fatalf("replicated dedup: r1=%s r2=%s, want 5/5", n1, n2)
+	}
+}
