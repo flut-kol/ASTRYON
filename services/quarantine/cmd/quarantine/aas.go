@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -35,4 +36,27 @@ func aasConfig() auth.Config {
 		Audience: os.Getenv("AAS_AUDIENCE"), Environment: os.Getenv("AAS_ENV"), AllowedAZP: allowedAZP,
 		TokenType: os.Getenv("AAS_TOKEN_TYPE"),
 	}
+}
+
+// dpopConfig adds DPoP (L2): AAS_PUBLIC_BASE_URL enables it (rebuilds htu), AAS_REDIS_URL/AAS_REDIS_CA_FILE give
+// the shared replay store (per-instance memory otherwise: single replica only), AAS_REQUIRE_DPOP=true rejects Bearer.
+func dpopConfig(c auth.Config) (auth.Config, error) {
+	c.PublicBaseURL = os.Getenv("AAS_PUBLIC_BASE_URL")
+	c.RequireDPoP = os.Getenv("AAS_REQUIRE_DPOP") == "true"
+	if c.PublicBaseURL == "" {
+		if c.RequireDPoP {
+			return c, errors.New("AAS_REQUIRE_DPOP needs AAS_PUBLIC_BASE_URL")
+		}
+		return c, nil
+	}
+	if u := os.Getenv("AAS_REDIS_URL"); u != "" {
+		store, err := auth.NewRedisReplayStore(u, os.Getenv("AAS_REDIS_CA_FILE"))
+		if err != nil {
+			return c, err
+		}
+		c.ReplayStore = store
+	} else {
+		c.ReplayStore = &auth.MemoryReplayStore{}
+	}
+	return c, nil
 }

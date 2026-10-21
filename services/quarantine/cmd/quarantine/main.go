@@ -41,7 +41,11 @@ func main() {
 	}
 	var authenticator replay.BrowserAuthenticator = denyAll{}
 	if os.Getenv("AAS_BASE_URL") != "" {
-		verifier, err := goauth.NewVerifier(context.Background(), aasConfig())
+		cfg, err := dpopConfig(aasConfig())
+		if err != nil {
+			log.Fatalf("aas dpop: %v", err)
+		}
+		verifier, err := goauth.NewVerifier(context.Background(), cfg)
 		if err != nil {
 			log.Fatalf("aas: %v", err)
 		}

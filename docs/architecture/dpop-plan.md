@@ -6,7 +6,8 @@ Also done: `Config.OnDPoPReject(reason)` hook (services attach counters) and `WW
 Live-proven on real Redis 7 (2026-10-21, `AUTH_IT_REDIS_URL`): replay seen across two store instances, key expires after TTL.
 query-api counts rejects (`QUERY_METRICS_ADDR`, `astryon_query_api_dpop_rejected_total{reason}`).
 gateway wired with the same env (`AAS_PUBLIC_BASE_URL`, `AAS_REDIS_URL`, `AAS_REDIS_CA_FILE`, `AAS_REQUIRE_DPOP`); no reject counters there yet.
-Still open: counters in gateway, wiring in quarantine, live test with a DPoP-bound AAS client. The text below is the original plan.
+quarantine wired the same way.
+Still open: reject counters in gateway/quarantine, live test with a DPoP-bound AAS client. The text below is the original plan.
 
 Status 2026-10-20: investigation only. `Verifier` rejects `typ=DPoP` tokens and `Authorization: DPoP ...` by design (fail closed).
 Sources: `docs/architecture/authentication.md`, real Keycloak 26.8.1 behaviour recorded by the AAS owners (read-only reference
