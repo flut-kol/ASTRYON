@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astryon.example/schemas/events/quarantine-record.v1.json",
+  "title": "ASTRYON Quarantine Record v1",
+  "description": "Canonical value contract for events.quarantine.v1. Mirrors libs/event-contracts QuarantineRecordV1. tenant_id must come from a validated trust boundary. original contains bounded opaque bytes which may contain sensitive data and must not be logged or copied into an operator read model without separate policy and authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "deviation_id", "tenant_id", "quarantined_at", "stage", "reason_code", "provenance"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "deviation_id": { "$ref": "#/$defs/uuid" },
+    "tenant_id": {
+      "allOf": [{ "$ref": "#/$defs/uuid" }],
+      "description": "Validated tenant identity; never derived from untrusted original bytes."
+    },
+    "source_id": { "$ref": "#/$defs/uuid" },
+    "event_id": { "$ref": "#/$defs/uuid" },
+    "batch_id": { "$ref": "#/$defs/uuid" },
+    "job_id": { "$ref": "#/$defs/uuid" },
+    "processing_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "pipeline_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "quarantined_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "UTC timestamp. Future-skew and maximum-age checks are enforced in code."
+    },
+    "stage": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+    },
+    "diagnostic": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
+      "description": "Payload-free diagnostic; Go validation applies the limit in UTF-8 bytes."
+    },
+    "provenance": { "$ref": "#/$defs/provenance" },
+    "original": { "$ref": "#/$defs/original" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_topic"],
+      "properties": {
+        "source_topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 249,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "source_partition": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "source_offset": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 }
+      },
+      "oneOf": [
+        { "required": ["source_partition", "source_offset"] },
+        {
+          "not": {
+            "anyOf": [
+              { "required": ["source_partition"] },
+              { "required": ["source_offset"] }
+            ]
+          }
+        }
+      ]
+    },
+    "original": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "data", "truncated"],
+      "properties": {
+        "encoding": { "const": "base64" },
+        "data": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "maxLength": 87384,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "truncated": { "type": "boolean" }
+      }
+    }
+  }
+}

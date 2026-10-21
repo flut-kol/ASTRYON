@@ -3,9 +3,9 @@ info:
   title: ASTRYON Quarantine API
   version: 1.0.0
   description: |
-    Tenant-scoped read API over the bounded ClickHouse processing-error journal.
-    Tenant identity is taken only from validated AAS token claims. The API does
-    not return `raw_ref` and never accepts a tenant identifier from the request.
+    Tenant-scoped quarantine browser and replay dry-run API (DPP-042). The tenant is taken only from
+    validated AAS token claims and is never accepted in request bodies, query parameters, or headers.
+    The dry-run endpoint is read-only: it does not publish a replay job or mutate stored data.
 servers:
   - url: http://localhost:8085
 security:
@@ -18,7 +18,7 @@ paths:
       security: []
       responses:
         '200':
-          description: Process is serving HTTP
+          description: Process is serving HTTP; this is not a ClickHouse readiness claim.
           content:
             application/json:
               schema:
@@ -29,13 +29,12 @@ paths:
   /v1/quarantine:
     get:
       operationId: listQuarantine
-      summary: List processing deviations for the authenticated tenant
+      summary: List tenant quarantine records using bounded cursor pagination
       description: |
-        Requires `astryon:quarantine:read`. `include_original=true` additionally
-        requires `astryon:quarantine:read-payload` and returns only the bounded,
-        masked `sample_payload`; it does not retrieve the raw object from S3.
+        Requires `astryon:quarantine:read`. Setting `include_original=true` additionally requires
+        `astryon:quarantine:read-payload` and returns only the bounded, masked sample stored in ClickHouse.
       parameters:
-        - $ref: '#/components/parameters/RequestId'
+        - { $ref: '#/components/parameters/RequestId' }
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
@@ -45,29 +44,45 @@ paths:
           schema: { type: string, maxLength: 2732 }
         - name: include_original
           in: query
-          description: Include the bounded masked sample, subject to the payload-read scope.
           schema: { type: boolean, default: false }
       responses:
         '200':
-          description: One descending page of processing deviations
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/RequestId' }
+          description: One page of tenant-owned quarantine records
+          headers: { X-Request-ID: { $ref: '#/components/headers/RequestId' } }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/QuarantinePage' }
-        '400': { $ref: '#/components/responses/Error' }
-        '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
-        '503': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/quarantine/replays/dry-run:
+    post:
+      operationId: planQuarantineReplay
+      summary: Count a bounded replay selection without side effects
+      description: |
+        Requires `astryon:quarantine:replay`. The selection uses ClickHouse deviation-journal fields:
+        `source_id`, a half-open occurred-at range, and the pipeline version that produced the deviation.
+        It is not an offset-based replay because the current journal does not store Kafka partition/offset.
+      parameters: [{ $ref: '#/components/parameters/RequestId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplayDryRunRequest' }
+      responses:
+        '200':
+          description: Read-only replay plan. No job has been created or published.
+          headers: { X-Request-ID: { $ref: '#/components/headers/RequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReplayDryRunPlan' }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearer:
       type: http
       scheme: bearer
-      description: AAS access token carrying a tenant claim and required scopes.
+      description: AAS access token with the operation-specific quarantine scope.
   headers:
-    RequestId:
-      schema: { type: string, maxLength: 64 }
+    RequestId: { schema: { type: string, maxLength: 64 } }
   parameters:
     RequestId:
       name: X-Request-ID
@@ -76,7 +91,9 @@ components:
       schema: { type: string, maxLength: 64 }
   responses:
     Error:
-      description: Standard fail-closed API error
+      description: |
+        400 INVALID_REQUEST; 401 UNAUTHENTICATED; 403 FORBIDDEN; 415 INVALID_REQUEST;
+        503 QUARANTINE_UNAVAILABLE or REPLAY_UNAVAILABLE.
       headers:
         X-Request-ID: { $ref: '#/components/headers/RequestId' }
       content:
@@ -95,11 +112,11 @@ components:
         processing_version: { type: integer, minimum: 1 }
         pipeline_version: { type: integer, minimum: 1 }
         reason_code: { type: string }
-        reason: { type: string, description: Masked diagnostic message; must not contain unmasked PII. }
+        reason: { type: string }
         stage: { type: string }
         quarantined_at: { type: string, format: date-time }
-        original:
-          description: Bounded masked sample, present only with the separate payload-read scope.
+        original: { description: Bounded masked sample; present only when separately authorized. }
+        payload_kind: { const: masked_sample }
     QuarantinePage:
       type: object
       required: [items, next_cursor]
@@ -108,9 +125,42 @@ components:
           type: array
           maxItems: 100
           items: { $ref: '#/components/schemas/QuarantineRecord' }
-        next_cursor:
+        next_cursor: { type: string, description: Empty on the last page. }
+    ReplayDryRunRequest:
+      type: object
+      required: [source_id, occurred_from, occurred_to, pipeline_version]
+      unevaluatedProperties: false
+      properties:
+        source_id: { type: string, format: uuid }
+        occurred_from: { type: string, format: date-time }
+        occurred_to:
           type: string
-          description: Empty on the last page.
+          format: date-time
+          description: Exclusive; occurred_to - occurred_from must not exceed 31 days.
+        pipeline_version:
+          type: integer
+          minimum: 1
+          maximum: 4294967295
+          description: Version that produced the quarantined deviation, not a target replay version.
+    ReplayDryRunPlan:
+      type: object
+      required:
+        [dry_run, source_id, occurred_from, occurred_to, pipeline_version, candidate_count,
+         candidate_count_is_lower_bound, executable]
+      properties:
+        dry_run: { const: true }
+        source_id: { type: string, format: uuid }
+        occurred_from: { type: string, format: date-time }
+        occurred_to: { type: string, format: date-time }
+        pipeline_version: { type: integer, minimum: 1 }
+        candidate_count: { type: integer, minimum: 0, maximum: 10000 }
+        candidate_count_is_lower_bound:
+          type: boolean
+          description: True when the selection contains more than the 10000-candidate execution limit.
+        executable:
+          type: boolean
+          description: False when the candidate limit is exceeded; dry-run itself remains side-effect free.
+        reason: { enum: [candidate_limit_exceeded] }
     Error:
       type: object
       required: [error]
@@ -119,8 +169,7 @@ components:
           type: object
           required: [code, message, details, trace_id]
           properties:
-            code:
-              enum: [INVALID_PAGE, INVALID_CURSOR, UNAUTHENTICATED, FORBIDDEN, QUARANTINE_UNAVAILABLE]
+            code: { type: string }
             message: { type: string }
             details: {}
             trace_id: { type: string }
