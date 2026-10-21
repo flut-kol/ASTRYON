@@ -14,6 +14,8 @@ actions in the platform audit trail.
 | clickhouse-sink | [stuck-consumer.md](stuck-consumer.md) | Sink insert/commit failures, stalled consumption or growing consumer lag on `processed.events.v1`. |
 | Replay | [replay.md](replay.md) | Replay stuck/failed, bad cutover, audit gaps after a crash. |
 | Secrets | [secret-rotation.md](secret-rotation.md) | Planned rotation of Kafka certs/credentials, or suspected secret compromise. |
+| Release | [../../release/readiness-review.md](../../release/readiness-review.md) | Production readiness status (currently NO-GO) and evidence gaps. |
+| Handover | [../../release/handover.md](../../release/handover.md) | Component owners (TODO), dev stack start, env inventory by name. |
 
 ## Required runbooks before production operation
 
