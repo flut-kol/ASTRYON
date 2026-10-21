@@ -273,7 +273,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 502, "STORAGE_UNAVAILABLE")
 		return
 	}
-	id, err := s.Files.Register(r.Context(), p.TenantID, in.SourceID, objects.File{Bucket: s.Bucket, Key: sess.ObjectKey, SHA256: in.SHA256, Size: in.SizeBytes,
+	id, err := s.Files.Register(r.Context(), p.TenantID, in.SourceID, objects.File{Bucket: s.Bucket, Key: sess.ObjectKey, SHA256: in.SHA256, Size: in.SizeBytes, ContentType: in.ContentType,
 		SourceType: prof.Name, Sensitivity: sens, Tags: in.Tags})
 	if err != nil {
 		_ = s.Multipart.Abort(r.Context(), sess.ObjectKey, sess.UploadID)

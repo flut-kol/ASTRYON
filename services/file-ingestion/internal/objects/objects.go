@@ -28,7 +28,8 @@ var (
 // File is the file_objects row the workers and the verifier need.
 type File struct {
 	ID, SourceID, Bucket, Key, SHA256 string
-	Size                              int64 // declared size, -1 if unknown
+	Size                              int64  // declared size, -1 if unknown
+	ContentType                       string // declared MIME type, persisted: it selects the worker parser
 	Committed                         bool
 	SourceType                        string            // processing profile name (internal/profile)
 	Sensitivity                       string            // public|internal|restricted
@@ -151,7 +152,7 @@ func (p PGStore) Register(ctx context.Context, tenant, source string, f File) (s
 		tags = []byte("{}")
 	}
 	err := p.tx(ctx, tenant, func(tx jobs.Tx) error {
-		return tx.QueryRow(ctx, sqlRegister, tenant, source, f.Bucket, f.Key, f.Size, "", f.SHA256, st, sens, string(tags)).Scan(&id)
+		return tx.QueryRow(ctx, sqlRegister, tenant, source, f.Bucket, f.Key, f.Size, f.ContentType, f.SHA256, st, sens, string(tags)).Scan(&id)
 	})
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) {

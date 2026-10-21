@@ -53,7 +53,7 @@ checkpoint is the same `Offset/NextOffset/RecordNumber` plus `Header` (column na
 (`RequiredFields`, `MaxColumns`), the ClickHouse sink and `DedupKey` work exactly as for NDJSON; a row with the wrong cell count or invalid quoting
 goes to `processing_errors` as `ERR_CSV_MALFORMED` (no content). Classification uses `classify.ScanCSV(header, cells)`, so labels name header
 columns (never values); pre-scan, quarantine/block/geo/PII policies, `fail_file` profiles and in-flight tagging behave as for NDJSON. Memory: one record
-plus the header. Blank lines are malformed rows. Not live-tested against MinIO/ClickHouse yet (unit tests with fakes only).
+plus the header. Blank lines are malformed rows. Live e2e: `FILEINGEST_E2E=1 go test ./internal/e2e` (throwaway postgres:16 + clickhouse 24.8 + MinIO on free ports, all migrations, non-superuser role, HTTP API -> worker -> ClickHouse; covers CSV, credentials quarantine without values, geo profile, malformed row -> processing_errors; containers removed). The upload's `content_type` is persisted on `file_objects` (it was previously dropped, so every file ran as NDJSON).
 
 ## S3 and verified objects
 
@@ -140,4 +140,3 @@ before the first sink call, so quarantine/block mean nothing was written. quaran
 (`CREDENTIALS_DETECTED`, `PII_DETECTED`, ...); allow/tag: labels only (merged atomically with each checkpoint). Metrics:
 `astryon_file_worker_content_labels_total{label}` and `astryon_file_worker_policy_actions_total{action}`.
 Live test: `FILETAGS_LIVE=1 go test ./internal/objects -run Live` (throwaway postgres:16 via docker, applies all migrations, non-superuser, removes the container).
-Not wired: CSV in the worker (still NDJSON only).

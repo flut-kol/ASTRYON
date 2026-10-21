@@ -58,7 +58,10 @@ func TestCSVProcessesWithHeaderKeysAndInvalidRows(t *testing.T) {
 
 func TestCSVResumesFromCheckpointWithHeader(t *testing.T) {
 	full := &fakeStore{}
-	all := func() *capSink { _, s := runCSV(t, full, csvFile, classify.PolicySet{Default: classify.Allow}, 2); return s }()
+	all := func() *capSink {
+		_, s := runCSV(t, full, csvFile, classify.PolicySet{Default: classify.Allow}, 2)
+		return s
+	}()
 	for i := range full.cps {
 		raw, _ := json.Marshal(full.cps[i])
 		st := &fakeStore{job: jobs.Job{Checkpoint: raw}}
