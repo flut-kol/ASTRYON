@@ -237,7 +237,7 @@ func TestLiveTLSAuthFailoverCluster(t *testing.T) {
 		t.Logf("%-22s tenants on victim %d, on others %d | affected: victim %d, others %d (of %d) | degraded requests victim %d, others %d | fallbacks %d, 503 %d | elapsed %.1fs",
 			x.name, len(victimT), len(otherT), va, oa, len(x.tn), vd, od, fb, rj, el.Seconds())
 		fullCov := os.Getenv("QUERY_REDIS_IT_FULLCOV") == "yes" // cluster-require-full-coverage yes: the whole cluster answers CLUSTERDOWN
-		if !fullCov && x.domain { // the global-cooldown variants are the "before" measurement: they are expected to violate this
+		if !fullCov && x.domain {                               // the global-cooldown variants are the "before" measurement: they are expected to violate this
 			foCheck(t, "others/"+x.name, x.ld, otherT, cfg, el, 0, 0) // healthy masters: exact Redis limits
 		}
 		if x.domain && oa != 0 && !fullCov {
