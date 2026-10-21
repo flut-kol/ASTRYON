@@ -128,7 +128,7 @@ func (s *Server) wrap(scope string, h handler) http.HandlerFunc {
 			if errors.As(err, &ae) {
 				fail(ae)
 			} else {
-				log.Printf("request_id=%s internal error: %v", rid, err)
+				log.Printf("request_id=%q internal error: %v", rid, err) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 				fail(&apiError{status: 500, Code: "internal", Message: "internal error"})
 			}
 			return

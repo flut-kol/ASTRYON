@@ -30,7 +30,7 @@ func (c *CH) query(ctx context.Context, q string, params map[string]string) (str
 	for k, val := range params {
 		v.Set("param_"+k, val)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/?"+v.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/?"+v.Encode(), nil) // #nosec G704 -- URL comes from operator configuration, not request input
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +42,7 @@ func (c *CH) query(ctx context.Context, q string, params map[string]string) (str
 	if cl == nil {
 		cl = &http.Client{Timeout: 30 * time.Second}
 	}
-	resp, err := cl.Do(req)
+	resp, err := cl.Do(req) // #nosec G704 -- URL comes from operator configuration, not request input
 	if err != nil {
 		return "", err
 	}

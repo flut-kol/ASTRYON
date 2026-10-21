@@ -101,7 +101,7 @@ func main() {
 		b, _ := json.MarshalIndent(rep, "", "  ")
 		if jsonOut == "-" {
 			fmt.Println(string(b))
-		} else if err := os.WriteFile(jsonOut, append(b, '\n'), 0o644); err != nil {
+		} else if err := os.WriteFile(jsonOut, append(b, '\n'), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

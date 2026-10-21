@@ -165,7 +165,7 @@ func (d *Dispatcher) stopping() bool {
 }
 
 func jitter(d time.Duration) time.Duration {
-	return d/2 + time.Duration(rand.Int64N(int64(d)+1))
+	return d/2 + time.Duration(rand.Int64N(int64(d)+1)) // #nosec G404 -- jitter only, not security sensitive
 }
 
 // sleep waits for a jittered backoff; false means the dispatcher is stopping.

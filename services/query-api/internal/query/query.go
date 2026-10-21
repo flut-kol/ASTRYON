@@ -112,7 +112,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, h handler) {
 		if errors.As(err, &ae) {
 			fail(ae)
 		} else {
-			log.Printf("request_id=%s backend error: %v", rid, err)
+			log.Printf("request_id=%q backend error: %v", rid, err) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 			fail(&apiError{status: 502, Code: "backend_error", Message: "query backend failed"})
 		}
 		return

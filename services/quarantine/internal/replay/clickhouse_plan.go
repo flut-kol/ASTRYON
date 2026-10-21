@@ -88,7 +88,7 @@ func (s *ClickHouseStore) runReplayCount(ctx context.Context, query string, para
 	v.Set("max_memory_usage", strconv.FormatInt(64<<20, 10))
 	v.Set("max_rows_to_read", strconv.Itoa(maxReplayRowsRead))
 	v.Set("max_threads", "2")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.URL, "/")+"/?"+v.Encode(), strings.NewReader(query))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.URL, "/")+"/?"+v.Encode(), strings.NewReader(query)) // #nosec G704 -- URL comes from operator configuration, not request input
 	if err != nil {
 		return 0, err
 	}
@@ -100,7 +100,7 @@ func (s *ClickHouseStore) runReplayCount(ctx context.Context, query string, para
 	if client == nil {
 		client = &http.Client{Timeout: time.Duration(seconds)*time.Second + 5*time.Second}
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- URL comes from operator configuration, not request input
 	if err != nil {
 		return 0, err
 	}

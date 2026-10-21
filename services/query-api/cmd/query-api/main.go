@@ -84,7 +84,7 @@ func main() {
 		if v := os.Getenv("QUERY_VERSION_CACHE_SECONDS"); v != "" {
 			n, err := strconv.Atoi(v)
 			if err != nil || n <= 0 {
-				log.Fatalf("QUERY_VERSION_CACHE_SECONDS must be a positive integer, got %q", v)
+				log.Fatalf("QUERY_VERSION_CACHE_SECONDS must be a positive integer, got %q", v) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 			}
 			ttl = time.Duration(n) * time.Second
 		}

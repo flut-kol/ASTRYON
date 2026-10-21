@@ -199,11 +199,11 @@ func (c *Client) Get(ctx context.Context, key string, offset int64) (io.ReadClos
 		want = 206 // a 200 here would mean the Range header was ignored: never parse from the wrong offset
 	}
 	if resp.StatusCode == 404 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, ErrNotFound
 	}
 	if err := check(resp, "get", want); err != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, err
 	}
 	return resp.Body, nil

@@ -42,7 +42,7 @@ func envInt(k string, d int) int {
 	if v := os.Getenv(k); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
-			log.Fatalf("%s: invalid value %q", k, v)
+			log.Fatalf("%s: invalid value %q", k, v) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 		}
 		return n
 	}

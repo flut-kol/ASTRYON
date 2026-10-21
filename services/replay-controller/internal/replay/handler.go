@@ -63,14 +63,14 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/replays", h.create)
 	mux.HandleFunc("POST /v1/replays/{id}/activate", h.activate)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	return mux
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"code": code, "message": msg, "details": nil, "trace_id": ""})
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": code, "message": msg, "details": nil, "trace_id": ""})
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +88,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	rid := requestID(r.Header.Get("X-Request-Id"))
 	startEv := func(pl Plan, phase, outcome string) AuditEvent {
 		return AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: ActionStart, ReplayID: pl.JobID,
-			SourceID: pl.SourceID, FromVersion: ptr32(int32(pl.BasedOnVersion)), ToVersion: ptr32(int32(pl.ProcessingVersion)),
+			SourceID: pl.SourceID, FromVersion: ptr32(int32(pl.BasedOnVersion)), ToVersion: ptr32(int32(pl.ProcessingVersion)), // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 			Outcome: outcome, Phase: phase, RequestID: rid}
 	}
 	// Required mode: replay.started (phase prepared) is published BEFORE the job; if that fails nothing is published
@@ -127,7 +127,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case plan.DryRun:
 		h.record(r.Context(), AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: ActionPlan, ReplayID: plan.JobID,
-			SourceID: plan.SourceID, FromVersion: ptr32(int32(plan.BasedOnVersion)), ToVersion: ptr32(int32(plan.ProcessingVersion)),
+			SourceID: plan.SourceID, FromVersion: ptr32(int32(plan.BasedOnVersion)), ToVersion: ptr32(int32(plan.ProcessingVersion)), // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 			Outcome: OutcomeSuccess, RequestID: rid})
 	case prepared == nil:
 		h.record(r.Context(), startEv(plan, PhaseCommitted, OutcomeSuccess)) // best_effort: after the job is published
@@ -138,7 +138,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.WriteHeader(202)
 	}
-	json.NewEncoder(w).Encode(plan)
+	_ = json.NewEncoder(w).Encode(plan)
 }
 
 // activate switches readers of the replay's source to the replay's processing_version (see activate.go for the rules).
@@ -235,5 +235,5 @@ func (h *Handler) activate(w http.ResponseWriter, r *http.Request) {
 		h.record(context.WithoutCancel(r.Context()), ev)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(act)
+	_ = json.NewEncoder(w).Encode(act)
 }

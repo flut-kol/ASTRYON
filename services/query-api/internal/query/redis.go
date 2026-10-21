@@ -3,7 +3,7 @@ package query
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- Redis EVALSHA requires SHA-1 script digests
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -109,7 +109,7 @@ redis.call('PEXPIRE', KEYS[1], lease)
 return 1
 `
 
-func scriptSHA(s string) string { h := sha1.Sum([]byte(s)); return hex.EncodeToString(h[:]) }
+func scriptSHA(s string) string { h := sha1.Sum([]byte(s)); return hex.EncodeToString(h[:]) } // #nosec G401 -- Redis EVALSHA requires SHA-1 script digests
 
 var (
 	limiterSHA = scriptSHA(limiterScript)
@@ -571,13 +571,13 @@ func (r *RedisCounter) dial(addr string) (*redisConn, error) {
 			args = []string{"AUTH", r.user, r.pass}
 		}
 		if _, err := rc.cmd(r.CmdTimeout, args...); err != nil {
-			c.Close()
+			_ = c.Close()
 			return nil, errors.New("redis auth failed") // never echo credentials
 		}
 	}
 	if r.db != 0 {
 		if _, err := rc.cmd(r.CmdTimeout, "SELECT", strconv.Itoa(r.db)); err != nil {
-			c.Close()
+			_ = c.Close()
 			return nil, err
 		}
 	}
@@ -607,13 +607,13 @@ func (r *RedisCounter) doAt(addr string, asking bool, args ...string) (any, erro
 	}
 	var re redisError
 	if err != nil && !errors.As(err, &re) {
-		rc.c.Close()
+		_ = rc.c.Close()
 		return nil, err
 	}
 	select {
 	case p <- rc:
 	default:
-		rc.c.Close()
+		_ = rc.c.Close()
 	}
 	return v, err
 }

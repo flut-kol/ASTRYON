@@ -59,7 +59,7 @@ func (c *CH) do(ctx context.Context, q string, params map[string]string) (io.Rea
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("clickhouse: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	max := c.MaxPageBytes

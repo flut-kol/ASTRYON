@@ -85,6 +85,6 @@ func PartitionFor(key []byte, n int) int {
 		return 0
 	}
 	h := fnv.New32a()
-	h.Write(key)
-	return int(h.Sum32() % uint32(n))
+	_, _ = h.Write(key)
+	return int(h.Sum32() % uint32(n)) // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 }

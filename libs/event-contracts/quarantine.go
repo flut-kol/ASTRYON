@@ -271,7 +271,7 @@ func quarantineIdentityUUID(parts ...[]byte) string {
 	h.Write([]byte("astryon/quarantine-record/v1\x00"))
 	var size [4]byte
 	for _, part := range parts {
-		binary.BigEndian.PutUint32(size[:], uint32(len(part)))
+		binary.BigEndian.PutUint32(size[:], uint32(len(part))) // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 		h.Write(size[:])
 		h.Write(part)
 	}

@@ -26,7 +26,7 @@ func envDuration(k string, d time.Duration) time.Duration {
 	}
 	x, err := time.ParseDuration(v)
 	if err != nil || x < 0 {
-		log.Fatalf("%s: invalid duration %q", k, v)
+		log.Fatalf("%s: invalid duration %q", k, v) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 	}
 	return x
 }

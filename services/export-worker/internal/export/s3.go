@@ -129,7 +129,7 @@ func (s *S3Store) simple(ctx context.Context, method, key string, q url.Values, 
 		return nil, err
 	}
 	if err := s.check(resp, op, ok...); err != nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, err
 	}
 	return resp, nil
@@ -144,7 +144,7 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) (int64, erro
 		if perr != nil {
 			return 0, perr
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return int64(n), nil
 	}
 	if err != nil {
@@ -159,7 +159,7 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) (int64, erro
 		UploadID string `xml:"UploadId"`
 	}
 	err = xml.NewDecoder(resp.Body).Decode(&init)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if err != nil || init.UploadID == "" {
 		return 0, fmt.Errorf("s3 create multipart: bad response: %v", err)
 	}
@@ -167,7 +167,7 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) (int64, erro
 		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		if r, aerr := s.do(actx, http.MethodDelete, key, url.Values{"uploadId": {init.UploadID}}, nil); aerr == nil {
-			r.Body.Close()
+			_ = r.Body.Close()
 		}
 	}
 	type part struct {
@@ -182,7 +182,7 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) (int64, erro
 			abort()
 			return 0, perr
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		parts = append(parts, part{pn, resp.Header.Get("ETag")})
 		total += int64(n)
 		n, err = io.ReadFull(r, buf)
@@ -200,7 +200,7 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) (int64, erro
 				abort()
 				return 0, perr
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			parts = append(parts, part{pn, resp.Header.Get("ETag")})
 			total += int64(n)
 			break
@@ -219,7 +219,7 @@ func (s *S3Store) Put(ctx context.Context, key string, r io.Reader) (int64, erro
 	}
 	// S3 may return 200 with an <Error> body.
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if bytes.Contains(b, []byte("<Error>")) {
 		abort()
 		return 0, fmt.Errorf("s3 complete multipart: %s", strings.TrimSpace(string(b)))
@@ -239,7 +239,7 @@ func (s *S3Store) Delete(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }
 
@@ -307,7 +307,7 @@ func (s *S3Store) ListMultipartUploads(ctx context.Context, prefix string) ([]Up
 			} `xml:"Upload"`
 		}
 		err = xml.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&r)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("s3 list multipart uploads: bad response: %v", err)
 		}
@@ -329,6 +329,6 @@ func (s *S3Store) AbortUpload(ctx context.Context, key, uploadID string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return nil
 }

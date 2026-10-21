@@ -55,7 +55,7 @@ func NewBuilder(opt Options, tenants []Tenant, seed int64) *Builder {
 	if opt.DupWindow < 1 {
 		opt.DupWindow = 1000
 	}
-	b := &Builder{opt: opt, tenants: tenants, rng: mrand.New(mrand.NewSource(seed)), now: time.Now,
+	b := &Builder{opt: opt, tenants: tenants, rng: mrand.New(mrand.NewSource(seed)), now: time.Now, // #nosec G404 -- deterministic seeded load data, not security sensitive
 		recent: map[string][]recentEvent{}, sources: map[string][]string{}}
 	b.cdf = zipfCDF(len(tenants), opt.TenantSkew)
 	return b

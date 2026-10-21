@@ -77,7 +77,7 @@ func WriteSnapshot(path string, s Snapshot) error {
 // ReadSnapshot loads a snapshot written by WriteSnapshot.
 func ReadSnapshot(path string) (Snapshot, error) {
 	var s Snapshot
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) // #nosec G304 -- path comes from operator configuration, not request input
 	if err != nil {
 		return s, err
 	}

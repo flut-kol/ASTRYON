@@ -188,7 +188,7 @@ func (r *RedisCounter) dropStalePools(keep map[string]bool) {
 		for {
 			select {
 			case c := <-p:
-				c.c.Close()
+				_ = c.c.Close()
 				continue
 			default:
 			}
@@ -205,7 +205,7 @@ func (r *RedisCounter) askSentinels(sentinels []string) string {
 			continue
 		}
 		v, err := c.cmd(r.CmdTimeout, "SENTINEL", "get-master-addr-by-name", r.masterName)
-		c.c.Close()
+		_ = c.c.Close()
 		arr, ok := v.([]any)
 		if err != nil || !ok || len(arr) != 2 {
 			continue
@@ -248,7 +248,7 @@ func parseClusterSlots(v any, asked string) ([]slotRange, error) {
 		if host == "" || port <= 0 || port > 65535 {
 			continue
 		}
-		out = append(out, slotRange{uint16(s), uint16(en), net.JoinHostPort(host, strconv.FormatInt(port, 10))})
+		out = append(out, slotRange{uint16(s), uint16(en), net.JoinHostPort(host, strconv.FormatInt(port, 10))}) // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].start < out[j].start })
 	return out, nil

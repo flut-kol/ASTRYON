@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/astryon/clickhouse-sink/internal/sink"
 )
@@ -48,7 +49,8 @@ func main() {
 				w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 				p.M.WritePrometheus(w)
 			})
-			log.Printf("metrics: %v", http.ListenAndServe(cfg.MetricsAddr, mux))
+			srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+			log.Printf("metrics: %v", srv.ListenAndServe())
 		}()
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

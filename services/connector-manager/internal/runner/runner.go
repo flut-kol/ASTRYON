@@ -65,7 +65,7 @@ func New(c Config) *Runner {
 		c.Now = time.Now
 	}
 	if c.Jitter == nil {
-		c.Jitter = func() float64 { return rand.Float64() * 0.2 }
+		c.Jitter = func() float64 { return rand.Float64() * 0.2 } // #nosec G404 -- jitter only, not security sensitive
 	}
 	return &Runner{Config: c, clients: map[string]*restpull.Client{}}
 }

@@ -99,7 +99,7 @@ func main() {
 	} else {
 		log.Print("WARN: ASTRYON_KAFKA_BROKERS unset: audit goes to stdout only (not durable)")
 	}
-	log.Printf("audit mode: required=%v", auditRequired)
+	log.Printf("audit mode: required=%v", auditRequired) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 	pl := &replay.Planner{Alloc: alloc, Counter: ch, Publisher: pub}
 	addr := os.Getenv("REPLAY_ADDR")
 	if addr == "" {

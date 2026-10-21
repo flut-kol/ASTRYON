@@ -44,13 +44,13 @@ func (s *RunStats) Record(now time.Time, err error) error {
 	}
 	defer os.Remove(tmp.Name())
 	if _, err2 = tmp.WriteString(body); err2 != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err2
 	}
 	if err2 = tmp.Close(); err2 != nil {
 		return err2
 	}
-	if err2 = os.Chmod(tmp.Name(), 0o644); err2 != nil {
+	if err2 = os.Chmod(tmp.Name(), 0o644); err2 != nil { // #nosec G302 -- metrics file must be readable by the Prometheus textfile collector
 		return err2
 	}
 	return os.Rename(tmp.Name(), s.Path)

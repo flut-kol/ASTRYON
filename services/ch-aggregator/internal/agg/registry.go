@@ -167,12 +167,12 @@ func (c *Client) ReconcileRegistry(ctx context.Context, reg Registry, w Window, 
 			if now.Sub(time.UnixMilli(n.FirstIngestedMs)) < grace { // registry write may lag the sink
 				m.Class = "transient"
 			}
-		case int64(n.Events) == b.Accepted:
+		case int64(n.Events) == b.Accepted: // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 			continue
 		default:
 			m.Accepted, m.Status = b.Accepted, b.Status
 			m.Kind = "extra"
-			if int64(n.Events) < b.Accepted {
+			if int64(n.Events) < b.Accepted { // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 				m.Kind = "missing"
 			}
 			m.Class = "persistent"

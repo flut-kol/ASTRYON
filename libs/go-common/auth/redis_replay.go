@@ -50,7 +50,7 @@ func NewRedisReplayStore(raw, caFile string) (*RedisReplayStore, error) {
 	if u.Scheme == "rediss" {
 		s.tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: u.Hostname()}
 		if caFile != "" {
-			pem, err := os.ReadFile(caFile)
+			pem, err := os.ReadFile(caFile) // #nosec G304 -- path comes from operator configuration, not request input
 			if err != nil {
 				return nil, err
 			}
@@ -75,7 +75,7 @@ func (s *RedisReplayStore) First(ctx context.Context, key string, ttl time.Durat
 	}
 	reply, err := s.roundTrip(c, "SET", key, "1", "NX", "EX", strconv.Itoa(secs))
 	if err != nil {
-		c.Close()
+		_ = c.Close()
 		return false, err
 	}
 	s.put(c)
@@ -114,13 +114,13 @@ func (s *RedisReplayStore) conn(ctx context.Context) (net.Conn, error) {
 			args = []string{"AUTH", s.user, s.pass}
 		}
 		if r, err := s.roundTrip(c, args...); err != nil || r != "+OK" {
-			c.Close()
+			_ = c.Close()
 			return nil, errors.New("auth: redis AUTH failed")
 		}
 	}
 	if s.db != 0 {
 		if r, err := s.roundTrip(c, "SELECT", strconv.Itoa(s.db)); err != nil || r != "+OK" {
-			c.Close()
+			_ = c.Close()
 			return nil, errors.New("auth: redis SELECT failed")
 		}
 	}
@@ -134,7 +134,7 @@ func (s *RedisReplayStore) put(c net.Conn) {
 		s.idle = append(s.idle, c)
 		return
 	}
-	c.Close()
+	_ = c.Close()
 }
 
 // roundTrip sends one command and returns the first reply line (error replies become errors).

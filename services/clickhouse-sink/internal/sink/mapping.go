@@ -103,8 +103,8 @@ func MapMessage(m Message, now time.Time) (line []byte, code, reason string) {
 	}
 	r := row{
 		TenantID: strings.ToLower(p.TenantID), SourceID: strings.ToLower(p.SourceID), EventID: strings.ToLower(p.EventID),
-		BatchID: strings.ToLower(p.BatchID), ProcessingVersion: uint32(p.ProcessingVersion),
-		PipelineID: strings.ToLower(p.PipelineID), PipelineVersion: uint32(p.PipelineVersion),
+		BatchID: strings.ToLower(p.BatchID), ProcessingVersion: uint32(p.ProcessingVersion), // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
+		PipelineID: strings.ToLower(p.PipelineID), PipelineVersion: uint32(p.PipelineVersion), // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 		EventType: p.EventType, EventTime: p.EventTime.UTC().Format(chTime), IngestedAt: p.IngestedAt.UTC().Format(chTime),
 		EntityID: p.EntityKey, Attributes: p.Attributes, Payload: string(p.Payload), RawRef: p.RawRef, QualityFlags: p.QualityFlags,
 	}

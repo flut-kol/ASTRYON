@@ -150,7 +150,7 @@ func (s *ClickHouseStore) run(ctx context.Context, query string, params url.Valu
 	v.Set("max_result_rows", strconv.Itoa(maxPageSize+1))
 	v.Set("result_overflow_mode", "throw")
 	v.Set("max_memory_usage", strconv.FormatInt(64<<20, 10))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.URL, "/")+"/?"+v.Encode(), strings.NewReader(query))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.URL, "/")+"/?"+v.Encode(), strings.NewReader(query)) // #nosec G704 -- URL comes from operator configuration, not request input
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func (s *ClickHouseStore) run(ctx context.Context, query string, params url.Valu
 	if client == nil {
 		client = &http.Client{Timeout: time.Duration(seconds)*time.Second + 5*time.Second}
 	}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- URL comes from operator configuration, not request input
 	if err != nil {
 		return nil, err
 	}

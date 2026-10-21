@@ -115,7 +115,7 @@ func NewIntrospector(ctx context.Context, cfg IntrospectorConfig) (*Introspector
 }
 
 func loadECKey(path string) (*ecdsa.PrivateKey, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- path comes from operator configuration, not request input
 	if err != nil {
 		return nil, fmt.Errorf("auth: read introspection key: %w", err)
 	}

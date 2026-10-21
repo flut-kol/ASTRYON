@@ -142,7 +142,7 @@ func (c ClickHouse) open(ctx context.Context, q string, params url.Values) (io.R
 	}
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		release()
 		return nil, fmt.Errorf("%w: clickhouse %s: %s", ErrClickHouse, resp.Status, strings.TrimSpace(string(b)))
 	}

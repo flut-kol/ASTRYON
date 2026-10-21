@@ -70,7 +70,7 @@ func main() {
 	sink, err := chsink.New(chsink.Config{URL: must("CH_URL"), Database: os.Getenv("CH_DATABASE"), User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
 		EventsTable: os.Getenv("FILE_EVENTS_TABLE"), ErrorsTable: os.Getenv("FILE_ERRORS_TABLE"), Files: files,
 		Mapping: chsink.Mapping{EventType: must("FILE_EVENT_TYPE"), EventTimeField: os.Getenv("FILE_EVENT_TIME_FIELD"),
-			EntityIDField: os.Getenv("FILE_ENTITY_ID_FIELD"), ProcessingVersion: uint32(num("FILE_PROCESSING_VERSION", 1))}})
+			EntityIDField: os.Getenv("FILE_ENTITY_ID_FIELD"), ProcessingVersion: uint32(num("FILE_PROCESSING_VERSION", 1))}}) // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func main() {
 			}
 		}
 	}()
-	log.Printf("file-worker %s started", id)
+	log.Printf("file-worker %s started", id) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 	if err := w.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}

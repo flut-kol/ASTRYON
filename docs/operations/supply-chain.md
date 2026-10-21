@@ -61,6 +61,9 @@ any of the 16 Go modules, `make test` and `make lint` pass, and the five service
 supported version 4"), so CI pins the unreleased pseudo-version `v2.29.1-0.20261020094257-14ef84f6fecc`; replace it with the
 first tagged release that supports Go 1.27.
 
-Open: `gosec ./...` as CI runs it reported 64 findings across modules (measured in a Go 1.25 container with v2.29.0): G104 x30,
-G115 x13, G706 x7, G704 x6, G304 x3, G505/G404/G401/G302/G114 x1 each. CI fails on any finding until each is fixed or
-justified with `#nosec`.
+`gosec ./...` is clean in every module (checked 2026-10-21 with the pinned build on Go 1.27.3). Fixed: clickhouse-sink
+metrics server now has `ReadHeaderTimeout` (G114), unchecked `Close`/`Write`/`Encode` results are explicit `_ =` (G104),
+load-test report file mode 0600, request IDs are logged with `%q`. Justified with `#nosec <rule> -- reason` on the line:
+operator-configured paths and URLs (G304, G704), config values in fatal logs (G706), bounded counters and lengths (G115),
+non-security jitter and seeded load data (G404), SHA-1 for Redis EVALSHA digests (G401, G505), and the Prometheus
+textfile mode (G302). Review `#nosec` lines when the surrounding code changes.
