@@ -77,6 +77,9 @@ then set the `AAS_LIVE_*` variables with `AAS_LIVE_CA_FILE=<copy>/certs/ca.crt`.
   (`/auth/me` shows no token, cookie is not a JWT), refuses unsafe requests without `X-Requested-With`, proxies `/api/query/` to a live query-api with the session's access token
   (a forged browser `Authorization` and `X-Tenant-ID` are ignored; tenant reaching ClickHouse is the token claim), and logout kills the session. The registered client needs the
   `tenant_id` mapper, the resource scope (audience) and the exact redirect URI `BFF_PUBLIC_ORIGIN/auth/callback`; a plain user client without them gets 401 from every resource server.
+- `bff_session_test.go`: `TestLiveAdminBFFRefresh` (client `access.token.lifespan=40`: proxy keeps the token until under 30 s remain, then refreshes: new `jti`, same `sub`/`tenant_id`, Verifier accepts; after `POST /users/{id}/logout` in the AAS the next refresh fails -> 401 `session_expired`).
+  `TestLiveAdminBFFBackchannelLogout`: a receiver container on the AAS docker network (nothing published on the host) captures the real `logout_token` Keycloak POSTs when the user's AAS sessions end (header `typ=logout+jwt`, ES256 here, claims `sid`, `sub`, `events`, no `nonce`); the test hands it to the BFF's `/auth/backchannel-logout`: a tampered token is 400, the real one ends the session, a replay is 400.
+  Needs `AAS_LIVE_KEYCLOAK_CONTAINER` and `docker`; the host firewall of the dev machine blocks container -> host ports, hence no direct Keycloak -> BFF delivery.
 - Finding: `build/realm-config` of the reference copy is generated for `AAS_ENV=prod` (no `demo-sso`/`e2e.user`); run `AAS_ENV=dev python3 scripts/build_config.py` in the copy and re-run `keycloak-config`.
 
 ## Not proven

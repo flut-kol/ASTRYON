@@ -40,6 +40,7 @@ type session struct {
 	mu      sync.Mutex // serialises refresh
 	tok     Tokens
 	sub     string
+	sid     string // AAS session id (ID token sid), matched by back-channel logout
 	created time.Time
 }
 
@@ -98,6 +99,7 @@ func New(ctx context.Context, o Options) (*Server, error) {
 	s.mux.HandleFunc("GET /auth/callback", s.callback)
 	s.mux.HandleFunc("GET /auth/me", s.me)
 	s.mux.HandleFunc("POST /auth/logout", s.logout)
+	s.mux.HandleFunc("POST /auth/backchannel-logout", s.backchannelLogout)
 	s.mux.HandleFunc("/api/{service}/{rest...}", s.proxy)
 	return s, nil
 }
@@ -173,9 +175,9 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadGateway, "token_exchange_failed", "could not complete the login")
 		return
 	}
-	sub := ""
+	sub, sid := "", ""
 	if tok.ID != "" {
-		if sub, err = s.oc.idClaims(tok.ID, p.nonce); err != nil {
+		if sub, sid, err = s.oc.idClaims(tok.ID, p.nonce); err != nil {
 			s.o.Logger.Printf("id_token rejected: %v", err)
 			jsonErr(w, http.StatusUnauthorized, "invalid_id_token", "identity token was rejected")
 			return
@@ -186,7 +188,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	if len(s.sessions) >= s.o.MaxSessions {
 		s.evictOldestLocked()
 	}
-	s.sessions[id] = &session{tok: tok, sub: sub, created: s.oc.now()}
+	s.sessions[id] = &session{tok: tok, sub: sub, sid: sid, created: s.oc.now()}
 	s.mu.Unlock()
 	s.setCookie(w, "astryon_session", id, int(s.o.SessionMaxAge.Seconds()))
 	http.Redirect(w, r, s.o.AfterLoginPath, http.StatusFound)

@@ -34,6 +34,8 @@ type fakeAAS struct {
 	lastBasic  string
 	badNonce   bool
 	tokenType  string
+	jwks       []map[string]string
+	jwksHits   atomic.Int32
 }
 
 func newFakeAAS(t *testing.T) *fakeAAS {
@@ -41,7 +43,12 @@ func newFakeAAS(t *testing.T) *fakeAAS {
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/realm/.well-known/openid-configuration":
-			json.NewEncoder(w).Encode(map[string]string{"issuer": f.URL + "/realm", "authorization_endpoint": f.URL + "/realm/auth", "token_endpoint": f.URL + "/realm/token", "end_session_endpoint": f.URL + "/realm/logout"})
+			json.NewEncoder(w).Encode(map[string]string{"issuer": f.URL + "/realm", "authorization_endpoint": f.URL + "/realm/auth", "token_endpoint": f.URL + "/realm/token", "end_session_endpoint": f.URL + "/realm/logout", "jwks_uri": f.URL + "/realm/jwks"})
+		case "/realm/jwks":
+			f.jwksHits.Add(1)
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"keys": f.jwks})
 		case "/realm/auth":
 			q := r.URL.Query()
 			if q.Get("code_challenge_method") != "S256" || q.Get("response_type") != "code" || q.Get("client_id") != "astryon-portal" {
@@ -95,7 +102,7 @@ func newFakeAAS(t *testing.T) *fakeAAS {
 }
 
 func (f *fakeAAS) idToken(nonce string) string {
-	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": "user-1", "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce})
+	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": "user-1", "sid": "sid-1", "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce})
 	return b64u([]byte(`{"alg":"ES256"}`)) + "." + b64u(cl) + "." + b64u([]byte("sig"))
 }
 
