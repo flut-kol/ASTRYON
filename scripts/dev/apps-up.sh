@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-COMPOSE=(docker compose -f infra/docker/docker-compose.dev.yml -f infra/docker/docker-compose.apps.yml)
+COMPOSE=(docker compose -f infra/docker/docker-compose.dev.yml -f infra/docker/docker-compose.apps.yml -f infra/docker/docker-compose.scanner.yml)
 [ -f .env ] && COMPOSE+=(--env-file .env)
 export APPS_UID="$(id -u)" APPS_GID="$(id -g)"
 TENANT=00000000-0000-0000-0000-0000000000a1; SOURCE=00000000-0000-0000-0000-0000000000b1

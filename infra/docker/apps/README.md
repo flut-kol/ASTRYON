@@ -32,3 +32,17 @@ directly (no normalizer in this repo). Not included: admin-ui, admin-bff, ch-agg
 From a clean container state, no scratchpad: 11 processes; loadgen 350 events through the gateway landed in ClickHouse (1000 -> 1350 rows);
 file-api, quarantine, replay-controller, connector-manager 200 with the dev token, query-api 200 on `POST /v1/query/events`, gateway 401 without token.
 Caveat: the dev token is passed via a bind-mounted file, but the infra credentials are placeholders in the compose files.
+
+## Optional Defender scanner overlay
+
+Build the vendored Go Defender image and start the stack with the scanner overlay:
+
+```sh
+docker compose -f infra/docker/docker-compose.dev.yml \
+  -f infra/docker/docker-compose.apps.yml \
+  -f infra/docker/docker-compose.scanner.yml up -d
+```
+
+The overlay shares a private staging volume between `file-worker` and Defender and enables
+`FILE_SCANNER_MODE=required`. Clean files continue; detections and encrypted files are held back,
+while scanner outages are retried. The normal app overlay keeps scanning off by default.
