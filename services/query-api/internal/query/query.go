@@ -340,8 +340,16 @@ func (s *Server) aggregate(ctx context.Context, p Principal, body []byte) (any, 
 		sel = append(sel, expr+" AS "+m)
 	}
 	// Dedup first, then aggregate, so retried blocks are never double counted (see 0001 dedup strategy).
-	q := fmt.Sprintf(`SELECT %s FROM (SELECT * FROM %s WHERE %s LIMIT 1 BY tenant_id, source_id, event_id, processing_version)`,
-		strings.Join(sel, ", "), s.table(), strings.Join(w.sql, " AND "))
+	var q string
+	if len(req.Metrics) == 1 && req.Metrics[0] == "count" {
+		// Exact and ~2x cheaper than LIMIT 1 BY over millions of rows (DPP-047): tenant_id is fixed by the filter,
+		// and duplicate rows carry identical dimension values.
+		sel[len(sel)-1] = "uniqExact(source_id, event_id, processing_version) AS count"
+		q = fmt.Sprintf(`SELECT %s FROM %s WHERE %s`, strings.Join(sel, ", "), s.table(), strings.Join(w.sql, " AND "))
+	} else {
+		q = fmt.Sprintf(`SELECT %s FROM (SELECT * FROM %s WHERE %s LIMIT 1 BY tenant_id, source_id, event_id, processing_version)`,
+			strings.Join(sel, ", "), s.table(), strings.Join(w.sql, " AND "))
+	}
 	if len(grp) > 0 {
 		q += " GROUP BY " + strings.Join(grp, ", ") + " ORDER BY " + strings.Join(grp, ", ")
 	}

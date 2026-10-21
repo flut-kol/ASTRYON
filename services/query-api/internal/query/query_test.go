@@ -125,7 +125,13 @@ func TestAggregateWhitelist(t *testing.T) {
 	if c, b := post(t, api, "/v1/query/aggregate", "tok", `{`+base+`,"metrics":["count"],"group_by":["event_type"]}`); c != 200 || !strings.Contains(b, `"count":2`) {
 		t.Fatalf("%d %s", c, b)
 	}
-	if !strings.Contains(f.query, "GROUP BY event_type") || !strings.Contains(f.query, "LIMIT 1 BY") {
+	if !strings.Contains(f.query, "GROUP BY event_type") || !strings.Contains(f.query, "uniqExact(source_id, event_id, processing_version)") || strings.Contains(f.query, "LIMIT 1 BY") {
+		t.Fatal(f.query)
+	}
+	if c, b := post(t, api, "/v1/query/aggregate", "tok", `{`+base+`,"metrics":["count","bytes"]}`); c != 200 {
+		t.Fatalf("%d %s", c, b)
+	}
+	if !strings.Contains(f.query, "LIMIT 1 BY") {
 		t.Fatal(f.query)
 	}
 	for _, b := range []string{

@@ -10,7 +10,7 @@ IMAGE=${CH_IMAGE:-clickhouse/clickhouse-server:24.8}
 NAME=qbench-ch-$$
 PORT=${QB_PORT:-18623}
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-docker run -d --name "$NAME" -p "$PORT:8123" "$IMAGE" >/dev/null
+docker run -d --memory "${QB_MEM:-6g}" --name "$NAME" -p "$PORT:8123" "$IMAGE" >/dev/null
 ch() { docker exec -i "$NAME" clickhouse-client "$@"; }
 for _ in $(seq 60); do ch -q 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
 
@@ -22,7 +22,7 @@ declare -A TEN=(
   [skewed]="toUInt32(floor($TENANTS * pow(rand64() / 18446744073709551615., 4)))"
   [hot]="if(rand64() % 10 < 8, 0, 1 + number % ($TENANTS - 1))"
 )
-for sc in uniform skewed hot; do
+for sc in ${SCENARIOS:-uniform skewed hot}; do
   ch -q "${DDL//events_normalized_local/ev_$sc}"
   ch -q "INSERT INTO ev_$sc (tenant_id, source_id, event_id, batch_id, processing_version, pipeline_id, pipeline_version, event_type, event_time, entity_id, attributes, payload, raw_ref, quality_flags)
     SELECT t_id, toUUID(concat('00000000-0000-4000-8000-', leftPad(toString(t % 5), 12, '0'))), generateUUIDv4(), generateUUIDv4(), 1, generateUUIDv4(), 1,
@@ -36,8 +36,9 @@ tid() { printf '00000000-0000-4000-8000-%012d' "$1"; }
 SRC=00000000-0000-4000-8000-000000000001
 echo "| scenario | tenant | query | clients | QPS | p50 ms | p95 ms | p99 ms | rows of tenant |"
 echo "|---|---|---|---|---|---|---|---|---|"
-for sc in uniform skewed hot; do
-  for who in "0 hot/largest" "$((TENANTS-1)) tail"; do
+for sc in ${SCENARIOS:-uniform skewed hot}; do
+  # tail first: a hot-tenant run at 16 clients can OOM-kill the container
+  for who in "$((TENANTS-1)) tail" "0 hot/largest"; do
     set -- $who; t=$1; label=$2
     n=$(ch -q "SELECT count() FROM ev_$sc WHERE tenant_id='$(tid $t)'")
     Q_EVENTS="SELECT event_id, source_id, batch_id, processing_version, event_type, event_time, entity_id, attributes, payload, quality_flags FROM ev_$sc WHERE tenant_id='$(tid $t)' AND event_time >= '2026-10-10 00:00:00' AND event_time < '2026-10-17 00:00:00' ORDER BY event_time, event_id LIMIT 1 BY tenant_id, source_id, event_id, processing_version LIMIT 101 FORMAT Null"
@@ -45,7 +46,7 @@ for sc in uniform skewed hot; do
     for qn in events aggregate; do
       q=$Q_EVENTS; [ $qn = aggregate ] && q=$Q_AGG
       for c in 1 16; do
-        out=$(echo "$q" | docker exec -i "$NAME" clickhouse-benchmark -c $c -i $ITER --max_threads=4 2>&1 | tr '\r' '\n' || true)
+        out=$(echo "$q" | docker exec -i "$NAME" clickhouse-benchmark -c $c -i $ITER --max_threads=4 --max_memory_usage=2000000000 --max_execution_time=30 2>&1 | tr '\r' '\n' || true)
         qps=$(echo "$out" | grep -o 'QPS: [0-9.]*' | tail -1 | cut -d' ' -f2 || true)
         p() { echo "$out" | grep -E "^ *$1\.000%" | tail -1 | awk '{printf "%.0f", $2*1000}' || true; }
         echo "| $sc | $label | $qn | $c | $qps | $(p 50) | $(p 95) | $(p 99) | $n |"
