@@ -144,3 +144,13 @@ TLS verification failures (unknown CA, wrong name, plaintext/TLS mismatch) are v
 (a real `ASK` needs a live slot migration; not exercised).
 Active version: unit tests with fakes (resolver cache/TTL, explicit wins, `no_active_version`, cross-tenant, all four endpoints) and live PostgreSQL 16 (`QUERY_PG_IT_URL`, non-superuser NOBYPASSRLS role, migrations 0001-0010): cross-tenant source never resolves, RLS hides other tenants' rows.
 Live-verified also: cluster master failover (both failure modes), resharding with ASK/MOVED under load, old-master rejoin, Sentinel failover, expiry of a killed holder's slot (`redis_failover_live_test.go`); fake-only: periodic-refresh timing, `-CLUSTERDOWN`, hostname/null-host `CLUSTER SLOTS` quirks, Sentinel reply edge cases. Also live-verified: AUTH and TLS together against a real 6-node cluster including failover (above). Fake-only: the multi-replica (`QUERY_REPLICAS` > 1) fallback bound (unit tests with a stub counter and a fake clock; live runs used one limiter, N=1), `ASK`. Not verified: real AAS, multi-shard ClickHouse, per-user ACL (non-default user) against a real server, a failover in a real multi-replica deployment.
+
+## Aggregate result cache (DPP-050, opt-in)
+
+`QUERY_AGG_CACHE_SECONDS=N` (default 0 = off) caches `POST /v1/query/aggregate` results in process for N seconds
+(at most 1000 entries). The key is the tenant from the token plus the final SQL and bound parameters, so a result is never
+served to another tenant; errors are not cached. Identical concurrent requests share one ClickHouse query. Responses can be
+up to N seconds stale, and each replica has its own cache; rate limits still apply before the cache. Motivation: DPP-047
+measured 0.7-2.1 s per aggregate for multi-million-row tenants, so dashboards that poll the same aggregate would otherwise
+repeat that cost. Unit-tested (hit, expiry, single flight, bound, tenant key, end-to-end against a ClickHouse stub); not
+load-tested.

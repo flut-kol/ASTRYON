@@ -79,6 +79,13 @@ func main() {
 	}
 	s := &query.Server{Auth: auth, Limiter: limiter, Caps: caps, CHURL: env("CH_URL", "http://localhost:8123"), CHDatabase: env("CH_DATABASE", "astryon"),
 		CHUser: os.Getenv("CH_USER"), CHPass: os.Getenv("CH_PASSWORD")}
+	if v := os.Getenv("QUERY_AGG_CACHE_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			log.Fatalf("QUERY_AGG_CACHE_SECONDS must be a non-negative integer, got %q", v) // #nosec G706 -- logged value is operator config
+		}
+		s.AggCacheTTL = time.Duration(n) * time.Second
+	}
 	if u := os.Getenv("QUERY_PG_URL"); u != "" {
 		ttl := query.DefaultVersionCacheTTL
 		if v := os.Getenv("QUERY_VERSION_CACHE_SECONDS"); v != "" {

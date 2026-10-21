@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,11 @@ type Server struct {
 	Limiter                           *Limiter        // per-tenant rate/concurrency protection; nil disables (tests only)
 	Caps                              Caps            // ClickHouse hard caps; zero fields use DefaultCaps
 	Versions                          VersionResolver // active processing_version per source; nil = processing_version required
+	AggCacheTTL                       time.Duration   // >0 caches aggregate results this long (opt-in; results may be that stale)
+	AggCacheMax                       int             // cache entry bound; 0 = DefaultAggCacheMax
+
+	aggOnce sync.Once
+	aggC    *aggCache
 }
 
 func (s *Server) Handler() http.Handler {
@@ -354,7 +360,13 @@ func (s *Server) aggregate(ctx context.Context, p Principal, body []byte) (any, 
 		q += " GROUP BY " + strings.Join(grp, ", ") + " ORDER BY " + strings.Join(grp, ", ")
 	}
 	q += fmt.Sprintf(" LIMIT %d FORMAT JSONEachRow", req.Limit)
-	rows, err := s.run(ctx, q, w.params)
+	var rows []map[string]any
+	if s.AggCacheTTL > 0 {
+		s.aggOnce.Do(func() { s.aggC = newAggCache(s.AggCacheTTL, s.AggCacheMax) })
+		rows, err = s.aggC.get(ctx, aggKey(p.TenantID, q, w.params), func() ([]map[string]any, error) { return s.run(ctx, q, w.params) })
+	} else {
+		rows, err = s.run(ctx, q, w.params)
+	}
 	if err != nil {
 		return nil, err
 	}
