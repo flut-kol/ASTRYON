@@ -1,7 +1,8 @@
 package s3
 
-import (
 // Copied from services/export-worker/internal/export (separate Go modules); extract into a shared lib when a third user appears.
+
+import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"

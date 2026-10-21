@@ -42,10 +42,18 @@ worker writes nothing more. Failures: `Permanent(code)` -> FAILED; source finger
 anything else -> retryable with backoff. Shutdown leaves the lease to expire (Sweep re-queues from the checkpoint). Tests with fakes (race-clean);
 the concrete S3 `Source`, ClickHouse/Kafka `Sink` and a `cmd/` executable are not written yet.
 
+## S3 and verified objects
+
+`internal/s3`: stdlib SigV4 client (copy of export-worker's signer; extract to a shared lib when a third user appears): `CreateMultipart` with
+pre-signed part URLs, `CompleteMultipart`, `Abort`, `Head`, `Get` (ranged; a non-206 answer to a Range request is an error), `Delete`.
+`internal/objects`: `PGStore` over `file_objects` (tenant RLS), `Verify` (streams the object once, compares SHA-256 and size with the declared
+values, then sets `committed_at`; on mismatch deletes the object and soft-deletes the row) and `Source` (worker.Source: serves only committed
+objects of the job's tenant from the configured bucket; the verified SHA-256 is the checkpoint fingerprint). Live-proven on MinIO + PostgreSQL 16:
+multipart round trip with a 5 MiB part, ranged read, abort, tampered upload rejected and deleted, unverified object refused.
+
 ## Remaining work
 
-- durable upload completion, checksum verification, malware/content scanning
-  and object lifecycle;
+- malware/content scanning, object lifecycle rules, the HTTP endpoint tying `upload.Service`, `Register` and `Verify` together;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
-- concrete S3 `Source` (verified checksum as fingerprint), `Sink` (quarantine + normalized path, idempotent on `DedupKey`) and `cmd/file-worker`;
+- `Sink` (quarantine + normalized path, idempotent on `DedupKey`) and `cmd/file-worker`;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.
