@@ -25,6 +25,16 @@ jobs:
       - name: Unit and contract tests
         run: make test
 
+  repo-gates:
+    name: Scope and migration gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every code scope documented in roles.md
+        run: scripts/check-scopes.sh
+      - name: Migrations forward-only with rollback plan
+        run: scripts/check-migrations.sh
+
   openapi:
     name: OpenAPI lint
     runs-on: ubuntu-24.04
