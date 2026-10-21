@@ -1,0 +1,97 @@
+// Command file-worker processes file jobs: claim -> read the verified object from S3 -> parse NDJSON -> insert into
+// ClickHouse (events_normalized / processing_errors) -> checkpoint. Run any number of replicas.
+//
+// Required: FILE_WORKER_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY, CH_URL,
+// FILE_EVENT_TYPE. Optional: FILE_S3_REGION, CH_DATABASE, CH_USER, CH_PASSWORD, FILE_EVENTS_TABLE, FILE_ERRORS_TABLE,
+// FILE_EVENT_TIME_FIELD, FILE_ENTITY_ID_FIELD, FILE_PROCESSING_VERSION (default 1), FILE_BATCH_SIZE (500),
+// FILE_MAX_RECORD_BYTES (1 MiB), FILE_LEASE_SECONDS (60), FILE_WORKER_ID (default hostname-pid).
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/astryon/file-ingestion/internal/chsink"
+	"github.com/astryon/file-ingestion/internal/jobs"
+	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/s3"
+	"github.com/astryon/file-ingestion/internal/worker"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func must(k string) string {
+	v := os.Getenv(k)
+	if v == "" {
+		log.Fatalf("%s is required", k)
+	}
+	return v
+}
+
+func num(k string, d int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return d
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Fatalf("%s must be a positive integer", k)
+	}
+	return n
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	pool, err := pgxpool.New(ctx, must("FILE_WORKER_PG_URL"))
+	if err != nil {
+		log.Fatalf("FILE_WORKER_PG_URL: %v", err)
+	}
+	defer pool.Close()
+	id := os.Getenv("FILE_WORKER_ID")
+	if id == "" {
+		host, _ := os.Hostname()
+		id = fmt.Sprintf("%s-%d", host, os.Getpid())
+	}
+	lease := time.Duration(num("FILE_LEASE_SECONDS", 60)) * time.Second
+	db := jobs.PoolDB{Pool: pool}
+	store := &jobs.Store{DB: db, WorkerID: id, Lease: lease}
+	bucket := must("FILE_S3_BUCKET")
+	c := &s3.Client{Endpoint: must("FILE_S3_ENDPOINT"), Bucket: bucket, Region: os.Getenv("FILE_S3_REGION"),
+		Creds: s3.Creds{AccessKey: must("FILE_S3_ACCESS_KEY"), SecretKey: must("FILE_S3_SECRET_KEY")}}
+	files := objects.PGStore{DB: db}
+	sink, err := chsink.New(chsink.Config{URL: must("CH_URL"), Database: os.Getenv("CH_DATABASE"), User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
+		EventsTable: os.Getenv("FILE_EVENTS_TABLE"), ErrorsTable: os.Getenv("FILE_ERRORS_TABLE"), Files: files,
+		Mapping: chsink.Mapping{EventType: must("FILE_EVENT_TYPE"), EventTimeField: os.Getenv("FILE_EVENT_TIME_FIELD"),
+			EntityIDField: os.Getenv("FILE_ENTITY_ID_FIELD"), ProcessingVersion: uint32(num("FILE_PROCESSING_VERSION", 1))}})
+	if err != nil {
+		log.Fatal(err)
+	}
+	w := worker.New(worker.Config{Store: store, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
+		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4})
+	go func() { // recovery of vanished workers and promotion of due retries; safe on every replica
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			if p, r, f, err := store.Sweep(ctx); err != nil {
+				log.Printf("sweep: %v", err)
+			} else if p+r+f > 0 {
+				log.Printf("sweep: promoted=%d retried=%d failed=%d", p, r, f)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	log.Printf("file-worker %s started", id)
+	if err := w.Run(ctx); err != nil && ctx.Err() == nil {
+		log.Fatal(err)
+	}
+}

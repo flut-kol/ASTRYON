@@ -62,9 +62,24 @@ Env: see `cmd/file-api/main.go` (`FILE_API_PG_URL`, `FILE_S3_*`, AAS + optional 
 Proven end to end with the built binary against MinIO + PostgreSQL 16: create, part PUT, complete, job QUEUED, repeat idempotent, 401 without token.
 Contract: `docs/api/file-ingestion.openapi.yaml`; errors in `docs/errors/api-error-catalog.md` (`{code, message}`). Not yet: rate limits/quotas, malware scan.
 
+## Direct ClickHouse path (`internal/chsink`, `cmd/file-worker`)
+
+Decision 2026-10-21: file rows go straight to ClickHouse, not through Kafka (DPP-035). `chsink.Sink` maps each valid NDJSON record to an
+`events_normalized` row (`tenant_id` from the job, `source_id`/`batch_id` = the file object's source and id, `event_type` from config,
+optional event-time / entity-id fields, `payload` = the raw record, `raw_ref` = `s3://bucket/key#byteOffset`, `processing_version` default 1;
+a missing or unparseable event time falls back to ingest time with quality flag `event_time_defaulted`) and each unparseable or oversized record
+to `processing_errors` (stage `file_parse`, code `ERR_JSON_MALFORMED` / `ERR_RECORD_TOO_LARGE`, no record content). `event_id` is a stable UUID
+derived from fingerprint + byte offset; inserts use `insert_deduplication_token` = hash(tenant, file object, first/last offset, count), separate for events and errors.
+A batch replayed after a crash between sink and checkpoint is therefore dropped by ClickHouse. Caveat: dedup relies on the batch being re-cut identically
+(same checkpoint and `FILE_BATCH_SIZE`); changing the batch size mid-job can duplicate rows, which the reconciliation count vs `uniqExact(event_id)` would show.
+`cmd/file-worker` wires store, S3 source, sink and a 10 s sweep (env in its header comment); mapping is per worker process for now (not per source or job).
+Proven end to end with the built binaries on MinIO + PostgreSQL 16 + ClickHouse 24.8: upload via file-api, job claimed by the worker, 3 events and 1
+error row in ClickHouse with correct offsets, job SUCCEEDED with `events_processed=3`, `events_failed=1` and the final checkpoint; three identical inserts of one batch
+left 3 event rows and 1 error row.
+
 ## Remaining work
 
 - malware/content scanning, object lifecycle rules, rate limits/quotas for uploads;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
-- `Sink` (quarantine + normalized path, idempotent on `DedupKey`) and `cmd/file-worker`;
+- per-source mapping/config for the sink (event type, time and entity fields), Parquet output, worker metrics and a Dockerfile;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.
