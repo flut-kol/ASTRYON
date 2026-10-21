@@ -265,6 +265,15 @@ func TestCSRFAndLogout(t *testing.T) {
 	}
 }
 
+func TestAbsoluteAfterLoginKeepsRegisteredPostLogoutURI(t *testing.T) {
+	e := setup(t, func(o *Options) { o.AfterLoginPath = "http://127.0.0.1:15173/" })
+	e.login(t)
+	_, body := e.do(t, "POST", "/auth/logout", map[string]string{CSRFHeader: CSRFValue})
+	if !strings.Contains(body, "post_logout_redirect_uri="+url.QueryEscape(e.bff.URL+"/")) {
+		t.Fatalf("post-logout URI must stay on the BFF origin: %s", body)
+	}
+}
+
 func TestUnknownServiceAndSessionMaxAge(t *testing.T) {
 	e := setup(t, func(o *Options) { o.SessionMaxAge = time.Hour })
 	if res, _ := e.do(t, "GET", "/api/nope/x", nil); res.StatusCode != 404 {

@@ -272,7 +272,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 			q.Set("id_token_hint", se.tok.ID)
 		}
 		if s.o.PublicOrigin != "" {
-			q.Set("post_logout_redirect_uri", s.o.PublicOrigin+s.o.AfterLoginPath)
+			after := s.o.AfterLoginPath
+			if strings.Contains(after, "://") { // absolute UI URL: the registered post-logout URI is the BFF's own origin
+				after = "/"
+			}
+			q.Set("post_logout_redirect_uri", s.o.PublicOrigin+after)
 		}
 		out["logout_url"] = s.oc.ep.EndSession + "?" + q.Encode()
 	}
