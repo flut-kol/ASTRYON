@@ -7,13 +7,15 @@ Apache Flink 1.20.3 / Java 17 job for the first executable processing slice:
 3. publish every supported valid envelope to `validated.events.v1`;
 4. bounded processing-time dedup on `(tenant_id, source_id, event_id, processing_version)`;
 5. publish unique normalized events to `processed.events.v1`;
-6. publish validation/normalization failures, with a bounded original copy, to `events.quarantine.v1`.
+6. publish validation/normalization failures as canonical `QuarantineRecordV1` values, with a bounded original copy, to `events.quarantine.v1`.
 
 The job uses incremental RocksDB state, exactly-once Flink checkpoints in S3 and at-least-once Kafka output. The output choice follows ADR-011: downstream consumers must remain idempotent.
 
 The actual dedup identity is `(tenant_id, source_id, event_id, processing_version)`, so a replay into a new processing version is never suppressed by an older version still inside the TTL window.
 
 `tenant_id` is never accepted from an HTTP header or request by this service. This internal job trusts the claim-derived `tenant_id` already embedded by the gateway because Kafka ACLs must restrict `raw.events.v1` writers to the authenticated gateway and explicitly approved producers. A producer ACL is therefore part of the security boundary.
+
+Quarantine records use a deterministic UUIDv8 derived from `("flink-processing", topic, partition, offset)`, carry Kafka provenance as a coordinate pair, and use the Kafka key `tenant_id + 0x1f + deviation_id`. Original bytes are canonical padded base64 and limited to 64 KiB. Diagnostics are bounded fixed messages and never copy payload data. If the envelope has no validated tenant or Kafka provenance is invalid, processing fails instead of publishing a misleading tenant record or checkpointing a silent drop.
 
 ## Build and test
 

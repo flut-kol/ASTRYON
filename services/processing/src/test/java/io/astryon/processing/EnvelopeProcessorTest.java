@@ -57,10 +57,81 @@ class EnvelopeProcessorTest {
         ProcessingResult result = processor.process(raw);
 
         assertFalse(result.isAccepted());
+        String expected = "{\"contract_version\":1,"
+                + "\"deviation_id\":\"f2a52d23-a5fb-8a3e-bbda-5bf00abc11fb\","
+                + "\"tenant_id\":\"11111111-1111-4111-8111-111111111111\","
+                + "\"source_id\":\"22222222-2222-4222-8222-222222222222\","
+                + "\"event_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\","
+                + "\"processing_version\":1,"
+                + "\"quarantined_at\":\"2026-10-20T12:00:00Z\","
+                + "\"stage\":\"flink-processing\","
+                + "\"reason_code\":\"ERR_ENVELOPE_MALFORMED\","
+                + "\"diagnostic\":\"envelope validation failed\","
+                + "\"provenance\":{\"source_topic\":\"raw.events.v1\",\"source_partition\":0,\"source_offset\":12},"
+                + "\"original\":{\"encoding\":\"base64\",\"data\":\""
+                + Base64.getEncoder().encodeToString(invalid.getBytes(StandardCharsets.UTF_8))
+                + "\",\"truncated\":false}}";
+        assertEquals(expected, new String(result.quarantined().value(), StandardCharsets.UTF_8));
+        assertArrayEquals(
+                "11111111-1111-4111-8111-111111111111\u001ff2a52d23-a5fb-8a3e-bbda-5bf00abc11fb".getBytes(StandardCharsets.UTF_8),
+                result.quarantined().key());
+    }
+
+    @Test
+    void deterministicDeviationIdMatchesGoOffsetFixture() throws Exception {
+        String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
+                .replace("\"processing_version\":1", "\"processing_version\":1,\"unknown\":true");
+
+        ProcessingResult first = processor.process(new RawRecord("raw.events.v1", 7, 91, KEY, invalid.getBytes(StandardCharsets.UTF_8)));
+        ProcessingResult second = processor.process(new RawRecord("raw.events.v1", 7, 91, null, invalid.getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals("a0a11cfd-92f4-8cc7-b83b-065b5d9d48f0",
+                mapper.readTree(first.quarantined().value()).path("deviation_id").asText());
+        assertArrayEquals(first.quarantined().value(), second.quarantined().value());
+        assertArrayEquals(first.quarantined().key(), second.quarantined().key());
+    }
+
+    @Test
+    void boundsOriginalAt64KiBAndMarksTruncation() throws Exception {
+        String padding = "x".repeat(70 << 10);
+        String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
+                .replace("\"processing_version\":1", "\"processing_version\":1,\"unknown\":\"" + padding + "\"");
+
+        ProcessingResult result = processor.process(new RawRecord("raw.events.v1", 2, 33, KEY, invalid.getBytes(StandardCharsets.UTF_8)));
+
+        JsonNode original = mapper.readTree(result.quarantined().value()).path("original");
+        assertEquals("base64", original.path("encoding").asText());
+        assertEquals(64 << 10, Base64.getDecoder().decode(original.path("data").asText()).length);
+        assertTrue(original.path("truncated").asBoolean());
+    }
+
+    @Test
+    void diagnosticNeverCopiesPayloadOrUnknownFieldName() throws Exception {
+        String secret = "sensitive-payload-marker";
+        String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
+                .replace("\"processing_version\":1", "\"processing_version\":1,\"" + secret + "\":true");
+
+        ProcessingResult result = processor.process(new RawRecord("raw.events.v1", 0, 9, KEY, invalid.getBytes(StandardCharsets.UTF_8)));
+
         JsonNode quarantine = mapper.readTree(result.quarantined().value());
-        assertEquals("ERR_ENVELOPE_MALFORMED", quarantine.path("reason_code").asText());
-        assertEquals("flink-processing", quarantine.path("stage").asText());
-        assertEquals(invalid, new String(Base64.getDecoder().decode(quarantine.path("original_b64").asText()), StandardCharsets.UTF_8));
+        assertEquals("envelope validation failed", quarantine.path("diagnostic").asText());
+        assertFalse(quarantine.path("diagnostic").asText().contains(secret));
+        assertTrue(quarantine.path("diagnostic").asText().getBytes(StandardCharsets.UTF_8).length <= 2048);
+    }
+
+    @Test
+    void omitsInvalidOptionalBusinessIdentifiers() throws Exception {
+        String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
+                .replace("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "not-an-event")
+                .replace("22222222-2222-4222-8222-222222222222", "not-a-source");
+
+        ProcessingResult result = processor.process(new RawRecord(
+                "raw.events.v1", 3, 15, KEY, invalid.getBytes(StandardCharsets.UTF_8)));
+
+        JsonNode quarantine = mapper.readTree(result.quarantined().value());
+        assertFalse(quarantine.has("event_id"));
+        assertFalse(quarantine.has("source_id"));
+        assertEquals(1, quarantine.path("processing_version").asLong());
     }
 
     @Test
@@ -81,10 +152,30 @@ class EnvelopeProcessorTest {
         String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
                 .replace("11111111-1111-4111-8111-111111111111", "not-a-tenant");
 
-        ProcessingResult result = processor.process(new RawRecord("raw.events.v1", 0, 1, KEY, invalid.getBytes(StandardCharsets.UTF_8)));
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> processor.process(new RawRecord("raw.events.v1", 0, 1, KEY, invalid.getBytes(StandardCharsets.UTF_8))));
+        assertEquals("cannot quarantine without a validated tenant_id", failure.getMessage());
+    }
 
-        assertFalse(result.isAccepted());
-        assertEquals("ERR_TENANT_ID_INVALID", mapper.readTree(result.quarantined().value()).path("reason_code").asText());
+    @Test
+    void failsClosedWithoutValidatedTenantSoOffsetCannotBeCheckpointed() {
+        IllegalStateException malformed = assertThrows(IllegalStateException.class, () -> processor.process(new RawRecord(
+                "raw.events.v1", 0, 1, KEY, "not-json".getBytes(StandardCharsets.UTF_8))));
+        IllegalStateException missing = assertThrows(IllegalStateException.class, () -> processor.process(new RawRecord(
+                "raw.events.v1", 0, 2, KEY, "{\"source_id\":\"22222222-2222-4222-8222-222222222222\"}".getBytes(StandardCharsets.UTF_8))));
+
+        assertEquals("cannot quarantine without a validated tenant_id", malformed.getMessage());
+        assertEquals("cannot quarantine without a validated tenant_id", missing.getMessage());
+    }
+
+    @Test
+    void failsClosedForInvalidKafkaProvenance() {
+        String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
+                .replace("\"processing_version\":1", "\"processing_version\":1,\"unknown\":true");
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> processor.process(new RawRecord("bad topic", 0, 1, KEY, invalid.getBytes(StandardCharsets.UTF_8))));
+        assertEquals("invalid Kafka provenance", failure.getMessage());
     }
 
     @Test

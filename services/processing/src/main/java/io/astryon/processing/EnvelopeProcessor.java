@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -18,6 +19,7 @@ import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -25,9 +27,12 @@ import java.util.regex.Pattern;
 final class EnvelopeProcessor {
     private static final int MAX_INLINE_PAYLOAD_BYTES = 1 << 20;
     private static final int MAX_QUARANTINE_BYTES = 64 << 10;
+    private static final byte[] QUARANTINE_ID_DOMAIN = "astryon/quarantine-record/v1\0".getBytes(StandardCharsets.UTF_8);
+    private static final String QUARANTINE_PRODUCER = "flink-processing";
     private static final Duration MAX_FUTURE_SKEW = Duration.ofMinutes(5);
     private static final Duration MAX_EVENT_AGE = Duration.ofDays(3660);
     private static final Pattern UUID_PATTERN = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+    private static final Pattern KAFKA_TOPIC_PATTERN = Pattern.compile("^[a-zA-Z0-9._-]+$");
     private static final Pattern ULID_PATTERN = Pattern.compile("^[0-7][0-9A-HJKMNP-TV-Z]{25}$", Pattern.CASE_INSENSITIVE);
     private static final Pattern CHECKSUM_PATTERN = Pattern.compile("^[0-9a-f]{64}$");
     private static final Set<String> ALLOWED_FIELDS = Set.of(
@@ -50,20 +55,20 @@ final class EnvelopeProcessor {
         try {
             JsonNode parsed = mapper.readTree(raw.value());
             if (parsed == null || !parsed.isObject()) {
-                return reject(raw, "ERR_ENVELOPE_MALFORMED", "envelope must be a JSON object", null);
+                return reject(raw, "ERR_ENVELOPE_MALFORMED", null);
             }
             envelope = (ObjectNode) parsed;
         } catch (Exception exception) {
-            return reject(raw, "ERR_ENVELOPE_MALFORMED", "invalid JSON envelope", null);
+            return reject(raw, "ERR_ENVELOPE_MALFORMED", null);
         }
 
         String validationError = validate(envelope);
         if (validationError != null) {
             int separator = validationError.indexOf(':');
-            return reject(raw, validationError.substring(0, separator), validationError.substring(separator + 1), text(envelope, "tenant_id"));
+            return reject(raw, validationError.substring(0, separator), text(envelope, "tenant_id"));
         }
         if (!"json".equals(text(envelope, "payload_format")) || !envelope.has("payload")) {
-            return reject(raw, "ERR_NORMALIZATION_UNSUPPORTED", "first tranche supports inline JSON payloads only", text(envelope, "tenant_id"));
+            return reject(raw, "ERR_NORMALIZATION_UNSUPPORTED", text(envelope, "tenant_id"));
         }
 
         try {
@@ -83,7 +88,7 @@ final class EnvelopeProcessor {
                     + envelope.path("processing_version").intValue();
             return ProcessingResult.accepted(new AcceptedRecord(key, dedupKey, validated, processedBytes));
         } catch (Exception exception) {
-            return reject(raw, "ERR_NORMALIZATION_INTERNAL", "normalization failed", text(envelope, "tenant_id"));
+            return reject(raw, "ERR_NORMALIZATION_INTERNAL", text(envelope, "tenant_id"));
         }
     }
 
@@ -161,26 +166,101 @@ final class EnvelopeProcessor {
         }
     }
 
-    private ProcessingResult reject(RawRecord raw, String code, String detail, String tenantId) {
+    private ProcessingResult reject(RawRecord raw, String code, String tenantId) {
+        if (!uuid(tenantId)) {
+            throw new IllegalStateException("cannot quarantine without a validated tenant_id");
+        }
+        String normalizedTenantId = tenantId.toLowerCase(Locale.ROOT);
+        String deviationId = quarantineDeviationId(raw);
+
         ObjectNode quarantine = mapper.createObjectNode();
-        if (tenantId != null && uuid(tenantId)) quarantine.put("tenant_id", tenantId.toLowerCase());
-        quarantine.put("reason_code", code);
-        quarantine.put("reason", detail);
-        quarantine.put("stage", "flink-processing");
-        quarantine.put("source_topic", raw.topic());
-        quarantine.put("source_partition", raw.partition());
-        quarantine.put("source_offset", raw.offset());
+        quarantine.put("contract_version", 1);
+        quarantine.put("deviation_id", deviationId);
+        quarantine.put("tenant_id", normalizedTenantId);
+        ObjectNode parsed = parsedObject(raw.value());
+        if (parsed != null) {
+            String sourceId = text(parsed, "source_id");
+            if (uuid(sourceId)) quarantine.put("source_id", sourceId.toLowerCase(Locale.ROOT));
+            String eventId = text(parsed, "event_id");
+            if (uuid(eventId)) quarantine.put("event_id", eventId.toLowerCase(Locale.ROOT));
+            JsonNode processingVersion = parsed.get("processing_version");
+            if (validQuarantineProcessingVersion(processingVersion)) {
+                quarantine.put("processing_version", processingVersion.longValue());
+            }
+        }
         quarantine.put("quarantined_at", clock.instant().toString());
-        byte[] original = raw.value();
+        quarantine.put("stage", QUARANTINE_PRODUCER);
+        quarantine.put("reason_code", code);
+        quarantine.put("diagnostic", diagnostic(code));
+
+        ObjectNode provenance = quarantine.putObject("provenance");
+        provenance.put("source_topic", raw.topic());
+        provenance.put("source_partition", raw.partition());
+        provenance.put("source_offset", raw.offset());
+
+        byte[] original = raw.value() == null ? new byte[0] : raw.value();
         boolean truncated = original.length > MAX_QUARANTINE_BYTES;
         int length = Math.min(original.length, MAX_QUARANTINE_BYTES);
-        quarantine.put("original_b64", Base64.getEncoder().encodeToString(java.util.Arrays.copyOf(original, length)));
-        if (truncated) quarantine.put("original_truncated", true);
+        ObjectNode originalNode = quarantine.putObject("original");
+        originalNode.put("encoding", "base64");
+        originalNode.put("data", Base64.getEncoder().encodeToString(java.util.Arrays.copyOf(original, length)));
+        originalNode.put("truncated", truncated);
         try {
-            return ProcessingResult.quarantined(new OutputRecord(ProcessingConfig.QUARANTINE_TOPIC, raw.key(), mapper.writeValueAsBytes(quarantine)));
+            byte[] key = (normalizedTenantId + '\u001f' + deviationId).getBytes(StandardCharsets.UTF_8);
+            return ProcessingResult.quarantined(new OutputRecord(ProcessingConfig.QUARANTINE_TOPIC, key, mapper.writeValueAsBytes(quarantine)));
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("cannot serialize quarantine record", exception);
         }
+    }
+
+    private ObjectNode parsedObject(byte[] value) {
+        if (value == null) return null;
+        try {
+            JsonNode parsed = mapper.readTree(value);
+            return parsed != null && parsed.isObject() ? (ObjectNode) parsed : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String diagnostic(String code) {
+        return switch (code) {
+            case "ERR_NORMALIZATION_UNSUPPORTED" -> "normalization is not supported";
+            case "ERR_NORMALIZATION_INTERNAL" -> "normalization failed";
+            default -> "envelope validation failed";
+        };
+    }
+
+    private static String quarantineDeviationId(RawRecord raw) {
+        if (raw.topic() == null
+                || raw.topic().getBytes(StandardCharsets.UTF_8).length > 249
+                || !KAFKA_TOPIC_PATTERN.matcher(raw.topic()).matches()
+                || raw.partition() < 0
+                || raw.offset() < 0) {
+            throw new IllegalArgumentException("invalid Kafka provenance");
+        }
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(QUARANTINE_ID_DOMAIN);
+            updateIdentityPart(digest, QUARANTINE_PRODUCER.getBytes(StandardCharsets.UTF_8));
+            updateIdentityPart(digest, raw.topic().getBytes(StandardCharsets.UTF_8));
+            ByteBuffer coordinate = ByteBuffer.allocate(12);
+            coordinate.putInt(raw.partition());
+            coordinate.putLong(raw.offset());
+            updateIdentityPart(digest, coordinate.array());
+            byte[] bytes = java.util.Arrays.copyOf(digest.digest(), 16);
+            bytes[6] = (byte) ((bytes[6] & 0x0f) | 0x80);
+            bytes[8] = (byte) ((bytes[8] & 0x3f) | 0x80);
+            ByteBuffer uuid = ByteBuffer.wrap(bytes);
+            return new UUID(uuid.getLong(), uuid.getLong()).toString();
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private static void updateIdentityPart(MessageDigest digest, byte[] part) {
+        digest.update(ByteBuffer.allocate(4).putInt(part.length).array());
+        digest.update(part);
     }
 
     private static byte[] partitionKey(ObjectNode envelope) {
@@ -213,12 +293,20 @@ final class EnvelopeProcessor {
     }
 
     private static boolean uuid(String value) {
-        if (!UUID_PATTERN.matcher(value).matches()) return false;
+        if (value == null || !UUID_PATTERN.matcher(value).matches()) return false;
         try { UUID.fromString(value); return true; } catch (IllegalArgumentException exception) { return false; }
     }
 
     private static boolean integerAtLeast(JsonNode node, int minimum) {
         return node != null && node.isIntegralNumber() && node.canConvertToInt() && node.intValue() >= minimum;
+    }
+
+    private static boolean validQuarantineProcessingVersion(JsonNode node) {
+        return node != null
+                && node.isIntegralNumber()
+                && node.canConvertToLong()
+                && node.longValue() >= 1
+                && node.longValue() <= 0xffff_ffffL;
     }
 
     private static boolean boundedText(String value, int maxBytes) {
