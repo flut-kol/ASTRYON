@@ -25,12 +25,19 @@ from `NextOffset`, and call `NDJSONFrom`. A crash after the sink write but
 before checkpoint persistence can replay one record; sinks must therefore use
 `Record.DedupKey` as their idempotency key.
 
+## Durable job store (`internal/jobs/store.go`)
+
+PostgreSQL repository over `jobs`/`job_attempts` (migration 0004), kind `process_file`: `Claim` (`FOR UPDATE SKIP LOCKED`, only QUEUED and due),
+`Heartbeat`, `SaveCheckpoint` (checkpoint in `payload.checkpoint` plus progress counters), `Succeed`, `Fail` (RETRYING with backoff while
+`attempt_count < max_attempts`, else FAILED) and `Sweep` (expired RUNNING leases -> RETRYING/FAILED, due RETRYING -> QUEUED). Every claim increments
+`attempt_count`, which is the **fence**: all writes compare owner, fence, RUNNING and an unexpired lease, so a stale worker gets `ErrFenced`
+and cannot move a checkpoint or finish the job. A re-claim returns the last checkpoint for resume. Live test (`FILEJOBS_PG_URL`, non-superuser
+role, migrations applied) proved claim exclusion, expiry fencing, resume and backoff on PostgreSQL 16.
+
 ## Remaining work
 
 - durable upload completion, checksum verification, malware/content scanning
   and object lifecycle;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
-- persistent job/state/checkpoint repository and atomic sink-plus-checkpoint
-  integration;
-- durable fenced leases/heartbeats and worker executable;
+- atomic sink-plus-checkpoint integration (idempotent sink via `DedupKey`) and the worker executable that drives the store;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.
