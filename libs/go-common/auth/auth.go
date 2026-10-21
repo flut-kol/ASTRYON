@@ -78,6 +78,9 @@ type Config struct {
 	ProofMaxAge     time.Duration // default 60s
 	ProofFutureSkew time.Duration // default 5s
 	ReplayTTL       time.Duration // default 120s
+	// OnDPoPReject is called with a short reason ("htu mismatch", "replay", ...) for every rejected
+	// proof; services plug their counters here. It must not log tokens or proofs.
+	OnDPoPReject func(reason string)
 
 	HTTPClient *http.Client
 	Now        func() time.Time

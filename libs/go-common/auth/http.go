@@ -12,7 +12,7 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, err := v.Authenticate(r)
 		if err != nil {
-			w.Header().Set("WWW-Authenticate", "Bearer")
+			w.Header().Set("WWW-Authenticate", v.challenge())
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}

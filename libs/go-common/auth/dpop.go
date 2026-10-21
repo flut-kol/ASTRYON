@@ -70,6 +70,7 @@ func (m *MemoryReplayStore) First(_ context.Context, key string, ttl time.Durati
 func (v *Verifier) authenticateDPoP(r *http.Request, token string) (Principal, error) {
 	proofs := r.Header.Values("DPoP")
 	if v.cfg.ReplayStore == nil || v.cfg.PublicBaseURL == "" || len(proofs) != 1 {
+		v.rejected("proof count or config")
 		return Principal{}, ErrUnauthenticated
 	}
 	p, err := v.verify(r.Context(), token, true)
@@ -77,9 +78,27 @@ func (v *Verifier) authenticateDPoP(r *http.Request, token string) (Principal, e
 		return Principal{}, err
 	}
 	if err := v.checkProof(r, proofs[0], token, p.Confirmation); err != nil {
+		v.rejected(strings.TrimPrefix(err.Error(), "dpop: "))
 		return Principal{}, ErrUnauthenticated
 	}
 	return p, nil
+}
+
+func (v *Verifier) rejected(reason string) {
+	if v.cfg.OnDPoPReject != nil {
+		v.cfg.OnDPoPReject(reason)
+	}
+}
+
+// challenge is the WWW-Authenticate value for 401 responses.
+func (v *Verifier) challenge() string {
+	if v.cfg.ReplayStore == nil {
+		return "Bearer"
+	}
+	if v.cfg.RequireDPoP {
+		return `DPoP algs="ES256"`
+	}
+	return `Bearer, DPoP algs="ES256"`
 }
 
 func (v *Verifier) checkProof(r *http.Request, proof, token, jkt string) error {

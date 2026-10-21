@@ -113,3 +113,32 @@ func TestDPoP(t *testing.T) {
 		t.Error("RequireDPoP accepted Bearer")
 	}
 }
+
+func TestDPoPRejectHookAndChallenge(t *testing.T) {
+	rk, _ := rsa.GenerateKey(rand.Reader, 2048)
+	server := oidcServer(t, &rk.PublicKey, "one")
+	defer server.Close()
+	now := time.Unix(1_700_000_000, 0)
+	var reasons []string
+	v, err := NewVerifier(context.Background(), Config{BaseURL: server.URL, Issuer: server.URL + "/issuer", Audience: "astryon-gateway",
+		Environment: "test", Now: func() time.Time { return now }, PublicBaseURL: "https://a.example", RequireDPoP: true,
+		ReplayStore: &MemoryReplayStore{}, OnDPoPReject: func(r string) { reasons = append(reasons, r) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c := validClaims(server.URL+"/issuer", now)
+	c["typ"], c["cnf"] = "DPoP", map[string]any{"jkt": thumbprint(&pk.PublicKey)}
+	tok := signedRS256(t, rk, "one", c)
+	r := httptest.NewRequest("POST", "/x", nil)
+	r.Header.Set("Authorization", "DPoP "+tok)
+	r.Header.Set("DPoP", dpopProof(t, pk, map[string]any{"htm": "GET", "htu": "https://a.example/x", "iat": now.Unix(), "jti": "1"}, nil))
+	w := httptest.NewRecorder()
+	v.Middleware(http.NotFoundHandler()).ServeHTTP(w, r)
+	if w.Code != 401 || w.Header().Get("WWW-Authenticate") != `DPoP algs="ES256"` {
+		t.Fatalf("%d %q", w.Code, w.Header().Get("WWW-Authenticate"))
+	}
+	if len(reasons) != 1 || reasons[0] != "htm mismatch" {
+		t.Fatalf("reasons = %v", reasons)
+	}
+}
