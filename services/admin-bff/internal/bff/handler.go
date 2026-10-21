@@ -28,6 +28,7 @@ type Options struct {
 	LoginTimeout   time.Duration     // default 10m
 	MaxSessions    int               // default 10000
 	AfterLoginPath string            // default "/"
+	AllowedOrigins []string          // extra Origins accepted on unsafe requests (UI served from another origin, e.g. the Vite dev server)
 	Logger         *log.Logger
 }
 
@@ -98,6 +99,11 @@ func New(ctx context.Context, o Options) (*Server, error) {
 	s.mux.HandleFunc("GET /auth/callback", s.callback)
 	s.mux.HandleFunc("GET /auth/me", s.me)
 	s.mux.HandleFunc("POST /auth/logout", s.logout)
+	if strings.Contains(s.o.AfterLoginPath, "://") { // post-logout lands on the BFF origin: hand the browser back to the UI
+		s.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, s.o.AfterLoginPath, http.StatusFound)
+		})
+	}
 	s.mux.HandleFunc("/api/{service}/{rest...}", s.proxy)
 	return s, nil
 }
@@ -252,7 +258,15 @@ func (s *Server) csrfOK(r *http.Request) bool {
 		return false
 	}
 	o := r.Header.Get("Origin")
-	return o == "" || s.o.PublicOrigin == "" || o == s.o.PublicOrigin
+	if o == "" || s.o.PublicOrigin == "" || o == s.o.PublicOrigin {
+		return true
+	}
+	for _, a := range s.o.AllowedOrigins {
+		if o == a {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

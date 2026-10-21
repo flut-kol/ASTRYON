@@ -274,6 +274,26 @@ func TestAbsoluteAfterLoginKeepsRegisteredPostLogoutURI(t *testing.T) {
 	}
 }
 
+func TestAllowedOriginsAndRootRedirect(t *testing.T) {
+	e := setup(t, func(o *Options) {
+		o.AfterLoginPath = "http://127.0.0.1:15173/"
+		o.AllowedOrigins = []string{"http://127.0.0.1:15173"}
+	})
+	e.login(t)
+	if res, _ := e.do(t, "POST", "/auth/logout", map[string]string{CSRFHeader: CSRFValue, "Origin": "http://127.0.0.1:15173"}); res.StatusCode != 200 {
+		t.Fatalf("logout from an allowed UI origin = %d", res.StatusCode)
+	}
+	e.login(t)
+	if res, _ := e.do(t, "POST", "/auth/logout", map[string]string{CSRFHeader: CSRFValue, "Origin": "http://evil.example"}); res.StatusCode != 403 {
+		t.Fatalf("logout from a foreign origin = %d", res.StatusCode)
+	}
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := c.Get(e.bff.URL + "/")
+	if err != nil || res.StatusCode != 302 || res.Header.Get("Location") != "http://127.0.0.1:15173/" {
+		t.Fatalf("GET / = %v %v", res, err)
+	}
+}
+
 func TestUnknownServiceAndSessionMaxAge(t *testing.T) {
 	e := setup(t, func(o *Options) { o.SessionMaxAge = time.Hour })
 	if res, _ := e.do(t, "GET", "/api/nope/x", nil); res.StatusCode != 404 {

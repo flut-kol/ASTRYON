@@ -5,7 +5,7 @@
 //	AAS_BASE_URL  BFF_CLIENT_ID (astryon-portal)  BFF_CLIENT_KEY_FILE + BFF_CLIENT_KEY_ID (private_key_jwt)
 //	BFF_CLIENT_SECRET (dev only, instead of the key)  BFF_SCOPES ("openid ...", space separated)
 //	BFF_UPSTREAMS "gateway=http://..,files=..,query=..,connectors=..,exports=..,quarantine=.."
-//	BFF_SESSION_MAX_AGE (8h)  BFF_AFTER_LOGIN_URL (default "/"; absolute URL when the UI is served from another origin, e.g. the Vite dev server)
+//	BFF_SESSION_MAX_AGE (8h)  BFF_ALLOWED_ORIGINS (comma separated extra Origins for unsafe requests, e.g. http://127.0.0.1:15173)  BFF_AFTER_LOGIN_URL (default "/"; absolute URL when the UI is served from another origin, e.g. the Vite dev server)
 package main
 
 import (
@@ -40,7 +40,7 @@ func main() {
 	s, err := bff.New(ctx, bff.Options{
 		OIDC: bff.Config{BaseURL: os.Getenv("AAS_BASE_URL"), ClientID: os.Getenv("BFF_CLIENT_ID"), ClientSecret: os.Getenv("BFF_CLIENT_SECRET"),
 			KeyFile: os.Getenv("BFF_CLIENT_KEY_FILE"), KeyID: os.Getenv("BFF_CLIENT_KEY_ID"), RedirectURL: origin + "/auth/callback", Scopes: strings.Fields(os.Getenv("BFF_SCOPES"))},
-		PublicOrigin: origin, Upstreams: up, CookieSecure: os.Getenv("BFF_COOKIE_INSECURE") != "1", SessionMaxAge: age, AfterLoginPath: os.Getenv("BFF_AFTER_LOGIN_URL"),
+		PublicOrigin: origin, Upstreams: up, CookieSecure: os.Getenv("BFF_COOKIE_INSECURE") != "1", SessionMaxAge: age, AfterLoginPath: os.Getenv("BFF_AFTER_LOGIN_URL"), AllowedOrigins: splitList(os.Getenv("BFF_ALLOWED_ORIGINS")),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -51,4 +51,14 @@ func main() {
 	}
 	srv := &http.Server{Addr: addr, Handler: s, ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(srv.ListenAndServe())
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, x := range strings.Split(v, ",") {
+		if x = strings.TrimSuffix(strings.TrimSpace(x), "/"); x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
 }
