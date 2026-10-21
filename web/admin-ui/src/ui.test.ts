@@ -99,3 +99,17 @@ describe('exports and connectors', () => {
     expect(f.mock.calls.map((c) => `${c[1].method} ${c[0]}`)).toEqual(['POST /c/v1/connectors/a%2Fb/pause', 'POST /c/v1/connectors/a/resume']);
   });
 });
+
+describe('bff mode', () => {
+  it('uses the session cookie, no bearer, CSRF header on POST', async () => {
+    const f = vi.fn(async (_u: string, _i: RequestInit) => json({ ok: true }));
+    const c = { getToken: () => 'leak', fetchFn: f as unknown as typeof fetch, bff: true };
+    await call(c, '/api/query', '/v1/x');
+    await call(c, '/api/query', '/v1/x', { method: 'POST', body: {} });
+    const [g, p] = f.mock.calls.map((x) => x[1] as RequestInit & { headers: Record<string, string> });
+    expect(g.headers.Authorization).toBeUndefined();
+    expect(g.headers['X-Requested-With']).toBeUndefined();
+    expect(p.headers['X-Requested-With']).toBe('astryon-admin');
+    expect(p.credentials).toBe('same-origin');
+  });
+});

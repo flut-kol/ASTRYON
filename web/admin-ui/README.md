@@ -23,3 +23,6 @@ Kept in memory + sessionStorage only; never in source. The UI never sends tenant
 
 All server strings are rendered via `textContent` (`src/dom.ts`); no `innerHTML`.
 Production: serve `dist/` behind a gateway/reverse proxy exposing the same `/api/*` prefixes (or set `VITE_*_BASE`); S3 needs CORS exposing `ETag` if parts are PUT directly (`VITE_S3_PROXY` unset).
+
+
+BFF mode: build/run with `VITE_AUTH_MODE=bff` behind `services/admin-bff` (same origin; `/api/<service>` is proxied there). The browser then holds no token: requests use the session cookie, unsafe ones add `X-Requested-With: astryon-admin`, and the header shows Sign in/Sign out via `/auth/me`, `/auth/login`, `/auth/logout`.

@@ -18,7 +18,8 @@ const B = {
   quarantine: env.VITE_QUARANTINE_BASE ?? '/api/quarantine',
   s3Proxy: env.VITE_S3_PROXY ?? (env.DEV ? '/api/s3' : undefined),
 };
-const ctx: Ctx = { getToken };
+const BFF = env.VITE_AUTH_MODE === 'bff';
+const ctx: Ctx = { getToken, bff: BFF };
 
 const frag = takeTokenFromHash(location.hash);
 if (frag) { setToken(frag); history.replaceState(null, '', location.pathname + location.search + '#/'); }
@@ -324,6 +325,7 @@ function render() {
   const root = document.getElementById('app')!;
   clear(root);
   const page = location.hash.replace(/^#\/?/, '') || 'overview';
+  if (BFF) { renderBff(root, page); return; }
   const tok = h('input', { type: 'password', size: '28', placeholder: 'bearer token (dev static or AAS)', autocomplete: 'off' });
   const status = h('span', { class: 'mut' }, getToken() ? 'token set (session only)' : 'no token');
   const nav = h('nav', {}, ROUTES.map(([k, l]) => h('a', { href: `#/${k}`, class: k === page ? 'on' : '' }, l)));
@@ -333,6 +335,29 @@ function render() {
     loginUrl ? h('a', { href: loginUrl }, 'Sign in') : null, status);
   const main = h('main', {});
   root.append(h('header', {}, h('strong', {}, 'ASTRYON Admin'), nav, settings), main);
+  const route = ROUTES.find(([k]) => k === page);
+  if (!route) { main.append(na('Unknown page')); return; }
+  if (page === 'jobs') main.append(h('h2', {}, 'Jobs'), na('/v1/jobs'));
+  else if (page === 'sources') main.append(h('h2', {}, 'Sources'), na('/v1/sources'));
+  else void Promise.resolve(route[2](main)).catch((e) => main.append(errBox(e)));
+}
+function renderBff(root: HTMLElement, page: string) {
+  const nav = h('nav', {}, ROUTES.map(([k, l]) => h('a', { href: `#/${k}`, class: k === page ? 'on' : '' }, l)));
+  const who = h('span', { class: 'mut' }, 'checking session...');
+  const settings = h('div', { class: 'row', style: 'margin:0;margin-left:auto' }, who);
+  const main = h('main', {});
+  root.append(h('header', {}, h('strong', {}, 'ASTRYON Admin'), nav, settings), main);
+  void fetch('/auth/me', { credentials: 'same-origin' }).then((r) => r.json() as Promise<{ authenticated?: boolean; subject?: string }>).then((m) => {
+    clear(who);
+    if (!m.authenticated) { who.append(h('a', { href: '/auth/login' }, 'Sign in')); return; }
+    who.append(`signed in${m.subject ? ` as ${m.subject}` : ''} `, h('button', {
+      onclick: async () => {
+        const r = await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'astryon-admin' } });
+        const j = (await r.json().catch(() => ({}))) as { logout_url?: string };
+        location.href = j.logout_url ?? '/';
+      },
+    }, 'Sign out'));
+  }).catch(() => { who.textContent = 'session service unreachable'; });
   const route = ROUTES.find(([k]) => k === page);
   if (!route) { main.append(na('Unknown page')); return; }
   if (page === 'jobs') main.append(h('h2', {}, 'Jobs'), na('/v1/jobs'));

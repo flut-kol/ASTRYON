@@ -8,6 +8,7 @@ use (
 	./libs/sdk-file-ingestion
 	./libs/sdk-quarantine
 	./libs/sdk-query
+	./services/admin-bff
 	./services/ch-aggregator
 	./services/clickhouse-sink
 	./services/connector-manager

@@ -3,7 +3,8 @@ export class ApiError extends Error {
   /** Endpoint absent in this build / service not reachable: UI shows "not available" instead of an error. */
   get unavailable() { return this.status === 404 || this.status === 405 || this.status === 501 || this.status === 502 || this.status === 503 || this.status === 504 || this.status === 0 || (this.status === 500 && this.code === 'http_500'); }
 }
-export interface Ctx { getToken: () => string | null; fetchFn?: typeof fetch }
+/** bff: session-cookie mode (services/admin-bff): no token in the browser, same-origin credentials, CSRF header on unsafe methods. */
+export interface Ctx { getToken: () => string | null; fetchFn?: typeof fetch; bff?: boolean }
 
 /** Parses both error shapes: {code,message,trace_id} and {error:{code,message,trace_id}}. */
 export function parseError(status: number, body: unknown, fallback: string, reqId?: string): ApiError {
@@ -18,13 +19,14 @@ export async function call<T>(ctx: Ctx, base: string, path: string, init: { meth
   for (const [k, v] of Object.entries(init.query ?? {})) if (v) qs.set(k, v);
   const url = base.replace(/\/$/, '') + path + (qs.toString() ? `?${qs}` : '');
   const headers: Record<string, string> = { Accept: 'application/json' };
-  const tok = ctx.getToken();
+  const tok = ctx.bff ? null : ctx.getToken();
   if (tok) headers.Authorization = `Bearer ${tok}`; // tenant comes from token claims only; never sent by UI
+  if (ctx.bff && (init.method ?? 'GET') !== 'GET') headers['X-Requested-With'] = 'astryon-admin';
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
   const f = ctx.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
   let res: Response;
   try {
-    res = await f(url, { method: init.method ?? 'GET', headers, body: init.body === undefined ? undefined : JSON.stringify(init.body) });
+    res = await f(url, { method: init.method ?? 'GET', headers, body: init.body === undefined ? undefined : JSON.stringify(init.body), credentials: 'same-origin' });
   } catch (e) { throw new ApiError(0, 'network_error', e instanceof Error ? e.message : 'network error'); }
   const reqId = res.headers.get('X-Request-ID') ?? undefined;
   if (!res.ok) {
