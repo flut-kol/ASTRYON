@@ -235,6 +235,12 @@ func (d *Dispatcher) execute(j Job) {
 				_ = d.Queue.Release(rctx, j) // if this fails too, lease expiry re-queues it
 				rcancel()
 			}
+			// The Start write may have committed without its reply (PostgreSQL stopped meanwhile): the row is then RUNNING,
+			// Release only touches QUEUED rows, and no runner exists. Stop heartbeating it so the lease expires and recovery
+			// fails it as worker_lost instead of it staying RUNNING forever. A re-queued job is un-abandoned when claimed again.
+			if a, ok := d.Queue.(Abandoner); ok {
+				a.Abandon(j)
+			}
 		}
 		return
 	}
@@ -261,6 +267,13 @@ func (d *Dispatcher) execute(j Job) {
 			// Run already aborted the upload and deleted the partial object. Another replica failed the job
 			// (worker_lost), so there is nothing to write.
 			log.Printf("export_lease_lost_cleanup_done job=%s tenant=%s: run stopped, upload aborted, partial output removed, nothing written", j.ID, j.TenantID)
+			// The run is gone but the row may still be ours: when the lease was lost only because no heartbeat reached the
+			// queue, nobody has failed it yet, and the first heartbeat after the outage would renew the lease of a row without
+			// a runner forever. Stop heartbeating it so recovery fails it as worker_lost. If another replica already did,
+			// the row is terminal and this is a no-op.
+			if a, ok := d.Queue.(Abandoner); ok {
+				a.Abandon(j)
+			}
 			return
 		}
 		if errors.Is(err, ErrCHTimeout) {

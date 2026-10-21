@@ -227,3 +227,42 @@ func (c *chunkReader) Read(p []byte) (int, error) {
 	}
 	return n, nil
 }
+
+// startLostReply commits Start but loses the reply (PostgreSQL stopped between COMMIT and the response) and fails Release.
+type startLostReply struct {
+	flakyQueue
+	started chan struct{}
+}
+
+func (s *startLostReply) Start(ctx context.Context, j Job) (bool, error) {
+	if _, err := s.Queue.Start(ctx, j); err != nil {
+		return false, err
+	}
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	return false, errors.New("write tcp: broken pipe")
+}
+func (s *startLostReply) Release(context.Context, Job) error {
+	return errors.New("dial tcp: connection refused")
+}
+
+// Found live (e2e postgres_restart_and_outage): Start committed RUNNING but its reply was lost, Release failed too, and the
+// job was left owned by this worker with no runner. It must be abandoned so heartbeats stop and recovery fails it as
+// worker_lost, instead of its lease being renewed forever.
+func TestDispatcherStartErrorAbandonsPossiblyRunningJob(t *testing.T) {
+	ch := newFakeCH(ndjsonRows(3), 200)
+	defer ch.Close()
+	q := newFakeQueue()
+	id := q.add(tenantA)
+	sq := &startLostReply{flakyQueue: flakyQueue{Queue: q.view("w1")}, started: make(chan struct{}, 1)}
+	d := testDispatcher(sq, openGate(), ch, 1)
+	d.Start(context.Background())
+	<-sq.started
+	waitFor(t, "abandon", func() bool { sq.mu.Lock(); defer sq.mu.Unlock(); return len(sq.abandoned) == 1 })
+	if sq.abandoned[0] != id {
+		t.Fatalf("abandoned %v want %s", sq.abandoned, id)
+	}
+	shutdown(t, d)
+}

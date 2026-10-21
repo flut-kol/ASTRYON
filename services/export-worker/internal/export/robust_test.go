@@ -477,7 +477,11 @@ func TestCHHeaderWaitParentCancelIsNotTimeout(t *testing.T) {
 type failingHB struct {
 	*fqView
 	down atomic.Bool
+	abMu sync.Mutex
+	ab   []string
 }
+
+func (f *failingHB) Abandon(j Job) { f.abMu.Lock(); f.ab = append(f.ab, j.ID); f.abMu.Unlock() }
 
 func (f *failingHB) Heartbeat(ctx context.Context) (int, error) {
 	if f.down.Load() {
@@ -512,6 +516,9 @@ func TestHeartbeatOutageLongerThanLeaseCancelsRun(t *testing.T) {
 			if j := q.get(id); j.Status != StatusRunning {
 				t.Fatalf("nothing may be written by the zombie: %+v", j)
 			}
+			// Found live (e2e postgres_restart_and_outage): once PostgreSQL returned, the heartbeat renewed the lease of this
+			// runner-less RUNNING row forever. It must be abandoned so recovery fails it as worker_lost.
+			waitFor(t, "abandon", func() bool { hb.abMu.Lock(); defer hb.abMu.Unlock(); return len(hb.ab) == 1 && hb.ab[0] == id })
 		} else {
 			select {
 			case <-ps.cancelled:

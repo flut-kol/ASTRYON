@@ -392,6 +392,11 @@ func (s *PGJobStore) Claim(ctx context.Context) (j Job, ok bool, err error) {
 	if err != nil {
 		return Job{}, false, err
 	}
+	if ok { // claimed (again): it must be heartbeated even if an earlier failed Start abandoned the same id
+		s.abMu.Lock()
+		delete(s.abandoned, j.ID)
+		s.abMu.Unlock()
+	}
 	return j, ok, nil
 }
 
