@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/astryon/query-api/internal/query"
 )
 
 // dpopRejects counts rejected DPoP proofs by reason (auth.Config.OnDPoPReject). Reasons come from a
@@ -60,6 +62,7 @@ func serveMetrics(d *dpopRejects) {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		d.WritePrometheus(w)
+		query.Stats.WritePrometheus(w)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { log.Printf("query-api metrics: %v", srv.ListenAndServe()) }()

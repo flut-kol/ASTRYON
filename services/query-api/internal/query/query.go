@@ -73,6 +73,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, h handler) {
 	}
 	w.Header().Set("X-Request-ID", rid)
 	fail := func(e *apiError) {
+		Stats.record(e.status)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(e.status)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
@@ -116,6 +117,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, h handler) {
 		}
 		return
 	}
+	Stats.record(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

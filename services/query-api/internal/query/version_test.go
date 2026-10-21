@@ -330,3 +330,17 @@ func TestPGVersionResolverLive(t *testing.T) {
 		t.Fatalf("unknown: %v", err)
 	}
 }
+
+func TestStatsWritePrometheus(t *testing.T) {
+	var r requestStats
+	for _, c := range []int{200, 400, 429, 502, 502} {
+		r.record(c)
+	}
+	var b strings.Builder
+	r.WritePrometheus(&b)
+	for _, want := range []string{`{outcome="ok"} 1`, `{outcome="client_error"} 1`, `{outcome="throttled"} 1`, `{outcome="backend_error"} 2`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %s in\n%s", want, b.String())
+		}
+	}
+}

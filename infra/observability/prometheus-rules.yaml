@@ -81,3 +81,17 @@ groups:
         annotations:
           summary: sustained DPoP proof rejections in query-api (htu/ath/jkt misconfiguration or abuse)
           runbook: docs/architecture/dpop-plan.md
+  - name: astryon-query-api
+    rules:
+      - alert: AstryonQueryBackendErrors
+        expr: sum(rate(astryon_query_api_requests_total{outcome="backend_error"}[5m])) / clamp_min(sum(rate(astryon_query_api_requests_total[5m])), 1) > 0.02
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: more than 2 percent of query-api requests fail on the ClickHouse backend (502)
+      - alert: AstryonQueryThrottling
+        expr: sum(rate(astryon_query_api_requests_total{outcome="throttled"}[10m])) / clamp_min(sum(rate(astryon_query_api_requests_total[10m])), 1) > 0.10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 10 percent of query-api requests are rate limited (429)
