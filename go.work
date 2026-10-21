@@ -1,6 +1,7 @@
 go 1.27.0
 
 use (
+	./libs/audit
 	./libs/event-contracts
 	./libs/go-common
 	./libs/sdk-connector-manager
