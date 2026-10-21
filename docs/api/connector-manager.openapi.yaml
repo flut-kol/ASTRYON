@@ -5,7 +5,7 @@ info:
   description: >
     Minimal connector admin API served by services/connector-manager when ASTRYON_CONNECTOR_ADMIN_ADDR is set.
     Tenant is taken only from the validated token (AAS) and never from headers or bodies. Every operation needs
-    scope astryon:connectors:manage. Responses carry SecretRef names only, never secret values.
+    scope astryon:connectors:write. Responses carry SecretRef names only, never secret values.
 servers:
   - url: http://localhost:8089
 security:
@@ -100,7 +100,7 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
-    bearerAuth: {type: http, scheme: bearer, description: "AAS access token with scope astryon:connectors:manage and a tenant claim"}
+    bearerAuth: {type: http, scheme: bearer, description: "AAS access token with scope astryon:connectors:write and a tenant claim"}
   parameters:
     Id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
   responses:

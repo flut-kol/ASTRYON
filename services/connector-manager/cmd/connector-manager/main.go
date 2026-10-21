@@ -3,7 +3,7 @@
 // ASTRYON_CONNECTOR_SYNC_INTERVAL (default 30s), ASTRYON_CONNECTOR_METRICS_ADDR (optional, e.g. :9102).
 // Optional Debezium CDC consumer (off unless ASTRYON_CDC_TOPIC): ASTRYON_CDC_{CONNECTOR_ID,TENANT_ID,SOURCE_ID,SCHEMA_ID,PRIMARY_KEY,GROUP,SCHEMA_VERSION,PROCESSING_VERSION}.
 // Admin API (off unless ASTRYON_CONNECTOR_ADMIN_ADDR is set, e.g. :8089): auth via ASTRYON_AAS_BASE_URL/_ISSUER/_AUDIENCE/_ENV/_ALLOWED_AZP/_TOKEN_TYPE
-// (AAS, scope astryon:connectors:manage) or dev-only ASTRYON_CONNECTOR_DEV_TOKEN + ASTRYON_CONNECTOR_DEV_TENANT; neither -> all requests 401.
+// (AAS, scope astryon:connectors:write) or dev-only ASTRYON_CONNECTOR_DEV_TOKEN + ASTRYON_CONNECTOR_DEV_TENANT; neither -> all requests 401.
 package main
 
 import (

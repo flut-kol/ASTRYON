@@ -16,7 +16,7 @@ Query parameters:
   cannot mistake the value for the original bytes.
 
 `astryon:quarantine:read` is required for metadata.
-`astryon:quarantine:read-payload` is additionally required before the storage
+`astryon:quarantine-payload:read` is additionally required before the storage
 query can select `sample_payload`. The tenant always comes from the validated
 AAS claim; a query parameter or header cannot override it. Cursors are bound to
 a hash of that tenant and cannot be reused across tenants.
@@ -34,7 +34,7 @@ claim ClickHouse readiness; browser backend failures remain fail-closed as 503.
 
 `POST /v1/quarantine/replays/dry-run` builds a read-only replay plan. It does
 not enqueue, publish, or execute a replay. The caller needs
-`astryon:quarantine:replay`; the tenant is taken only from the validated AAS
+`astryon:quarantine-replay:read`; the tenant is taken only from the validated AAS
 claim and is not part of the request body. The endpoint requires
 `Content-Type: application/json`, rejects unknown fields, and accepts:
 
@@ -60,7 +60,7 @@ ClickHouse read: it does not publish a job or write an audit event.
 ### Replay publication
 
 `POST /v1/quarantine/replays` accepts the same selection body but requires the
-separate `astryon:quarantine:replay-publish` scope. The handler repeats the
+separate `astryon:quarantine-replay:write` scope. The handler repeats the
 tenant-bound plan and publishes only when the exact count is at most 10,000;
 an over-limit plan returns `422 REPLAY_SCOPE_TOO_LARGE` with no audit or job
 side effect. A `tenant_id` in the body is an unknown field and is rejected.

@@ -14,12 +14,12 @@ object-level/tenant authorization: `tenant_id` береться лише з clai
 | `astryon:query:read` | query-api | query/aggregate/summary |
 | `astryon:uploads:write` | file-ingestion | upload planning, complete, list, get |
 | `astryon:export:write` / `astryon:export:read` | export-worker | create / inspect export |
-| `astryon:connectors:manage` | connector-manager | list/get/create/pause/resume |
+| `astryon:connectors:write` | connector-manager | list/get/create/pause/resume |
 | `astryon:replay:write` / `astryon:replay:read` | replay-controller | create, activate / list, get |
 | `astryon:quarantine:read` | quarantine | metadata browser |
-| `astryon:quarantine:read-payload` | quarantine | masked original sample (grant separately) |
-| `astryon:quarantine:replay` | quarantine | replay dry-run |
-| `astryon:quarantine:replay-publish` | quarantine | publish replay jobs (grant separately) |
+| `astryon:quarantine-payload:read` | quarantine | masked original sample (grant separately) |
+| `astryon:quarantine-replay:read` | quarantine | replay dry-run |
+| `astryon:quarantine-replay:write` | quarantine | publish replay jobs (grant separately) |
 | `astryon:data:read`, `astryon:secrets:read`, `astryon:pii:read` | file-ingestion profiles | required read scope per data class, not an endpoint scope |
 
 Розбіжність із початковою моделлю в `authentication.md` (`replays:write`, `exports:*`, `jobs:*`, `sources:*`,
@@ -37,13 +37,13 @@ object-level/tenant authorization: `tenant_id` береться лише з clai
 | uploads:write | x | x | x | | | x |
 | export:read | x | x | x | x | x | |
 | export:write | x | x | | x | | |
-| connectors:manage | x | x | x | | | |
+| connectors:write | x | x | x | | | |
 | replay:read | x | x | x | | x | |
 | replay:write | x | x | x | | | |
 | quarantine:read | x | x | x | | x | |
-| quarantine:read-payload | x | x | | | | |
-| quarantine:replay | x | x | x | | | |
-| quarantine:replay-publish | x | x | | | | |
+| quarantine-payload:read | x | x | | | | |
+| quarantine-replay:read | x | x | x | | | |
+| quarantine-replay:write | x | x | | | | |
 
 Принципи: мінімально необхідні права (gate спринту 11: повний цикл оператором без admin); `read-payload` і
 `replay-publish` не входять у `operator` і `auditor`, бо payload може містити неприхований ввід, а publish має

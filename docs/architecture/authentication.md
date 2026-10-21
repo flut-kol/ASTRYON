@@ -65,7 +65,7 @@ audiences, redirect URI, scopes, `tenant_id`, token exchange та revocation д�
 | `astryon:pipelines:read`, `astryon:pipelines:write` | read/change pipelines |
 | `astryon:jobs:read`, `astryon:jobs:write` | inspect/cancel jobs |
 | `astryon:quarantine:read` | inspect tenant-scoped quarantine metadata |
-| `astryon:quarantine:read-payload` | inspect the original quarantined payload; grant separately because it may contain rejected/unmasked input |
+| `astryon:quarantine-payload:read` | inspect the original quarantined payload; grant separately because it may contain rejected/unmasked input |
 | `astryon:replays:write` | create replay requests |
 | `astryon:exports:read`, `astryon:exports:write` | inspect/create exports |
 | `astryon:metrics:read` | business metrics API |

@@ -9,7 +9,7 @@ Never put event payloads, tokens or secret values in tickets: use replay ids, ve
   (`source_active_versions`), so a failed or abandoned replay is invisible until activated.
 - Tenant comes only from the token. Operators act within one tenant; do not work around RLS or use a role with BYPASSRLS.
 - Scope: `astryon:replay:write` (create, activate, rollback), `astryon:replay:read` (list/get). Quarantine replays
-  additionally need `astryon:quarantine:replay` (dry-run) and `astryon:quarantine:replay-publish` (publish).
+  additionally need `astryon:quarantine-replay:read` (dry-run) and `astryon:quarantine-replay:write` (publish).
 - Always dry-run first: `POST /v1/replays` with `dry_run: true` returns the estimated events and day ranges and has no
   side effects. Range <= 31 days, source required.
 

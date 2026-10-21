@@ -16,7 +16,7 @@ import (
 
 const (
 	ScopeQuarantineRead        = "astryon:quarantine:read"
-	ScopeQuarantineReadPayload = "astryon:quarantine:read-payload"
+	ScopeQuarantineReadPayload = "astryon:quarantine-payload:read"
 	defaultPageSize            = 50
 	maxPageSize                = 100
 )
