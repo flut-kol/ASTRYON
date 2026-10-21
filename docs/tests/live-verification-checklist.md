@@ -1,9 +1,10 @@
 # Live verification checklist (not yet run)
 
 Status (2026-10-21): section 1 and the export-worker parts of sections 3 and 4 were run on throwaway docker containers (results
-below); the replay e2e (section 2) was run with the real controller, worker and sink binaries; the clickhouse-sink quarantine path with a real broker is NOT run. Record results in this file with a date.
+below); the replay e2e (section 2) was run with the real controller, worker and sink binaries; the clickhouse-sink quarantine path was run with a real broker (2026-10-21, see Results). Record results in this file with a date.
 
 ## Results 2026-10-21
+- **clickhouse-sink quarantine path, real Kafka 3.9 (plaintext, 1 partition; `TestIT_QuarantineRealBroker`, `CHSINK_KAFKA_IT_BROKER=127.0.0.1:19092`):** 10 messages with 3 poison (invalid JSON, unknown schema, empty) -> 7 rows reach the sink, 3 records on the quarantine topic with the right `source_offset`, offset 9 committed, a restarted consumer of the same group receives nothing. Passed. Not covered: TLS/SASL quarantine produce, multi-partition, broker outage during produce (covered by unit tests with a dead/silent broker).
 - **Replay e2e, real binaries (replay-controller + replay-worker + clickhouse-sink; PostgreSQL 16 with 0001-0014, ClickHouse 24.8, Kafka 3.9 KRaft, single node, plaintext):**
   500 unique / 520 physical v1 events -> `POST /v1/replays` -> v2 has exactly 500 rows, v1 unchanged, request COMPLETED. Same job redelivered -> skipped, still 500.
   A payload that is not JSON makes the worker fail the job permanently (FAILED) as designed. 30 000 events: v2 = 30 000 unique.
@@ -43,7 +44,7 @@ Currently `services/replay-controller/internal/replay/e2e_test.go` and `services
 4. Cancel mid-run; expect the worker to stop and the version to stay burned.
 
 ## 3. Quarantine and export-worker fixes
-1. clickhouse-sink quarantine path (`kafka_quarantine_test.go`): publish poison messages to a real broker, expect them in the quarantine topic and the partition to keep advancing.
+1. DONE 2026-10-21 (`kafka_quarantine_it_test.go`): clickhouse-sink quarantine path: publish poison messages to a real broker, expect them in the quarantine topic and the partition to keep advancing.
 2. export-worker against real ClickHouse and S3: run a large export, expect an object with the full row count.
 3. PostgreSQL failover during an export: stop the primary while a job finishes; expect the terminal write to be retried for up to `EXPORT_FINISH_RETRY` (2m) and the job to end in a correct state, not stuck RUNNING.
 
