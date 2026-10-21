@@ -22,6 +22,8 @@ Quarantine records use a deterministic UUIDv8 derived from `("flink-processing",
 ```bash
 mvn test
 mvn package -DskipTests
+# without a local Maven:
+docker run --rm -v "$PWD":/w -w /w maven:3.9-eclipse-temurin-17 mvn -B test
 ```
 
 The shaded job JAR is `target/processing-0.1.0-SNAPSHOT.jar`. Flink runtime libraries remain `provided`; the Kafka connector and Jackson are included. The Flink distribution must have an S3 filesystem plugin installed and configured for the S3-compatible endpoint.
@@ -40,17 +42,34 @@ The shaded job JAR is `target/processing-0.1.0-SNAPSHOT.jar`. Flink runtime libr
 
 Kafka TLS/SASL and S3 credentials belong in the Flink cluster configuration/secret injection, never in the repository.
 
+## Dedup design (DPP-027)
+
+Key: `tenant_id 0x1f source_id 0x1f event_id 0x1f processing_version`, built in `EnvelopeProcessor` from the validated envelope (the same identity as `libs/event-contracts` event identity plus the processing version). The job does `keyBy(dedupKey)` into `BoundedDeduplicateFunction`:
+
+- per key one `Long` of state (`dedup-expires-at`); the first record is emitted, duplicates inside the window are dropped;
+- the window is fixed from first sight: a duplicate does not extend it, so a duplicate storm cannot keep state alive;
+- expiry is an explicit processing-time timer that clears the state; Flink state TTL (`OnCreateAndWrite`, `NeverReturnExpired`) is configured with the same duration as a cleanup fallback;
+- window length is `PROCESSING_DEDUP_WINDOW` (default `24h`, zero or negative refused), so state is bounded by `unique keys per window`, not by history.
+
+Limits: dedup is per processing-time window; a duplicate arriving after the window is emitted again (downstream consumers stay idempotent, ADR-011). Late data and event-time semantics are not handled.
+
 ## Metrics
 
 Custom Flink counters: `records_validated_total`, `records_processed_total` (after dedup) and
-`records_quarantined_total{reason}` (`reason` from a fixed `ERR_*` allow-list, otherwise `OTHER`). With the dev image they are
-scraped via the Prometheus reporter; see `infra/docker/extras/metrics/README.md`.
+`records_quarantined_total{reason}` (`reason` from a fixed `ERR_*` allow-list, otherwise `OTHER`). Dedup operator (`bounded-dedup`):
+`dedup_unique_total`, `dedup_dropped_total` (duplicate count), `dedup_expirations_total`, and gauge `dedup_active_keys` (keys currently tracked by the subtask; approximate: it starts from 0 after a restore from a checkpoint and is clamped at 0, so use checkpoint `state_size` as the authoritative figure). No tenant, source or event identifiers are used as labels. With the dev image they are scraped via the Prometheus reporter; see `infra/docker/extras/metrics/README.md`.
 
 ## State-growth measurement
 
-The `bounded-dedup` operator exports `dedup_unique_total`, `dedup_dropped_total`, and `dedup_expirations_total`. For a real DPP-027 measurement, feed successive unique-key plateaus (for example 100k, 1m, 10m), wait for a completed checkpoint at each plateau, and record the checkpoint `state_size` from Flink's `/jobs/:jobid/checkpoints` response together with the three counters. Then wait one full dedup window and confirm both expirations and checkpoint-size contraction. State TTL is a cleanup fallback; explicit processing-time timers define the fixed window and duplicates do not extend it.
+Goal: show that state follows unique keys per window and shrinks after the window, not total history.
 
-No state-size number is claimed yet: this checkout has no Flink cluster, so build and unit verification do not constitute runtime state-growth evidence.
+1. Start the job with a short window to make the experiment fast, for example `PROCESSING_DEDUP_WINDOW=10m` and `PROCESSING_CHECKPOINT_INTERVAL=10s` (dev mini-cluster: `docker compose -f infra/docker/docker-compose.extras.yml --profile processing up -d --build processing`; rebuild is required for a jar that contains `dedup_active_keys`).
+2. Feed successive plateaus of unique keys, for example 100k, 1M, 10M events (`tests/load` `loadgen` with `dup=0`, distinct event ids). At each plateau wait for a completed checkpoint, then record: checkpoint `state_size` from `GET /jobs/<jobid>/checkpoints` (Flink UI port 18481 in dev), the metrics `dedup_unique_total`, `dedup_dropped_total`, `dedup_expirations_total`, `dedup_active_keys`, and the RocksDB size on the TaskManager volume.
+3. Duplicate storm: resend the last plateau unchanged. Expect `dedup_dropped_total` to rise by the plateau size, `dedup_unique_total` and `state_size` to stay flat, and the expiry time not to move.
+4. Wait one full window with no input. Expect `dedup_expirations_total` to approach `dedup_unique_total`, `dedup_active_keys` to fall to about 0 and the checkpoint `state_size` to contract (RocksDB reclaims space after compaction, so allow a few checkpoints).
+5. Derive bytes per key (`state_size` delta / plateau delta) and extrapolate: `bytes_per_key * unique_keys_per_window` is the steady-state bound for the configured window.
+
+Unit tests (`BoundedDeduplicateFunctionTest`, Flink keyed-operator test harness) verify the semantics only: duplicate dropped, window not extended by duplicates, timer clears state, new processing version is not a duplicate, snapshot/restore keeps the window, non-positive window refused. No state-size number is claimed: no plateau run has been made, so there is no runtime state-growth evidence yet.
 
 ## Deliberate first-tranche limits
 
