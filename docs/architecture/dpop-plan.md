@@ -3,6 +3,7 @@
 Status 2026-10-21: `auth/dpop.go` implements items 1-5 (scheme handling, downgrade protection, proof validation, `ReplayStore` + `MemoryReplayStore`,
 `Principal.Confirmation`, `Config.RequireDPoP/PublicBaseURL/ReplayStore`); unit tests in `auth/dpop_test.go`. Done too: `RedisReplayStore` (standalone redis[s]://, CA file, fail closed; no Cluster/Sentinel).
 Also done: `Config.OnDPoPReject(reason)` hook (services attach counters) and `WWW-Authenticate: DPoP algs="ES256"` challenge; query-api wired (`AAS_PUBLIC_BASE_URL`, `AAS_REDIS_URL`, `AAS_REQUIRE_DPOP`).
+Live-proven on real Redis 7 (2026-10-21, `AUTH_IT_REDIS_URL`): replay seen across two store instances, key expires after TTL.
 Still open: counters in services using the hook, wiring in gateway/quarantine, live test with a DPoP-bound AAS client. The text below is the original plan.
 
 Status 2026-10-20: investigation only. `Verifier` rejects `typ=DPoP` tokens and `Authorization: DPoP ...` by design (fail closed).
