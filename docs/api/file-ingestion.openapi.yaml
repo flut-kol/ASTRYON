@@ -13,6 +13,44 @@ security:
   - bearer: []
 paths:
   /v1/files/uploads:
+    get:
+      operationId: listUploads
+      summary: List the tenant's uploads (newest first, keyset pagination)
+      description: |
+        Requires scope `astryon:uploads:write`. The tenant comes only from the token (plus row-level security). Results are ordered
+        by `created_at DESC, id DESC`; pass `next_cursor` back as `cursor` for the next page (opaque, stable under inserts).
+        Unknown or repeated single-value query parameters, and bad values, return 400 `BODY_INVALID`. Items carry labels
+        (names and counts) only, never matched values. Files without a job yet have no `job`.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: source_type, in: query, schema: { type: string } }
+        - { name: sensitivity, in: query, schema: { type: string, enum: [public, internal, restricted] } }
+        - name: status
+          in: query
+          description: Status of the latest job; `QUARANTINED` lists files held back by the credentials policy.
+          schema: { type: string, enum: [NEW, QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED, QUARANTINED] }
+        - { name: label, in: query, description: Latest job carries this content label., schema: { type: string, enum: [contains_geo, contains_credentials, contains_pii] } }
+        - name: tag
+          in: query
+          description: '`key` or `key:value`; repeatable up to 5 times, all must match (AND). The value may itself contain `:`.'
+          schema: { type: array, maxItems: 5, items: { type: string } }
+          style: form
+          explode: true
+        - { name: created_from, in: query, description: Inclusive RFC 3339 lower bound., schema: { type: string, format: date-time } }
+        - { name: created_to, in: query, description: Exclusive RFC 3339 upper bound., schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/UploadListItem' } }
+                  next_cursor: { type: string, description: Absent on the last page. }
+        default: { $ref: '#/components/responses/Error' }
     post:
       operationId: createUpload
       summary: Create a multipart upload session
@@ -152,6 +190,26 @@ components:
         properties:
           count: { type: integer, minimum: 1 }
           fields: { type: array, maxItems: 20, items: { type: string, maxLength: 64 } }
+    UploadListItem:
+      type: object
+      required: [file_object_id, source_id, source_type, committed, size_bytes, sensitivity, tags, created_at]
+      properties:
+        file_object_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        source_type: { type: string }
+        committed: { type: boolean }
+        size_bytes: { type: integer }
+        sensitivity: { type: string, enum: [public, internal, restricted] }
+        tags: { type: object, additionalProperties: { type: string } }
+        created_at: { type: string, format: date-time }
+        job:
+          type: object
+          required: [id, status, labels]
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string }
+            error: { type: string }
+            labels: { $ref: '#/components/schemas/Labels' }
     UploadInfo:
       type: object
       required: [file_object_id, source_id, source_type, committed, size_bytes, sensitivity, tags, profile]

@@ -119,8 +119,12 @@ Migration `0012_file_tags_classification` (forward-only, rollback note inside): 
 Same tenant RLS as the sibling tables; the tenant comes only from the Principal.
 
 **Upload creation** accepts `source_type`, `tags` (max 16, key `^[a-z][a-z0-9_.-]{0,31}$`, value <= 64 chars of `[A-Za-z0-9_.:/@+ -]`) and `sensitivity`
-(public|internal|restricted). `GET /v1/files/uploads/{id}` returns them with the latest job (`status`, `error` code, `labels`). There is no list endpoint yet, so
-there is no tag filter; the `tags` GIN and `(tenant_id, sensitivity)` indexes are ready for one.
+(public|internal|restricted). `GET /v1/files/uploads/{id}` returns them with the latest job (`status`, `error` code, `labels`). 
+
+**List** `GET /v1/files/uploads` (`internal/listing`): tenant from the Principal plus RLS, keyset cursor on `(created_at, id)` DESC (`limit` default 50, max 200,
+`next_cursor` opaque), filters `source_type`, `sensitivity`, `status` (latest job, incl. `QUARANTINED`), `label` (`contains_geo|contains_credentials|contains_pii`),
+`tag=key` or `tag=key:value` (repeatable, max 5, AND), `created_from`/`created_to`. Tag equality uses `tags @>` (served by the existing `tags` GIN, so no new
+migration); results carry label names/counts only. Bad parameters are 400 `BODY_INVALID`. Live test: `FILELIST_LIVE=1 go test ./internal/listing` (docker, postgres:16).
 
 **Profiles** (`internal/profile`): a static table in code, no user rules. Source types: telemetry, geo, report, export, config, log, credentials_bundle,
 personal_data, financial, media_meta, reference, unknown (default for unknown/omitted: all detectors, strictest detection). Enforced now: content type + extension,

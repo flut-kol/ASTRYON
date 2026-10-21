@@ -18,6 +18,7 @@ import (
 
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
+	"github.com/astryon/file-ingestion/internal/listing"
 	"github.com/astryon/file-ingestion/internal/objects"
 	"github.com/astryon/file-ingestion/internal/profile"
 	"github.com/astryon/file-ingestion/internal/quota"
@@ -61,6 +62,10 @@ type Server struct {
 	Insights interface {
 		Describe(ctx context.Context, tenant, fileObject string) (jobs.Summary, error)
 	}
+	// Lister serves GET /v1/files/uploads (nil = 503); *listing.PGStore satisfies it.
+	Lister interface {
+		List(ctx context.Context, tenant string, f listing.Filter) (listing.Page, error)
+	}
 	// Quota enforces per-tenant upload quotas (nil = unlimited). Store errors fail closed with 503.
 	Quota interface {
 		Check(ctx context.Context, tenant string, size int64) error
@@ -77,6 +82,7 @@ var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/files/uploads", s.count("create", s.create))
+	mux.HandleFunc("GET /v1/files/uploads", s.count("list", s.list))
 	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
 	return mux
