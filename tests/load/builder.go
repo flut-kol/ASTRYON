@@ -28,6 +28,13 @@ type Options struct {
 	Sources      int     // number of distinct source_ids per tenant
 	TenantSkew   float64 // Zipf exponent over tenants (0 = uniform)
 	DupWindow    int     // how many recent valid events may be re-sent
+
+	Shape         string        // payload shape: "" or "small" (flat), "wide" (many fields, nested)
+	WideFields    int           // field count for the wide shape (default 120)
+	LateRatio     float64       // fraction of valid events with event_time in the past
+	LateMax       time.Duration // late events are up to this old (default 24h)
+	HotKeyRatio   float64       // fraction of events sharing one entity_key (hot key)
+	SchemaInvalid bool          // invalid events are schema-level only (bad schema_id/version), not decode errors
 }
 
 // Builder creates event batches. It is NOT safe for concurrent use: one per worker.
@@ -156,17 +163,30 @@ func (b *Builder) Envelope(t Tenant) ec.Envelope {
 	b.seq++
 	now := b.now().UTC()
 	et := now
+	if b.opt.LateRatio > 0 && b.rng.Float64() < b.opt.LateRatio {
+		max := b.opt.LateMax
+		if max <= 0 {
+			max = 24 * time.Hour
+		}
+		et = now.Add(-time.Duration(b.rng.Int63n(int64(max))) - time.Minute)
+	}
 	e := ec.Envelope{
 		EventID: newUUID(), TenantID: t.ID, SourceID: b.sourceFor(t),
 		SchemaID: "loadgen.event", SchemaVersion: 1, EventTime: &et, IngestedAt: now,
 		EntityKey: fmt.Sprintf("ent-%d", b.rng.Intn(10000)),
 		TraceID:   fmt.Sprintf("loadgen-%d", b.seq), PayloadFormat: ec.FormatJSON, ProcessingVersion: 1,
 	}
+	if b.opt.HotKeyRatio > 0 && b.rng.Float64() < b.opt.HotKeyRatio {
+		e.EntityKey = "ent-hot"
+	}
 	e.Payload = b.payload()
 	return e
 }
 
 func (b *Builder) payload() json.RawMessage {
+	if b.opt.Shape == "wide" {
+		return b.widePayload()
+	}
 	const overhead = 420 // envelope fields other than payload, roughly
 	pad := b.opt.EventSize - overhead - 40
 	if pad < 0 {
@@ -189,6 +209,18 @@ func (b *Builder) invalidEvent(t Tenant) []byte {
 	raw, _ := json.Marshal(e)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
+	if b.opt.SchemaInvalid {
+		switch b.rng.Intn(3) {
+		case 0:
+			m["schema_version"] = 0
+		case 1:
+			m["schema_id"] = ""
+		default:
+			m["schema_version"] = -1
+		}
+		out, _ := json.Marshal(m)
+		return out
+	}
 	switch b.rng.Intn(5) {
 	case 0:
 		m["event_id"] = "not-a-uuid"
@@ -225,4 +257,39 @@ func newUUID() string {
 func uuidFromSeed(s string, i int) string {
 	h := ec.ChecksumOf([]byte(fmt.Sprintf("%s/%d", s, i)))
 	return fmt.Sprintf("%s-%s-4%s-8%s-%s", h[0:8], h[8:12], h[12:15], h[15:18], h[18:30])
+}
+
+// widePayload builds a payload with many fields and one nested level, sized
+// to approximately EventSize (fields are padded evenly).
+func (b *Builder) widePayload() json.RawMessage {
+	n := b.opt.WideFields
+	if n < 1 {
+		n = 120
+	}
+	const overhead = 420
+	budget := b.opt.EventSize - overhead - 40
+	per := 8
+	if budget > 0 {
+		if p := budget/n - 16; p > per {
+			per = p
+		}
+	}
+	m := make(map[string]any, n+2)
+	m["seq"] = b.seq
+	nested := map[string]any{}
+	for i := 0; i < n; i++ {
+		switch i % 4 {
+		case 0:
+			m[fmt.Sprintf("f%03d", i)] = b.rng.Int63()
+		case 1:
+			m[fmt.Sprintf("f%03d", i)] = randText(b.rng, per)
+		case 2:
+			m[fmt.Sprintf("f%03d", i)] = b.rng.Float64() * 1000
+		default:
+			nested[fmt.Sprintf("n%03d", i)] = randText(b.rng, per/2+1)
+		}
+	}
+	m["nested"] = nested
+	p, _ := json.Marshal(m)
+	return p
 }
