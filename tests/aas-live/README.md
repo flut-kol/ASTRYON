@@ -73,6 +73,10 @@ then set the `AAS_LIVE_*` variables with `AAS_LIVE_CA_FILE=<copy>/certs/ca.crt`.
   Р5 (exp of the exchanged token not capped by the source) is logged as `KNOWN GAP` when it shows.
 - `TestLiveProxy`: `/.well-known/oauth-authorization-server` lists `/oauth2/*`; `/oauth2/jwks` equals the realm JWKS; `client_credentials` through `/oauth2/token`
   gives a token the Verifier accepts; replayed `jti` and `exp-iat>60` and missing `iat` are 401; `resource` other than the gateway is 400; `/oauth2/introspect` reachable.
+- `bff_test.go` `TestLiveAdminBFF`: `services/admin-bff` (private_key_jwt, PKCE) logs a user in against the real AAS (password+TOTP), keeps tokens server side
+  (`/auth/me` shows no token, cookie is not a JWT), refuses unsafe requests without `X-Requested-With`, proxies `/api/query/` to a live query-api with the session's access token
+  (a forged browser `Authorization` and `X-Tenant-ID` are ignored; tenant reaching ClickHouse is the token claim), and logout kills the session. The registered client needs the
+  `tenant_id` mapper, the resource scope (audience) and the exact redirect URI `BFF_PUBLIC_ORIGIN/auth/callback`; a plain user client without them gets 401 from every resource server.
 - Finding: `build/realm-config` of the reference copy is generated for `AAS_ENV=prod` (no `demo-sso`/`e2e.user`); run `AAS_ENV=dev python3 scripts/build_config.py` in the copy and re-run `keycloak-config`.
 
 ## Not proven

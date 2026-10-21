@@ -26,6 +26,11 @@ func startService(t *testing.T, l *live, name, allowedAZP string, extra ...strin
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr = ln.Addr().String()
 	ln.Close()
+	for _, e := range extra { // a caller that must know the address up front passes it itself
+		if a, ok := strings.CutPrefix(e, "BFF_ADDR="); ok {
+			addr = a
+		}
+	}
 	cmd := exec.Command(bin)
 	cmd.Env = append(os.Environ(), "AAS_BASE_URL="+l.base, "AAS_AUDIENCE="+l.audience, "AAS_ENV="+l.env, "AAS_ALLOWED_AZP="+allowedAZP)
 	cmd.Env = append(cmd.Env, extra...)

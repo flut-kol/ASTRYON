@@ -86,14 +86,25 @@ func needUser(t *testing.T) userEnv {
 	return u
 }
 
-// userCode drives the browser flow without a browser: login form, then OTP form, ends at the redirect with ?code=.
+// userCode drives the browser flow without a browser for a fresh PKCE request.
 func (l *live) userCode(t *testing.T, u userEnv, clientID, redirect, scope, challenge string) string {
+	t.Helper()
+	q := url.Values{"client_id": {clientID}, "redirect_uri": {redirect}, "response_type": {"code"}, "scope": {scope},
+		"state": {"st"}, "nonce": {suffix()}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}}
+	loc := l.userLogin(t, u, l.base+"/protocol/openid-connect/auth?"+q.Encode(), redirect)
+	pu, _ := url.Parse(loc)
+	if pu.Query().Get("state") != "st" || pu.Query().Get("code") == "" {
+		t.Fatalf("bad redirect %s", loc)
+	}
+	return pu.Query().Get("code")
+}
+
+// userLogin opens authURL, submits the login form, then the OTP form, and returns the redirect Location (to redirect...).
+func (l *live) userLogin(t *testing.T, u userEnv, authURL, redirect string) string {
 	t.Helper()
 	jar, _ := cookiejar.New(nil)
 	c := &http.Client{Transport: l.http.Transport, Jar: jar, Timeout: 20 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	q := url.Values{"client_id": {clientID}, "redirect_uri": {redirect}, "response_type": {"code"}, "scope": {scope},
-		"state": {"st"}, "nonce": {suffix()}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}}
 	get := func(u string) (int, string, string) {
 		resp, err := c.Get(u)
 		if err != nil {
@@ -128,7 +139,7 @@ func (l *live) userCode(t *testing.T, u userEnv, clientID, redirect, scope, chal
 		}
 		return resp.StatusCode, sb.String(), resp.Header.Get("Location")
 	}
-	code, page, loc0 := get(l.base + "/protocol/openid-connect/auth?" + q.Encode())
+	code, page, loc0 := get(authURL)
 	if code != 200 {
 		t.Fatalf("authorize: %d %q %.300s", code, loc0, page)
 	}
@@ -147,11 +158,7 @@ func (l *live) userCode(t *testing.T, u userEnv, clientID, redirect, scope, chal
 	if code != 302 || !strings.HasPrefix(loc, redirect) {
 		t.Fatalf("expected redirect to %s: %d %q %.300s", redirect, code, loc, page)
 	}
-	pu, _ := url.Parse(loc)
-	if pu.Query().Get("state") != "st" || pu.Query().Get("code") == "" {
-		t.Fatalf("bad redirect %s", loc)
-	}
-	return pu.Query().Get("code")
+	return loc
 }
 
 func pkce() (verifier, challenge string) {
@@ -224,10 +231,9 @@ const exchangeGrant = "urn:ietf:params:oauth:grant-type:token-exchange"
 
 // newPortalClient is a throw-away confidential client for the authorization code flow (PKCE S256,
 // private_key_jwt) with standard token exchange switched on or off, like astranex-portal.
-func (l *live) newPortalClient(exchange bool) (*client, string) {
+func (l *live) newPortalClient(exchange, keepTenant bool, redirect string) (*client, string) {
 	l.t.Helper()
 	c := l.newClient(suffix(), tenantA, 0)
-	redirect := "http://localhost:9199/cb"
 	cur := map[string]any{}
 	code, b, _ := l.adminJSON("GET", "/clients/"+c.uuid, nil)
 	if code != 200 {
@@ -245,7 +251,7 @@ func (l *live) newPortalClient(exchange bool) (*client, string) {
 	// a user client carries no machine tenant: drop the hard-coded tenant_id mapper newClient adds
 	if ms, ok := cur["protocolMappers"].([]any); ok {
 		for _, m := range ms {
-			if mm := m.(map[string]any); mm["name"] == "tenant" {
+			if mm := m.(map[string]any); mm["name"] == "tenant" && !keepTenant {
 				l.mustAdmin("DELETE", "/clients/"+c.uuid+"/protocol-mappers/models/"+mm["id"].(string), nil, 204)
 			}
 		}
@@ -255,7 +261,7 @@ func (l *live) newPortalClient(exchange bool) (*client, string) {
 	var scopes []struct{ ID, Name string }
 	_ = json.Unmarshal(b, &scopes)
 	for _, sc := range scopes {
-		if sc.Name == scopeWrite || sc.Name == "basic" {
+		if sc.Name == scopeWrite || sc.Name == scopeQuery || sc.Name == "basic" {
 			l.mustAdmin("PUT", "/clients/"+c.uuid+"/default-client-scopes/"+sc.ID, nil, 204)
 		}
 	}
@@ -280,8 +286,8 @@ func TestLiveTokenExchange(t *testing.T) {
 	u := needUser(t)
 	l := newLive(t)
 	const target = "https://api.astryon.sv4.one" // resource server client defined in the realm (astryon.yaml)
-	on, redirect := l.newPortalClient(true)
-	off, redirect2 := l.newPortalClient(false)
+	on, redirect := l.newPortalClient(true, false, "http://localhost:9199/cb")
+	off, redirect2 := l.newPortalClient(false, false, "http://localhost:9199/cb")
 	tokOn := l.codeToken(t, on, redirect, u)
 	tokOff := l.codeToken(t, off, redirect2, u)
 	src := tokOn["access_token"].(string)
