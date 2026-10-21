@@ -20,7 +20,11 @@ func main() {
 	}
 	var auth gateway.Authenticator = gateway.AASJWTAuthenticator{} // rejects everything unless AAS_BASE_URL or dev auth is set
 	if os.Getenv("AAS_BASE_URL") != "" {
-		v, err := goauth.NewVerifier(context.Background(), aasConfig(os.Getenv))
+		acfg, err := dpopConfig(aasConfig(os.Getenv), os.Getenv)
+		if err != nil {
+			log.Fatalf("aas dpop: %v", err)
+		}
+		v, err := goauth.NewVerifier(context.Background(), acfg)
 		if err != nil {
 			log.Fatalf("aas: %v", err)
 		}
