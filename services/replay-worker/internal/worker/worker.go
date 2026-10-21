@@ -24,6 +24,11 @@ const (
 // (missing, CANCELLED, or already COMPLETED). A job without a durable request is not executed.
 var ErrNotRunnable = errors.New("replay request not found or not runnable")
 
+// ErrRunningRecently (an ErrNotRunnable): the request is RUNNING and was updated within the running lease, i.e. a live
+// worker owns it or a crashed one has not yet timed out. The job must NOT be committed as skipped: after a hard crash
+// the redelivered job is the only thing that can finish the replay once the lease expires.
+var ErrRunningRecently = fmt.Errorf("%w: RUNNING within its lease", ErrNotRunnable)
+
 // Delivery is one consumed job message.
 type Delivery struct {
 	Topic     string
@@ -170,6 +175,10 @@ func (w *Worker) handle(ctx context.Context, d Delivery) error {
 	}
 	if w.Status != nil {
 		if err := w.Status.SetStatus(ctx, job.TenantID, job.SourceID, job.ProcessingVersion, StatusRunning); err != nil {
+			if errors.Is(err, ErrRunningRecently) {
+				w.logf("job %s v%d not started: %v (offset not committed; redelivered after a restart once the lease expires)", job.JobID, job.ProcessingVersion, err)
+				return err
+			}
 			if errors.Is(err, ErrNotRunnable) {
 				w.logf("skip job %s v%d: %v", job.JobID, job.ProcessingVersion, err)
 				return nil

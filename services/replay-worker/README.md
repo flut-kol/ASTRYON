@@ -35,7 +35,7 @@ migration 0001) then `UPDATE replay_requests ... WHERE tenant_id AND source_id A
 ## Env
 `ASTRYON_KAFKA_BROKERS` (+ `_TLS`, `_TLS_CA_FILE`, mTLS `_TLS_CERT_FILE`/`_TLS_KEY_FILE` (both or neither, needs TLS; re-read when mtime/size change, with the CA file, every `_TLS_RELOAD_INTERVAL`, default 1m, 0 = off; a broken new file keeps the last good one, logged at most once a minute; used for new broker connections), `_SASL_MECHANISM/_USERNAME/_PASSWORD`, `_CLIENT_ID`, `_DELIVERY_TIMEOUT`), `REPLAYW_CH_URL` (required),
 `REPLAYW_CH_DATABASE` (astryon), `REPLAYW_CH_USER`, `REPLAYW_CH_PASSWORD`, `REPLAYW_CH_TABLE`, `REPLAYW_PG_URL` (unset = no status tracking, warning),
-`REPLAYW_GROUP_ID`, `REPLAYW_JOBS_TOPIC`, `REPLAYW_OUT_TOPIC`, `REPLAYW_PAGE_SIZE`.
+`REPLAYW_RUNNING_LEASE` (Go duration, default `1h`; must exceed the longest job: a RUNNING row untouched for that long is re-claimed after a crash; until then the redelivered job is NOT committed and the process exits, see `ErrRunningRecently`), `REPLAYW_GROUP_ID`, `REPLAYW_JOBS_TOPIC`, `REPLAYW_OUT_TOPIC`, `REPLAYW_PAGE_SIZE`.
 
 ## Verified
 - Unit (fakes for Kafka source/sink, ClickHouse, status): copy-forward + dedup + paging, redelivery -> identical records, resume skips present events,

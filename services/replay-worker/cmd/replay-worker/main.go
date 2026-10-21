@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/astryon/replay-worker/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,7 +57,13 @@ func main() {
 			log.Fatalf("REPLAYW_PG_URL: %v", err)
 		}
 		defer pool.Close()
-		w.Status = &worker.PGStatus{DB: worker.PoolDB{Pool: pool}}
+		lease := time.Duration(0) // default 1h; must exceed the longest job, but bounds how long a crashed worker's job stays stuck
+		if v := os.Getenv("REPLAYW_RUNNING_LEASE"); v != "" {
+			if lease, err = time.ParseDuration(v); err != nil || lease <= 0 {
+				log.Fatalf("REPLAYW_RUNNING_LEASE %q: want a positive duration like 15m", v)
+			}
+		}
+		w.Status = &worker.PGStatus{DB: worker.PoolDB{Pool: pool}, RunningLease: lease}
 	} else {
 		log.Print("WARN: REPLAYW_PG_URL unset: replay_requests status is NOT updated")
 	}

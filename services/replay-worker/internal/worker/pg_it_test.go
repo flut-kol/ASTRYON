@@ -272,6 +272,10 @@ func TestPGLiveRaceSingleWinner(t *testing.T) {
 	if wins.Load() != 1 || refused.Load() != n-1 {
 		t.Fatalf("wins=%d refused=%d, want exactly one winner", wins.Load(), refused.Load())
 	}
+	// The losers met a fresh RUNNING row: that is ErrRunningRecently (offset must not be committed), not a plain skip.
+	if err := e.st.SetStatus(ctx, e.tA, e.srcA, v, StatusRunning); !errors.Is(err, ErrRunningRecently) {
+		t.Fatalf("fresh RUNNING row: got %v, want ErrRunningRecently", err)
+	}
 
 	// A crashed worker's RUNNING row is re-claimable only after the lease.
 	lease := &PGStatus{DB: PoolDB{e.pool}, RunningLease: time.Hour}

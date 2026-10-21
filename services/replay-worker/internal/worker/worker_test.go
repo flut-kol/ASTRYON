@@ -351,6 +351,23 @@ func TestNotRunnableRequestIsSkipped(t *testing.T) {
 	}
 }
 
+// Found live: after a kill -9 mid-run the redelivered job met its own fresh RUNNING row, was skipped and committed, and the
+// replay stayed RUNNING with a partial version forever. A recent RUNNING row must leave the offset uncommitted.
+func TestRunningRecentlyIsNotCommitted(t *testing.T) {
+	ch := &fakeCH{rows: map[string][]SourceEvent{}}
+	ch.rows[ch.key(tenantA, 1)] = mkRows(tenantA, 3)
+	src := &fakeSource{msgs: [][]byte{jobJSON(t, nil)}}
+	sink := &fakeSink{}
+	st := &fakeStatus{err: map[string]error{StatusRunning: ErrRunningRecently}}
+	w := newWorker(src, ch, sink, st)
+	if _, err := w.Step(context.Background()); !errors.Is(err, ErrRunningRecently) {
+		t.Fatalf("want ErrRunningRecently, got %v", err)
+	}
+	if len(sink.recs) != 0 || len(src.committed) != 0 {
+		t.Fatalf("must neither execute nor commit: recs=%d committed=%v", len(sink.recs), src.committed)
+	}
+}
+
 func TestTenantComesOnlyFromJob(t *testing.T) {
 	ch := &fakeCH{rows: map[string][]SourceEvent{}}
 	ch.rows[ch.key(tenantA, 1)] = mkRows(tenantA, 3)

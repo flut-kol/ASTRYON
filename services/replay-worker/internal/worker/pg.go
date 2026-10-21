@@ -51,6 +51,8 @@ const (
 WHERE tenant_id = $1::uuid AND source_id = $2::uuid AND target_processing_version = $3 AND deleted_at IS NULL
   AND (status IN ('REQUESTED','APPROVED','FAILED')
        OR (status = 'RUNNING' AND updated_at < now() - make_interval(secs => $4::double precision)))`
+	sqlIsRunning = `SELECT 1 FROM replay_requests
+WHERE tenant_id = $1::uuid AND source_id = $2::uuid AND target_processing_version = $3 AND deleted_at IS NULL AND status = 'RUNNING'`
 	sqlTerminal = `UPDATE replay_requests SET status = $4::replay_status, completed_at = now()
 WHERE tenant_id = $1::uuid AND source_id = $2::uuid AND target_processing_version = $3 AND deleted_at IS NULL
   AND status = 'RUNNING'`
@@ -99,6 +101,16 @@ func (p *PGStatus) SetStatus(ctx context.Context, tenantID, sourceID string, ver
 		return err
 	}
 	if n == 0 {
+		if status == StatusRunning {
+			// A SELECT through Exec reports the number of rows it returned.
+			rows, err := tx.Exec(ctx, sqlIsRunning, tenantID, sourceID, int32(version))
+			if err != nil {
+				return err
+			}
+			if rows > 0 {
+				return ErrRunningRecently
+			}
+		}
 		return ErrNotRunnable
 	}
 	return tx.Commit(ctx)

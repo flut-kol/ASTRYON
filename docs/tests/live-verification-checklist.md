@@ -1,9 +1,18 @@
 # Live verification checklist (not yet run)
 
 Status (2026-10-21): section 1 and the export-worker parts of sections 3 and 4 were run on throwaway docker containers (results
-below); the replay e2e (section 2) and the clickhouse-sink quarantine path with a real broker are NOT run. Record results in this file with a date.
+below); the replay e2e (section 2) was run with the real controller, worker and sink binaries; the clickhouse-sink quarantine path with a real broker is NOT run. Record results in this file with a date.
 
 ## Results 2026-10-21
+- **Replay e2e, real binaries (replay-controller + replay-worker + clickhouse-sink; PostgreSQL 16 with 0001-0014, ClickHouse 24.8, Kafka 3.9 KRaft, single node, plaintext):**
+  500 unique / 520 physical v1 events -> `POST /v1/replays` -> v2 has exactly 500 rows, v1 unchanged, request COMPLETED. Same job redelivered -> skipped, still 500.
+  A payload that is not JSON makes the worker fail the job permanently (FAILED) as designed. 30 000 events: v2 = 30 000 unique.
+  **Found:** `kill -9` of the worker mid-run (300 000 events, killed at ~21 000 rows) and a restart left the replay RUNNING forever with a partial v2: the
+  redelivered job met its own fresh RUNNING row, was treated as "not runnable" and its offset was committed. Fixed (`ErrRunningRecently`: not committed,
+  the process exits and the job is redelivered; `REPLAYW_RUNNING_LEASE` makes the 1 h default configurable). After the fix, with a 20 s lease: kill at
+  20 800 rows, restart, the resumed run published the remaining 279 000 events, request COMPLETED, v2 = 300 000 rows = 300 000 unique ids.
+  Operational note: the restarted worker waits for the dead consumer's group session (about 45 s) plus the lease before it makes progress.
+  Not covered: activation (`/activate`) and aggregates on this stack, multi-broker, TLS/SASL, more than one worker.
 - **0014 on PostgreSQL 16 (migrations 0001-0013 applied first):** the pre-check found a duplicate (a live row plus a soft-deleted FAILED row with the
   same version); applying 0014 failed atomically (`could not create unique index`, `schema_migrations` stayed at 13); after deleting the duplicate it
   applied. With a NOSUPERUSER NOBYPASSRLS role all `TestPGLive*` of replay-controller passed (two allocators, 50 concurrent allocations distinct,
