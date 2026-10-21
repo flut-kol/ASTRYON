@@ -67,6 +67,10 @@ type Client struct {
 	now      func() time.Time
 	wait     func(context.Context, time.Duration) error
 
+	// Authorization, when set, is sent as the Authorization header. A caller resolves it from the connector's
+	// SecretRef at run time; it is never stored in Config.
+	Authorization string
+
 	mu          sync.Mutex
 	nextRequest time.Time
 }
@@ -105,6 +109,9 @@ func (c *Client) Pull(ctx context.Context, cursor string) (Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return Response{}, err
+	}
+	if c.Authorization != "" {
+		req.Header.Set("Authorization", c.Authorization)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
