@@ -77,9 +77,16 @@ Proven end to end with the built binaries on MinIO + PostgreSQL 16 + ClickHouse 
 error row in ClickHouse with correct offsets, job SUCCEEDED with `events_processed=3`, `events_failed=1` and the final checkpoint; three identical inserts of one batch
 left 3 event rows and 1 error row.
 
+## Operations
+
+Both binaries serve Prometheus text on `FILE_METRICS_ADDR` (off when unset; keep it loopback or cluster-internal): `astryon_file_worker_*`
+(jobs claimed/succeeded/failed/retried/fenced, batches, records, invalid records, sink errors) and `astryon_file_api_requests_total{route,code}`.
+Alert rules are in `infra/observability/prometheus-rules.yaml` (group `astryon-file-ingestion`). One `Dockerfile` builds either binary
+(`--build-arg CMD=file-api|file-worker`, context = repository root; both images built OK, 12 MB).
+
 ## Remaining work
 
 - malware/content scanning, object lifecycle rules, rate limits/quotas for uploads;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
-- per-source mapping/config for the sink (event type, time and entity fields), Parquet output, worker metrics and a Dockerfile;
+- per-source mapping/config for the sink (event type, time and entity fields), Parquet output;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.

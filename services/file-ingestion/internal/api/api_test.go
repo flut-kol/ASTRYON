@@ -213,3 +213,16 @@ func TestCompleteIsTenantScopedAndValidatesInput(t *testing.T) {
 		t.Errorf("bad id: %d", w.Code)
 	}
 }
+
+func TestMetricsCountResponsesByRouteAndCode(t *testing.T) {
+	s, _, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	call(s.Handler(), "/v1/files/uploads", okBody)
+	call(s.Handler(), "/v1/files/uploads", `{}`)
+	var b strings.Builder
+	s.WritePrometheus(&b)
+	for _, want := range []string{`{route="create",code="201"} 1`, `{route="create",code="400"} 1`} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("missing %s in\n%s", want, b.String())
+		}
+	}
+}

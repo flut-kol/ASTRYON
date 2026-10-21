@@ -3,12 +3,13 @@
 // Required: FILE_API_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY.
 // Optional: FILE_S3_REGION, LISTEN_ADDR (:8085), FILE_MAX_BYTES (default 5 GiB), FILE_MAX_PARTS (default 1000),
 // FILE_CONTENT_TYPES (comma list, default application/x-ndjson,text/csv).
-// AAS: see aas.go. DEV ONLY: FILE_API_DEV_TOKEN + FILE_API_DEV_TENANT. Without AAS or the dev token every request is rejected.
+// FILE_METRICS_ADDR serves /metrics (off when unset). AAS: see aas.go. DEV ONLY: FILE_API_DEV_TOKEN + FILE_API_DEV_TENANT. Without AAS or the dev token every request is rejected.
 package main
 
 import (
 	"context"
 	"crypto/subtle"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -101,7 +102,23 @@ func main() {
 		Jobs: &jobs.Store{DB: db, WorkerID: "file-api"},
 		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
 			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
+	serveMetrics(s.WritePrometheus)
 	srv := &http.Server{Addr: env("LISTEN_ADDR", ":8085"), Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("file-api listening on %s", srv.Addr)
 	log.Fatal(srv.ListenAndServe())
+}
+
+// serveMetrics exposes /metrics on FILE_METRICS_ADDR (unset = off; bind loopback or a cluster-internal address).
+func serveMetrics(write func(io.Writer)) {
+	addr := os.Getenv("FILE_METRICS_ADDR")
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		write(w)
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { log.Printf("metrics: %v", srv.ListenAndServe()) }()
 }

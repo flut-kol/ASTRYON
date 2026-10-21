@@ -178,3 +178,25 @@ func (slowSource) Open(ctx context.Context, _ jobs.Job, _ int64) (io.ReadCloser,
 	}()
 	return pr, "fp", nil
 }
+
+func TestMetricsCountOutcomes(t *testing.T) {
+	st := &fakeStore{}
+	w := New(Config{Store: st, Source: fakeSource{file, "fp1"}, Sink: &fakeSink{}, BatchSize: 2, Heartbeat: time.Hour})
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	w.M.WritePrometheus(&b)
+	for _, want := range []string{"astryon_file_worker_jobs_claimed_total 1", "astryon_file_worker_jobs_succeeded_total 1",
+		"astryon_file_worker_batches_total 3", "astryon_file_worker_records_total 4", "astryon_file_worker_invalid_records_total 1"} {
+		if !strings.Contains(b.String(), want+"\n") {
+			t.Errorf("missing %q in\n%s", want, b.String())
+		}
+	}
+	st2 := &fakeStore{}
+	w2 := New(Config{Store: st2, Source: fakeSource{file, "fp1"}, Sink: &fakeSink{err: errors.New("down")}, BatchSize: 2, Heartbeat: time.Hour})
+	_, _ = w2.RunOnce(context.Background())
+	if w2.M.SinkErrors.Load() != 1 || w2.M.Failed.Load() != 1 { // fake Fail reports FAILED
+		t.Fatalf("sink=%d failed=%d", w2.M.SinkErrors.Load(), w2.M.Failed.Load())
+	}
+}

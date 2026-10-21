@@ -4,13 +4,15 @@
 // Required: FILE_WORKER_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY, CH_URL,
 // FILE_EVENT_TYPE. Optional: FILE_S3_REGION, CH_DATABASE, CH_USER, CH_PASSWORD, FILE_EVENTS_TABLE, FILE_ERRORS_TABLE,
 // FILE_EVENT_TIME_FIELD, FILE_ENTITY_ID_FIELD, FILE_PROCESSING_VERSION (default 1), FILE_BATCH_SIZE (500),
-// FILE_MAX_RECORD_BYTES (1 MiB), FILE_LEASE_SECONDS (60), FILE_WORKER_ID (default hostname-pid).
+// FILE_MAX_RECORD_BYTES (1 MiB), FILE_LEASE_SECONDS (60), FILE_WORKER_ID (default hostname-pid), FILE_METRICS_ADDR (/metrics, off when unset).
 package main
 
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -74,6 +76,7 @@ func main() {
 	}
 	w := worker.New(worker.Config{Store: store, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
 		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4})
+	serveMetrics(w.M.WritePrometheus)
 	go func() { // recovery of vanished workers and promotion of due retries; safe on every replica
 		t := time.NewTicker(10 * time.Second)
 		defer t.Stop()
@@ -94,4 +97,19 @@ func main() {
 	if err := w.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}
+}
+
+// serveMetrics exposes /metrics on FILE_METRICS_ADDR (unset = off; bind loopback or a cluster-internal address).
+func serveMetrics(write func(io.Writer)) {
+	addr := os.Getenv("FILE_METRICS_ADDR")
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		write(w)
+	})
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { log.Printf("metrics: %v", srv.ListenAndServe()) }()
 }

@@ -7,10 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/objects"
@@ -50,15 +53,55 @@ type Server struct {
 	Multipart Multipart
 	Jobs      Enqueuer
 	Bucket    string
+
+	mu     sync.Mutex
+	counts map[string]int64
 }
 
 var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// Handler routes the endpoints and counts responses by route and status code (see WritePrometheus).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/files/uploads", s.create)
-	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.complete)
+	mux.HandleFunc("POST /v1/files/uploads", s.count("create", s.create))
+	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
 	return mux
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(c int) { w.code = c; w.ResponseWriter.WriteHeader(c) }
+
+func (s *Server) count(route string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, code: 200}
+		h(sw, r)
+		s.mu.Lock()
+		if s.counts == nil {
+			s.counts = map[string]int64{}
+		}
+		s.counts[fmt.Sprintf("%s|%d", route, sw.code)]++
+		s.mu.Unlock()
+	}
+}
+
+// WritePrometheus renders astryon_file_api_requests_total{route,code}.
+func (s *Server) WritePrometheus(w io.Writer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprint(w, "# HELP astryon_file_api_requests_total Upload API responses\n# TYPE astryon_file_api_requests_total counter\n")
+	keys := make([]string, 0, len(s.counts))
+	for k := range s.counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		route, code, _ := strings.Cut(k, "|")
+		fmt.Fprintf(w, "astryon_file_api_requests_total{route=%q,code=%q} %d\n", route, code, s.counts[k])
+	}
 }
 
 func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, bool) {

@@ -109,3 +109,38 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: latest ch-aggregator recompute failed
+  - name: astryon-file-ingestion
+    rules:
+      - alert: AstryonFileJobsFailing
+        expr: sum(increase(astryon_file_worker_jobs_failed_total[30m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: file jobs ended FAILED (permanent error or retries exhausted); inspect jobs.last_error
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonFileSinkErrors
+        expr: sum(rate(astryon_file_worker_sink_errors_total[10m])) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: file-worker cannot write to ClickHouse (jobs are retrying with backoff)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonFileInvalidRecordsHigh
+        expr: sum(rate(astryon_file_worker_invalid_records_total[15m])) / clamp_min(sum(rate(astryon_file_worker_records_total[15m])) + sum(rate(astryon_file_worker_invalid_records_total[15m])), 1) > 0.05
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: more than 5 percent of file records are unparseable (processing_errors, stage file_parse)
+          runbook: docs/operations/runbooks/ingestion-failures.md
+      - alert: AstryonFileLeaseLosses
+        expr: sum(increase(astryon_file_worker_jobs_fenced_total[30m])) > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: file-worker keeps losing leases (slow ClickHouse/S3 or lease shorter than a batch)
+      - alert: AstryonFileApiServerErrors
+        expr: sum(rate(astryon_file_api_requests_total{code=~"5.."}[10m])) / clamp_min(sum(rate(astryon_file_api_requests_total[10m])), 1) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: more than 5 percent of upload API responses are 5xx (storage or database unavailable)
