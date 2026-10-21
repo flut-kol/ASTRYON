@@ -15,9 +15,11 @@ Start an AAS you own (the reference deployment is not part of this repo; never c
 | `AAS_LIVE_AUDIENCE` | default `https://api.aggregator.example` (the `gateway` scope audience) |
 | `AAS_LIVE_ENV` | default `dev` (`env` claim of the realm) |
 | `AAS_LIVE_KEYCLOAK_CONTAINER` | docker container name; enables the stop/start outage test |
+| `AAS_LIVE_USER`, `AAS_LIVE_USER_PASSWORD`, `AAS_LIVE_USER_TOTP_SECRET` | a user with password+TOTP (AAS dev realm: `e2e.user`, `E2E_*` in its `.env`); enables the user-token and token-exchange tests. Needs `AAS_ENV=dev` realm config (`demo-sso`, `e2e.user`) and `scripts/e2e_user.py --post` (clears CONFIGURE_TOTP). Keycloak accepts each TOTP counter once; the last used one is kept in `$TMPDIR/aas-live-totp-last` |
+| `AAS_LIVE_PROXY_URL` | AAS standard-address proxy, e.g. `https://localhost:18444`; enables `TestLiveProxy` |
 
 `cd tests/aas-live && go test -count=1 -v ./...`. Clients authenticate with `private_key_jwt` (ES256)
-using keys generated in the test; no secret is stored in the repo. Everything created is removed in cleanup.
+using keys generated in the test; no secret is stored in the repo. Everything created is removed in cleanup (a scope that the realm already defines, e.g. `astryon:events:write`, is reused and left alone).
 
 ## Proven (Keycloak 26.8.1, dev realm config)
 
@@ -57,15 +59,30 @@ and `KC_FRONTEND_URL=https://localhost:18443`; `docker compose -p chagg-aasi up 
 `docker compose -p chagg-aasi --profile config run --rm keycloak-config` (re-run after changing `KC_FRONTEND_URL`, the realm stores it);
 then set the `AAS_LIVE_*` variables with `AAS_LIVE_CA_FILE=<copy>/certs/ca.crt`. Tear down with `docker compose -p chagg-aasi down -v` and remove the copy.
 
+## Other adapters, user tokens, exchange, proxy (2026-10-21, Keycloak 26.8.1, throw-away copy of the astranex AAS)
+
+- `adapters_test.go`: `services/gateway` (in-memory publisher), `services/export-worker` and `services/replay-controller` (ClickHouse stubbed) built and run with
+  real tokens: 401 without token, 403 without the scope (export: write-only token on GET and read-only on POST are 403), 2xx with it;
+  gateway answers `TENANT_MISMATCH` 403 for a conflicting body `tenant_id`; `X-Tenant-ID` ignored.
+- `user_test.go` `TestLiveUserTokens`: browser flow without a browser (authorization code + PKCE S256, password then TOTP, public client `demo-sso`).
+  ID token `amr=[pwd otp]`; the user access token has no `aud` and no `tenant_id`, so the resource-server Verifier refuses it (fail closed);
+  ID token refused; code single use; wrong `code_verifier` refused.
+- `TestLiveTokenExchange`: standard token exchange of a user token to `https://api.astryon.sv4.one` keeps `sub`, adds the audience, still has no tenant
+  (Verifier refuses it); refused for a client without `standard.token.exchange.enabled`, for an unknown audience, for a token issued to another client,
+  for a garbage token. The audience must come from the client's scopes (the resource scope's audience mapper), otherwise `Requested audience not available`.
+  Р5 (exp of the exchanged token not capped by the source) is logged as `KNOWN GAP` when it shows.
+- `TestLiveProxy`: `/.well-known/oauth-authorization-server` lists `/oauth2/*`; `/oauth2/jwks` equals the realm JWKS; `client_credentials` through `/oauth2/token`
+  gives a token the Verifier accepts; replayed `jti` and `exp-iat>60` and missing `iat` are 401; `resource` other than the gateway is 400; `/oauth2/introspect` reachable.
+- Finding: `build/realm-config` of the reference copy is generated for `AAS_ENV=prod` (no `demo-sso`/`e2e.user`); run `AAS_ENV=dev python3 scripts/build_config.py` in the copy and re-run `keycloak-config`.
+
 ## Not proven
 
-DPoP-bound tokens (`typ=DPoP`, unsupported by the verifier, rejected by design; plan: `docs/architecture/dpop-plan.md`),
-token exchange and `X-AAS-Subject`, the AAS proxy (`/oauth2/*` addresses), production deployment
-behind a reverse proxy path (`/sso`), browser/user tokens, other adapters (gateway, export-worker,
-replay-controller) end to end, RS256 realm keys, ClickHouse itself (stubbed).
+`X-AAS-Subject` (signed subject header), exchange of machine tokens and `act` delegation (Р4), DPoP-bound tokens through the proxy, production deployment
+behind the `/sso` reverse-proxy path (the copy runs at the root path), RS256 realm keys, ClickHouse/PostgreSQL/Kafka/S3 behind the adapters (stubbed or in-memory),
+file-ingestion and quarantine adapters, mTLS clients.
 
 ## DPoP (L2), `dpop_test.go`
 
-`TestLiveDPoP` (written 2026-10-21, **not yet run against a real AAS**): throw-away client with `dpop.bound.access.tokens=true`, token request with a
+`TestLiveDPoP` (written 2026-10-21; passed 2026-10-21 against a throw-away copy of the astranex AAS, Keycloak 26.8.1): throw-away client with `dpop.bound.access.tokens=true`, token request with a
 proof (`htu` = token endpoint), expects `typ=DPoP` + `cnf.jkt`; then `Verifier` with `PublicBaseURL`/`MemoryReplayStore` must accept the token with a matching proof
 and reject replay, other key, wrong htu/htm/ath, Bearer downgrade, missing proof and `RequireDPoP` with Bearer. Same env as above.

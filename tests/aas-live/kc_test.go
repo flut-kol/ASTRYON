@@ -187,6 +187,9 @@ type client struct {
 func (l *live) newScope(name string) {
 	l.t.Helper()
 	code, b, h := l.adminJSON("POST", "/client-scopes", map[string]any{"name": name, "protocol": "openid-connect", "attributes": map[string]string{"include.in.token.scope": "true", "display.on.consent.screen": "false"}})
+	if code == 409 { // realm already defines it (e.g. astryon.yaml in the AAS config): reuse, never delete
+		return
+	}
 	if code != 201 {
 		l.t.Fatalf("create scope %s: %d %s", name, code, b)
 	}
