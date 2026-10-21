@@ -58,7 +58,7 @@ func loadCDC(getenv func(string) string) (*cdcSettings, error) {
 }
 
 // startCDC launches the consumer loop; it stops when ctx ends. The returned func releases the Kafka clients.
-func startCDC(ctx context.Context, s *cdcSettings, kc kafkaemit.Config, em cdc.Emitter) (func(), error) {
+func startCDC(ctx context.Context, s *cdcSettings, kc kafkaemit.Config, em cdc.Emitter, pos cdc.PositionStore) (func(), error) {
 	conn, err := kc.ConnOpts()
 	if err != nil {
 		return nil, err
@@ -72,7 +72,7 @@ func startCDC(ctx context.Context, s *cdcSettings, kc kafkaemit.Config, em cdc.E
 		src.Close()
 		return nil, err
 	}
-	c := &cdc.Consumer{Feed: src, Emitter: em, Quarantine: q, Map: s.Map}
+	c := &cdc.Consumer{Feed: src, Emitter: em, Quarantine: q, Positions: pos, Map: s.Map}
 	go func() {
 		if err := c.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("cdc consumer: %v", err)

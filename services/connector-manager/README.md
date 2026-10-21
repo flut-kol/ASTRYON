@@ -37,3 +37,7 @@ Sprint 08 (`DPP-036` .. `DPP-040`). Library packages only so far; there is no ex
 
 - Kafka `Emitter` for `raw.events.v1` (gateway has its own TLS/SASL/mTLS producer; extract a shared client first), a `SecretRef` resolver (Vault),
   `cmd/connector-runner`, metrics endpoint wiring (`runner.Metrics` exists), connector API/UI and connection test, Debezium deployment/connector provisioning, schema evolution beyond `cdc.Compatible`.
+
+## CDC tests and position store
+- `internal/cdc` live Kafka test (restart resumes from committed offsets, quarantine record): `ASTRYON_KAFKA_IT_BROKER=host:port go test ./internal/cdc`.
+- `cdc.PGPositions` writes the last emitted source position to `connector_cdc_position` (migration 0013, tenant RLS; diagnostic only, Kafka group commit is authoritative). Live test: `CDC_POS_PG_URL` (non-superuser role). Wired automatically in `cmd/connector-manager` when `ASTRYON_CDC_TOPIC` is set (ASTRYON_CDC_CONNECTOR_ID must be a connectors.id UUID).

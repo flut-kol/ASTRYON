@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/astryon/connector-manager/internal/adminapi"
+	"github.com/astryon/connector-manager/internal/cdc"
 	"github.com/astryon/connector-manager/internal/connstore"
 	"github.com/astryon/connector-manager/internal/kafkaemit"
 	"github.com/astryon/connector-manager/internal/pullstore"
@@ -74,7 +75,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 		return err
 	}
 	if cs != nil {
-		stopCDC, err := startCDC(ctx, cs, kc, em)
+		stopCDC, err := startCDC(ctx, cs, kc, em, &cdc.PGPositions{Pool: pool, Tenant: cs.Map.Tenant})
 		if err != nil {
 			return fmt.Errorf("cdc: %w", err)
 		}
