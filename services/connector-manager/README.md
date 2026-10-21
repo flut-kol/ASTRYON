@@ -19,7 +19,21 @@ Sprint 08 (`DPP-036` .. `DPP-040`). Library packages only so far; there is no ex
   `connectors.config` keys: `endpoint`, `cursor_parameter`, `schema_id` (required), `schema_version`, `requests_per_second`, `max_response_bytes`,
   `interval_seconds`, `records_path`, `id_field`, `event_time_field`, `entity_field`, `processing_version`.
 
+## CDC consumer core (DPP-037, DPP-039)
+
+- `internal/cdc`: consumes Debezium JSON change events (`before/after/source/op/ts_ms`, ops c/u/d/r, optional `{schema,payload}` wrapper)
+  through a `Feed` interface (franz-go `KafkaSource`, group consumer with auto-commit off) and maps them to envelopes.
+  `event_id` = v5-style UUID of connector + source position (LSN/tx or binlog file/pos/gtid; snapshot rows use the snapshot ts) + table + key + op,
+  so redelivery dedups. `entity_key` = PK values (`primary_key` columns, else the Kafka record key). Deletes become tombstone-style events
+  (`deleted:true`, key only, no row image). Tenant and source come only from the connector mapping config, never the payload.
+- `Consumer.RunOnce`: bounded batch -> map -> emit -> save position (optional `PositionStore`) -> commit offsets (commit-after-emit; a crash in between
+  re-emits identical ids). Malformed events go to `events.quarantine.v1` (`CDC_MALFORMED_EVENT`, deterministic deviation id from topic/partition/offset) and
+  do not stop the stream; a bad mapping config fails the batch loudly instead. Debezium Kafka tombstones (nil value) are skipped.
+- `cmd/connector-manager`: off unless `ASTRYON_CDC_TOPIC` is set; then `ASTRYON_CDC_CONNECTOR_ID`, `_TENANT_ID`, `_SOURCE_ID`, `_SCHEMA_ID` (required),
+  `_PRIMARY_KEY` (comma list), `_GROUP`, `_SCHEMA_VERSION`, `_PROCESSING_VERSION`. Not yet: reading these from the `connectors` row, a PostgreSQL-backed
+  `PositionStore`, live Debezium/Kafka test.
+
 ## Not yet
 
 - Kafka `Emitter` for `raw.events.v1` (gateway has its own TLS/SASL/mTLS producer; extract a shared client first), a `SecretRef` resolver (Vault),
-  `cmd/connector-runner`, metrics endpoint wiring (`runner.Metrics` exists), connector API/UI and connection test, CDC (Debezium) wiring, schema evolution.
+  `cmd/connector-runner`, metrics endpoint wiring (`runner.Metrics` exists), connector API/UI and connection test, Debezium deployment/connector provisioning, schema evolution beyond `cdc.Compatible`.

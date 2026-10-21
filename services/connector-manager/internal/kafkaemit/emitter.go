@@ -112,14 +112,9 @@ type Emitter struct {
 }
 
 // New builds the franz-go producer (acks=all, idempotent). The broker need not be reachable yet.
-func New(c Config) (*Emitter, error) {
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(c.Brokers...), kgo.ClientID(c.ClientID),
-		kgo.RequiredAcks(kgo.AllISRAcks()), // idempotence stays on (franz-go default)
-		kgo.RecordRetries(1 << 30), kgo.RecordDeliveryTimeout(c.DeliveryTimeout),
-		kgo.ProduceRequestTimeout(10 * time.Second),
-		kgo.RecordPartitioner(kgo.UniformBytesPartitioner(64<<10, true, true, nil)),
-	}
+// ConnOpts returns the connection options (brokers, client id, TLS, SASL) shared by producers and consumers.
+func (c Config) ConnOpts() ([]kgo.Opt, error) {
+	opts := []kgo.Opt{kgo.SeedBrokers(c.Brokers...), kgo.ClientID(c.ClientID)}
 	if c.TLS {
 		tc := &tls.Config{MinVersion: tls.VersionTLS12}
 		if c.TLSCAFile != "" {
@@ -138,6 +133,20 @@ func New(c Config) (*Emitter, error) {
 	if m := c.mechanism(); m != nil {
 		opts = append(opts, kgo.SASL(m))
 	}
+	return opts, nil
+}
+
+func New(c Config) (*Emitter, error) {
+	opts, err := c.ConnOpts()
+	if err != nil {
+		return nil, err
+	}
+	opts = append(opts,
+		kgo.RequiredAcks(kgo.AllISRAcks()), // idempotence stays on (franz-go default)
+		kgo.RecordRetries(1<<30), kgo.RecordDeliveryTimeout(c.DeliveryTimeout),
+		kgo.ProduceRequestTimeout(10*time.Second),
+		kgo.RecordPartitioner(kgo.UniformBytesPartitioner(64<<10, true, true, nil)),
+	)
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
