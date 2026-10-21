@@ -1,8 +1,8 @@
 # DPoP (L2) in libs/go-common/auth: core implemented, Redis store and live test pending
 
 Status 2026-10-21: `auth/dpop.go` implements items 1-5 (scheme handling, downgrade protection, proof validation, `ReplayStore` + `MemoryReplayStore`,
-`Principal.Confirmation`, `Config.RequireDPoP/PublicBaseURL/ReplayStore`); unit tests in `auth/dpop_test.go`. Still open: `RedisReplayStore`
-(`AAS_REDIS_URL`), metrics (6), `WWW-Authenticate: DPoP` challenge, wiring in services, live test with a DPoP-bound AAS client. The text below is the original plan.
+`Principal.Confirmation`, `Config.RequireDPoP/PublicBaseURL/ReplayStore`); unit tests in `auth/dpop_test.go`. Done too: `RedisReplayStore` (standalone redis[s]://, CA file, fail closed; no Cluster/Sentinel).
+Still open: env wiring of `AAS_REDIS_URL`, metrics (6), `WWW-Authenticate: DPoP` challenge, wiring in services, live test with a DPoP-bound AAS client. The text below is the original plan.
 
 Status 2026-10-20: investigation only. `Verifier` rejects `typ=DPoP` tokens and `Authorization: DPoP ...` by design (fail closed).
 Sources: `docs/architecture/authentication.md`, real Keycloak 26.8.1 behaviour recorded by the AAS owners (read-only reference
