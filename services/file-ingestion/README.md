@@ -60,11 +60,11 @@ Scope `astryon:uploads:write`; tenant only from the Principal (bodies with `tena
   row and enqueues the `process_file` job (idempotent: repeating returns the same job). 422 `checksum_mismatch` (object deleted) / `upload_incomplete`.
 Env: see `cmd/file-api/main.go` (`FILE_API_PG_URL`, `FILE_S3_*`, AAS + optional DPoP like query-api, dev token for local use only).
 Proven end to end with the built binary against MinIO + PostgreSQL 16: create, part PUT, complete, job QUEUED, repeat idempotent, 401 without token.
-Not yet: OpenAPI file in `docs/api/`, rate limits/quotas, malware scan.
+Contract: `docs/api/file-ingestion.openapi.yaml`; errors in `docs/errors/api-error-catalog.md` (`{code, message}`). Not yet: rate limits/quotas, malware scan.
 
 ## Remaining work
 
-- malware/content scanning, object lifecycle rules, an OpenAPI document for the endpoints;
+- malware/content scanning, object lifecycle rules, rate limits/quotas for uploads;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
 - `Sink` (quarantine + normalized path, idempotent on `DedupKey`) and `cmd/file-worker`;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.

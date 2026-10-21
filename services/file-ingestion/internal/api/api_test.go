@@ -182,7 +182,7 @@ func TestCompleteRejectsChecksumMismatchAndIncompleteUploads(t *testing.T) {
 	s, fs, _, e := prepared(t, "")
 	s.Objs = objs{body: "different"}
 	fs.f.Size = -1
-	if w := call(s.Handler(), "/v1/files/uploads/"+fileID+"/complete", completeBody); w.Code != 422 || !strings.Contains(w.Body.String(), "checksum_mismatch") || len(e.calls) != 0 {
+	if w := call(s.Handler(), "/v1/files/uploads/"+fileID+"/complete", completeBody); w.Code != 422 || !strings.Contains(w.Body.String(), "CHECKSUM_MISMATCH") || len(e.calls) != 0 {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	s, _, m, e := prepared(t, "")

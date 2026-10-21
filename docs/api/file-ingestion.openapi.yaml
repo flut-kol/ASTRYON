@@ -1,0 +1,127 @@
+openapi: 3.1.0
+info:
+  title: ASTRYON File Upload API
+  version: 1.0.0
+  description: |
+    Direct-to-S3 multipart file upload (DPP-031). The client creates a session, uploads each part straight to the
+    pre-signed URL, then completes the upload; the service verifies the declared SHA-256 and size and queues a
+    `process_file` job. The tenant is taken only from the validated access token; a `tenant_id` field (or any unknown
+    field) in a body is rejected. Another tenant's file object id is reported as 404.
+servers:
+  - url: http://localhost:8085
+security:
+  - bearer: []
+paths:
+  /v1/files/uploads:
+    post:
+      operationId: createUpload
+      summary: Create a multipart upload session
+      description: Requires scope `astryon:uploads:write`. Part URLs are valid for 15 minutes and are per part (HTTP PUT, no extra headers).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUpload' }
+      responses:
+        '201':
+          description: Session created and file object registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '409':
+          description: The same tenant, filename and SHA-256 were already registered (`ALREADY_REGISTERED`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: The source does not exist for this tenant (`SOURCE_UNKNOWN`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/complete:
+    post:
+      operationId: completeUpload
+      summary: Complete the upload, verify it and queue processing
+      description: |
+        Requires scope `astryon:uploads:write`. Idempotent: repeating the call after success returns the same job.
+        Send the ETag header value returned by each part PUT, in part order starting at 1.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteUpload' }
+      responses:
+        '200':
+          description: Verified and committed; processing job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Completed' }
+        '422':
+          description: |
+            `CHECKSUM_MISMATCH` (content differs from the declared SHA-256/size; the object was deleted, create a new upload) or
+            `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: AAS access token with scope `astryon:uploads:write` (`Authorization: DPoP` with a proof where DPoP is enabled).
+  responses:
+    Error:
+      description: |
+        400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type); 401 UNAUTHENTICATED;
+        403 FORBIDDEN; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    CreateUpload:
+      type: object
+      required: [source_id, filename, content_type, sha256, size_bytes, parts]
+      unevaluatedProperties: false
+      properties:
+        source_id: { type: string, format: uuid }
+        filename: { type: string, description: A plain file name; path separators and `..` are rejected. }
+        content_type: { type: string, description: Must be allow-listed by the deployment (default application/x-ndjson, text/csv). }
+        sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+        size_bytes: { type: integer, minimum: 1, description: Bounded by the deployment (default 5 GiB). }
+        parts: { type: integer, minimum: 1, description: Bounded by the deployment (default 1000, S3 maximum 10000); every part except the last must be at least 5 MiB. }
+    UploadSession:
+      type: object
+      required: [file_object_id, upload_id, part_urls, expires_at]
+      properties:
+        file_object_id: { type: string, format: uuid }
+        upload_id: { type: string }
+        part_urls: { type: array, items: { type: string, format: uri }, description: PUT URL for part 1..n in order. }
+        expires_at: { type: string, format: date-time }
+    CompleteUpload:
+      type: object
+      required: [upload_id, parts]
+      unevaluatedProperties: false
+      properties:
+        upload_id: { type: string, maxLength: 512 }
+        parts:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items:
+            type: object
+            required: [number, etag]
+            unevaluatedProperties: false
+            properties:
+              number: { type: integer, minimum: 1 }
+              etag: { type: string, maxLength: 256 }
+    Completed:
+      type: object
+      required: [file_object_id, status, job_id]
+      properties:
+        file_object_id: { type: string, format: uuid }
+        status: { const: committed }
+        job_id: { type: string, format: uuid }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }

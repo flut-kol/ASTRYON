@@ -20,6 +20,20 @@ and `trace_id`. Clients may branch only on `code` and HTTP status; `message` and
 An accepted batch can return `207` with a `results` entry per input event. An
 item status of `quarantined` is terminal until the input is repaired.
 
+## File upload API
+
+| HTTP | Code | Client action |
+|---:|---|---|
+| 401 | `UNAUTHENTICATED` | Obtain a valid AAS access token. |
+| 403 | `FORBIDDEN` | Request the `astryon:uploads:write` scope. |
+| 400 | `BODY_INVALID` | Correct the request (unknown fields such as `tenant_id` are rejected). |
+| 404 | `NOT_FOUND` | The file object does not exist for this tenant. |
+| 409 | `ALREADY_REGISTERED` | The same filename and SHA-256 were registered before; continue with that upload or change the filename. |
+| 422 | `SOURCE_UNKNOWN` | Use a `source_id` that exists for this tenant. |
+| 422 | `CHECKSUM_MISMATCH` | The object was deleted; verify the local file and start a new upload. |
+| 422 | `UPLOAD_INCOMPLETE` | Re-upload missing parts and call complete again with the right ETags. |
+| 502 / 503 | `STORAGE_UNAVAILABLE` / `UNAVAILABLE` | Retry after a short delay. |
+
 ## Query API
 
 | HTTP | Code | Client action |

@@ -20,7 +20,7 @@ import (
 
 const ScopeUploadsWrite = "astryon:uploads:write"
 
-var ErrUnauthenticated = errors.New("unauthenticated")
+var ErrUnauthenticated = errors.New("UNAUTHENTICATED")
 
 type Principal struct {
 	TenantID string
@@ -65,7 +65,7 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 	p, err := s.Auth.Authenticate(r)
 	if err != nil || p.TenantID == "" {
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeErr(w, 401, "unauthenticated")
+		writeErr(w, 401, "UNAUTHENTICATED")
 		return Principal{}, false
 	}
 	for _, sc := range p.Scopes {
@@ -73,14 +73,28 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 			return p, true
 		}
 	}
-	writeErr(w, 403, "forbidden")
+	writeErr(w, 403, "FORBIDDEN")
 	return Principal{}, false
 }
 
+var messages = map[string]string{
+	"UNAUTHENTICATED":     "Valid access token required.",
+	"FORBIDDEN":           "Scope astryon:uploads:write required.",
+	"BODY_INVALID":        "Request body or path is invalid.",
+	"NOT_FOUND":           "File object not found.",
+	"STORAGE_UNAVAILABLE": "Object storage is unavailable; retry later.",
+	"SOURCE_UNKNOWN":      "Source does not exist for this tenant.",
+	"ALREADY_REGISTERED":  "This file was already registered for the tenant.",
+	"UNAVAILABLE":         "Temporarily unavailable; retry later.",
+	"CHECKSUM_MISMATCH":   "Uploaded content does not match the declared SHA-256 or size; the object was discarded.",
+	"UPLOAD_INCOMPLETE":   "Parts are missing or their ETags do not match.",
+}
+
+// writeErr uses the public error shape from docs/errors/api-error-catalog.md.
 func writeErr(w http.ResponseWriter, code int, id string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": id})
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": id, "message": messages[id]})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -94,11 +108,11 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil || dec.More() {
-		writeErr(w, 400, "invalid_request")
+		writeErr(w, 400, "BODY_INVALID")
 		return false
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		writeErr(w, 400, "invalid_request")
+		writeErr(w, 400, "BODY_INVALID")
 		return false
 	}
 	return true
@@ -131,17 +145,17 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	in.SHA256 = strings.ToLower(in.SHA256)
 	if !uuidRe.MatchString(in.SourceID) {
-		writeErr(w, 400, "invalid_request")
+		writeErr(w, 400, "BODY_INVALID")
 		return
 	}
 	sess, err := s.Uploads.Create(r.Context(), p.TenantID, upload.Request{Filename: in.Filename, ContentType: in.ContentType,
 		SHA256: in.SHA256, SizeBytes: in.SizeBytes, Parts: in.Parts})
 	if errors.Is(err, upload.ErrInvalid) {
-		writeErr(w, 400, "invalid_request")
+		writeErr(w, 400, "BODY_INVALID")
 		return
 	}
 	if err != nil {
-		writeErr(w, 502, "storage_unavailable")
+		writeErr(w, 502, "STORAGE_UNAVAILABLE")
 		return
 	}
 	id, err := s.Files.Register(r.Context(), p.TenantID, in.SourceID, objects.File{Bucket: s.Bucket, Key: sess.ObjectKey, SHA256: in.SHA256, Size: in.SizeBytes})
@@ -149,11 +163,11 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		_ = s.Multipart.Abort(r.Context(), sess.ObjectKey, sess.UploadID)
 		switch {
 		case errors.Is(err, objects.ErrUnknownSource):
-			writeErr(w, 422, "unknown_source")
+			writeErr(w, 422, "SOURCE_UNKNOWN")
 		case errors.Is(err, objects.ErrAlreadyExists):
-			writeErr(w, 409, "already_registered")
+			writeErr(w, 409, "ALREADY_REGISTERED")
 		default:
-			writeErr(w, 503, "unavailable")
+			writeErr(w, 503, "UNAVAILABLE")
 		}
 		return
 	}
@@ -176,7 +190,7 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var in completeReq
 	if !uuidRe.MatchString(id) {
-		writeErr(w, 404, "not_found")
+		writeErr(w, 404, "NOT_FOUND")
 		return
 	}
 	if !decode(w, r, &in) || !validParts(w, in) {
@@ -184,11 +198,11 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.Files.Get(r.Context(), p.TenantID, id)
 	if errors.Is(err, objects.ErrNotFound) {
-		writeErr(w, 404, "not_found")
+		writeErr(w, 404, "NOT_FOUND")
 		return
 	}
 	if err != nil {
-		writeErr(w, 503, "unavailable")
+		writeErr(w, 503, "UNAVAILABLE")
 		return
 	}
 	if !f.Committed { // a repeated call after success skips S3 and just returns the (idempotent) job
@@ -197,21 +211,21 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 			parts[i] = s3.Part{Number: pt.Number, ETag: pt.ETag}
 		}
 		if err := s.Multipart.CompleteMultipart(r.Context(), f.Key, in.UploadID, parts); err != nil {
-			writeErr(w, 422, "upload_incomplete")
+			writeErr(w, 422, "UPLOAD_INCOMPLETE")
 			return
 		}
 		switch err := objects.Verify(r.Context(), s.Files, s.Objs, p.TenantID, id); {
 		case errors.Is(err, objects.ErrChecksumMismatch):
-			writeErr(w, 422, "checksum_mismatch")
+			writeErr(w, 422, "CHECKSUM_MISMATCH")
 			return
 		case err != nil:
-			writeErr(w, 503, "unavailable")
+			writeErr(w, 503, "UNAVAILABLE")
 			return
 		}
 	}
 	job, err := s.Jobs.Enqueue(r.Context(), p.TenantID, f.SourceID, id)
 	if err != nil {
-		writeErr(w, 503, "unavailable")
+		writeErr(w, 503, "UNAVAILABLE")
 		return
 	}
 	writeJSON(w, 200, map[string]string{"file_object_id": id, "status": "committed", "job_id": job})
@@ -219,12 +233,12 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 
 func validParts(w http.ResponseWriter, in completeReq) bool {
 	if in.UploadID == "" || len(in.UploadID) > 512 || len(in.Parts) < 1 || len(in.Parts) > 10000 {
-		writeErr(w, 400, "invalid_request")
+		writeErr(w, 400, "BODY_INVALID")
 		return false
 	}
 	for i, pt := range in.Parts {
 		if pt.Number != i+1 || pt.ETag == "" || len(pt.ETag) > 256 {
-			writeErr(w, 400, "invalid_request")
+			writeErr(w, 400, "BODY_INVALID")
 			return false
 		}
 	}
