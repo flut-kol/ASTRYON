@@ -45,7 +45,7 @@ func TestAASAdapterEndToEnd(t *testing.T) {
 	var chTenant string
 	ch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { chTenant = r.URL.Query().Get("param_p_tenant") }))
 	defer ch.Close()
-	api := httptest.NewServer((&query.Server{Auth: aasAuthenticator{v}, CHURL: ch.URL}).Handler())
+	api := httptest.NewServer((&query.Server{Auth: aasAuthenticator{v: v}, CHURL: ch.URL}).Handler())
 	defer api.Close()
 
 	call := func(tok string) int {

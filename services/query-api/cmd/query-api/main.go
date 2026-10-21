@@ -1,6 +1,6 @@
 // Command query-api serves POST /v1/query/events and /v1/query/aggregate (DPP-029).
 // Env: LISTEN_ADDR (:8082) CH_URL CH_DATABASE CH_USER CH_PASSWORD; DEV ONLY: QUERY_DEV_TOKEN + QUERY_DEV_TENANT.
-// AAS: AAS_BASE_URL AAS_ISSUER AAS_AUDIENCE AAS_ENV AAS_ALLOWED_AZP (tokens need scope astryon:query:read and a tenant claim).
+// AAS: AAS_BASE_URL AAS_ISSUER AAS_AUDIENCE AAS_ENV AAS_ALLOWED_AZP, optional L3: AAS_INTROSPECTION_KEY_FILE AAS_INTROSPECTION_CLIENT_ID AAS_INTROSPECTION_KEY_ID (tokens need scope astryon:query:read and a tenant claim).
 // Limits (DPP-050): QUERY_RATE_PER_SEC QUERY_BURST QUERY_MAX_CONCURRENT QUERY_IDLE_TTL_SECONDS QUERY_MAX_TENANTS
 // QUERY_MAX_EXECUTION_SECONDS QUERY_MAX_RESULT_ROWS QUERY_MAX_MEMORY_BYTES.
 // Shared limits across replicas: QUERY_REDIS_URL (redis://[user:pass@]host:port[/db]) QUERY_REDIS_FAILURE (local|closed) QUERY_REDIS_NODES QUERY_REDIS_TOPOLOGY_REFRESH_SECONDS QUERY_REDIS_SENTINELS QUERY_REDIS_MASTER_NAME QUERY_REDIS_LEASE_SECONDS.
@@ -41,7 +41,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("aas: %v", err)
 		}
-		auth = aasAuthenticator{v}
+		a := aasAuthenticator{v: v}
+		if ic := introspectorConfig(); ic != nil {
+			if a.in, err = goauth.NewIntrospector(context.Background(), *ic); err != nil {
+				log.Fatalf("aas introspection: %v", err)
+			}
+			log.Print("query-api: AAS token introspection (L3) enabled")
+		}
+		auth = a
 	}
 	if t := os.Getenv("QUERY_DEV_TOKEN"); t != "" {
 		auth = query.DevStaticAuthenticator{Token: t, Principal: query.Principal{
