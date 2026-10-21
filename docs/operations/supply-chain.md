@@ -51,13 +51,16 @@ artifact consumers actually deploy.
 
 ## Go toolchain and govulncheck (2026-10-21)
 
-Modules declare `go 1.25.0` (minimum, required by `pgx` v5.9.2 and `golang.org/x/text` v0.41.0, which fix
-GO-2026-5004, GO-2026-6629 and GO-2026-5970). CI and Dockerfiles build with Go 1.26 (`1.26.x`, `golang:1.26`)
-because Go 1.25.14's standard library still carries 10 reachable vulnerabilities (net/http, crypto/tls,
-crypto/x509, net/textproto) whose fixes exist only in Go 1.26.9+. With Go 1.26.10 `govulncheck` reports nothing for the
-modules checked (gateway, query-api, go-common, export-worker); earlier runs with a local Go 1.27.3 were clean for all 15.
-`gosec` is pinned to v2.29.0 because v2.21.4 does not compile on current Go.
+The repository is on Go 1.27: `go.work` and every module declare `go 1.27.0`, CI uses `1.27.x`, Dockerfiles
+`golang:1.27`. Reasons: Go 1.25.14's standard library carries 10 reachable vulnerabilities (net/http, crypto/tls,
+crypto/x509, net/textproto) fixed only in Go 1.26.9+, and `pgx` v5.9.2 / `golang.org/x/text` v0.41.0 (fixes for
+GO-2026-5004, GO-2026-6629, GO-2026-5970) need Go 1.25. With Go 1.27.3 `govulncheck ./...` reports nothing in
+any of the 16 Go modules, `make test` and `make lint` pass, and the five service images build.
 
-Open: `gosec ./...` (as the CI runs it) reports 64 findings across the modules (G104 x30, G115 x13, G706 x7,
-G704 x6, G304 x3, G505/G404/G401/G302/G114 x1 each, measured in a golang:1.25 container). The CI job fails on any finding
-until each is fixed or justified with `#nosec`; triage has not been done. Images were not pushed.
+`gosec` releases up to v2.29.0 cannot read Go 1.27 export data ("export data version 5 is greater than maximum
+supported version 4"), so CI pins the unreleased pseudo-version `v2.29.1-0.20261020094257-14ef84f6fecc`; replace it with the
+first tagged release that supports Go 1.27.
+
+Open: `gosec ./...` as CI runs it reported 64 findings across modules (measured in a Go 1.25 container with v2.29.0): G104 x30,
+G115 x13, G706 x7, G704 x6, G304 x3, G505/G404/G401/G302/G114 x1 each. CI fails on any finding until each is fixed or
+justified with `#nosec`.

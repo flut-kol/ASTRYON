@@ -1,7 +1,7 @@
 # Build context: repository root.
 #   docker build -f services/file-ingestion/Dockerfile --build-arg CMD=file-api    -t astryon/file-api .
 #   docker build -f services/file-ingestion/Dockerfile --build-arg CMD=file-worker -t astryon/file-worker .
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 ARG CMD=file-worker
 WORKDIR /src
 ENV CGO_ENABLED=0 GOWORK=off

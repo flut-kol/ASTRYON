@@ -1,6 +1,6 @@
 module github.com/astryon/gateway
 
-go 1.25.0
+go 1.27.0
 
 require (
 	github.com/astryon/event-contracts v0.0.0
