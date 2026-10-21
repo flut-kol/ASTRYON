@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/astryon/audit"
+	archivecheck "github.com/astryon/file-ingestion/internal/archive"
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/listing"
@@ -28,15 +31,29 @@ import (
 
 const ScopeUploadsWrite = "astryon:uploads:write"
 
+// ScopeFilesRead gates read-only file metadata and previews. Upload writers are
+// also allowed to read their own tenant's files for backwards compatibility.
+const ScopeFilesRead = "astryon:data:read"
+
 var ErrUnauthenticated = errors.New("UNAUTHENTICATED")
 
 type Principal struct {
 	TenantID string
+	Subject  string
+	ClientID string
+	ACR      string
+	AMR      []string
 	Scopes   []string
 }
 
 type Authenticator interface {
 	Authenticate(r *http.Request) (Principal, error)
+}
+
+// AuditSink is the non-blocking request-path subset of audit.Writer.
+type AuditSink interface {
+	Submit(audit.Event) error
+	Stats() audit.Stats
 }
 
 // Multipart is the S3 part of the flow (satisfied by *s3.Client).
@@ -72,6 +89,11 @@ type Server struct {
 	Quota interface {
 		Check(ctx context.Context, tenant string, size int64) error
 	}
+	// Audit is optional. When configured, state changes and authorization denials are queued for PostgreSQL.
+	Audit AuditSink
+	// ArchiveMode is empty by default; "inspect" enables bounded archive
+	// inspection at complete and keeps archives out of the normal worker path.
+	ArchiveMode string
 
 	mu     sync.Mutex
 	counts map[string]int64
@@ -86,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/files/uploads", s.count("create", s.create))
 	mux.HandleFunc("GET /v1/files/uploads", s.count("list", s.list))
 	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
+	mux.HandleFunc("GET /v1/files/uploads/{id}/preview", s.count("preview", s.preview))
 	mux.HandleFunc("GET /v1/jobs", s.count("jobs_list", s.listJobs))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.count("jobs_get", s.getJob))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
@@ -135,6 +158,22 @@ func (s *Server) WritePrometheus(w io.Writer) {
 	for _, k := range reasons {
 		fmt.Fprintf(w, "astryon_file_api_quota_denied_total{reason=%q} %d\n", k, s.denied[k])
 	}
+	if s.Audit != nil {
+		st := s.Audit.Stats()
+		for _, m := range []struct {
+			name  string
+			help  string
+			value uint64
+		}{
+			{"queued_total", "Validated audit events accepted by the bounded queue", st.Queued},
+			{"written_total", "Audit events persisted to PostgreSQL", st.Written},
+			{"dropped_total", "Audit events dropped after queue or PostgreSQL failure", st.Dropped},
+			{"rejected_total", "Audit events rejected by record validation", st.Rejected},
+		} {
+			fmt.Fprintf(w, "# HELP astryon_file_api_audit_%s %s\n# TYPE astryon_file_api_audit_%s counter\nastryon_file_api_audit_%s %d\n",
+				m.name, m.help, m.name, m.name, m.value)
+		}
+	}
 }
 
 func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, bool) {
@@ -149,8 +188,35 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 			return p, true
 		}
 	}
+	s.audit(r, p, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied, audit.Resource{Type: "upload_api"}, map[string]string{
+		"reason": "missing_scope", "required_scope": ScopeUploadsWrite,
+	})
 	writeErr(w, 403, "FORBIDDEN")
 	return Principal{}, false
+}
+
+var traceIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+func requestTrace(r *http.Request) (traceID, requestID string) {
+	parts := strings.Split(r.Header.Get("traceparent"), "-")
+	if len(parts) == 4 && traceIDRe.MatchString(parts[1]) && parts[1] != strings.Repeat("0", 32) {
+		traceID = parts[1]
+	}
+	requestID = r.Header.Get("X-Request-ID")
+	if len(requestID) > 256 {
+		requestID = ""
+	}
+	return traceID, requestID
+}
+
+func (s *Server) audit(r *http.Request, p Principal, category audit.Category, action string, outcome audit.Outcome, resource audit.Resource, details map[string]string) {
+	if s.Audit == nil || p.TenantID == "" {
+		return
+	}
+	traceID, requestID := requestTrace(r)
+	e := audit.NewEvent(audit.Claims{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR}, category, action, outcome, resource).
+		WithTrace(traceID, requestID).WithDetails(details)
+	_ = s.Audit.Submit(e) // non-blocking; writer counters expose queue, validation and persistence failures
 }
 
 var messages = map[string]string{
@@ -167,6 +233,8 @@ var messages = map[string]string{
 	"TOO_MANY_UPLOADS":    "Too many uploads are open for this tenant; complete or wait for them to expire, then retry.",
 	"UPLOAD_QUOTA":        "The tenant's upload byte quota for the last 24 hours is exhausted.",
 	"UPLOAD_INCOMPLETE":   "Parts are missing or their ETags do not match.",
+	"PREVIEW_UNSUPPORTED": "Only committed text/csv and ndjson/jsonl objects can be previewed.",
+	"ARCHIVE_REJECTED":    "Archive failed bounded safety inspection and was not queued.",
 }
 
 // writeErr uses the public error shape from docs/errors/api-error-catalog.md.
@@ -260,7 +328,8 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	prof := profile.Select(in.SourceType)
 	sens, ok := prof.Sensitivity(in.Sensitivity)
-	if !ok || !prof.AllowsFormat(in.ContentType, in.Filename) || prof.MissingTag(in.Tags) != "" {
+	archiveUpload := archiveType(in.ContentType, in.Filename)
+	if !ok || (!prof.AllowsFormat(in.ContentType, in.Filename) && !(s.ArchiveMode == "inspect" && archiveUpload)) || prof.MissingTag(in.Tags) != "" {
 		writeErr(w, 400, "BODY_INVALID")
 		return
 	}
@@ -297,7 +366,21 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.audit(r, p, audit.CategoryAudit, "upload.create", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
 	writeJSON(w, 201, createResp{FileObjectID: id, UploadID: sess.UploadID, PartURLs: sess.PartURLs, ExpiresAt: sess.ExpiresAt})
+}
+
+func archiveType(contentType, filename string) bool {
+	mt, _, _ := strings.Cut(contentType, ";")
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	name := strings.ToLower(filename)
+	return archiveMime(mt) && ((mt == "application/zip" && strings.HasSuffix(name, ".zip")) ||
+		((mt == "application/x-tar" || mt == "application/tar") && (strings.HasSuffix(name, ".tar") || strings.HasSuffix(name, ".tgz"))) ||
+		((mt == "application/gzip" || mt == "application/x-gzip") && (strings.HasSuffix(name, ".gz") || strings.HasSuffix(name, ".tgz"))))
+}
+
+func archiveMime(mt string) bool {
+	return mt == "application/zip" || mt == "application/x-tar" || mt == "application/tar" || mt == "application/gzip" || mt == "application/x-gzip"
 }
 
 // checkQuota maps quota results to 413 (file size) or 429 (open uploads, daily bytes, with Retry-After).
@@ -396,6 +479,145 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+const (
+	previewMaxBytes = 64 << 10
+	previewMaxLines = 200
+)
+
+// previewPrincipal permits the least-privilege data-read scope while retaining
+// the historical uploads:write access used by operators and the dev auth.
+func (s *Server) previewPrincipal(w http.ResponseWriter, r *http.Request) (Principal, bool) {
+	p, err := s.Auth.Authenticate(r)
+	if err != nil || p.TenantID == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeErr(w, 401, "UNAUTHENTICATED")
+		return Principal{}, false
+	}
+	for _, sc := range p.Scopes {
+		if sc == ScopeFilesRead || sc == ScopeUploadsWrite {
+			return p, true
+		}
+	}
+	s.audit(r, p, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied, audit.Resource{Type: "file_preview"}, map[string]string{
+		"reason": "missing_scope", "required_scope": ScopeFilesRead,
+	})
+	writeErr(w, 403, "FORBIDDEN")
+	return Principal{}, false
+}
+
+type previewMetadata struct {
+	FileObjectID string   `json:"file_object_id"`
+	SizeBytes    int64    `json:"size_bytes"`
+	ContentType  string   `json:"content_type"`
+	Mode         string   `json:"mode"`
+	Reason       string   `json:"reason"`
+	Labels       []string `json:"labels,omitempty"`
+}
+
+// preview returns a bounded text view. It never reads archives, parquet or
+// uncommitted objects, and sensitive classifications are metadata-only so a
+// quarantine/PII/credential finding cannot be bypassed through AdminUI.
+func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.previewPrincipal(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeErr(w, 404, "NOT_FOUND")
+		return
+	}
+	f, err := s.Files.Get(r.Context(), p.TenantID, id)
+	if errors.Is(err, objects.ErrNotFound) {
+		writeErr(w, 404, "NOT_FOUND")
+		return
+	}
+	if err != nil {
+		writeErr(w, 503, "UNAVAILABLE")
+		return
+	}
+	labels := classify.Labels(nil)
+	status := ""
+	if s.Insights != nil {
+		sum, ierr := s.Insights.Describe(r.Context(), p.TenantID, id)
+		if ierr == nil {
+			labels, status = sum.Labels, sum.Status
+		} else if !errors.Is(ierr, jobs.ErrNoSummary) {
+			writeErr(w, 503, "UNAVAILABLE")
+			return
+		}
+	}
+	meta := previewMetadata{FileObjectID: f.ID, SizeBytes: f.Size, ContentType: f.ContentType}
+	if !f.Committed {
+		meta.Mode, meta.Reason = "metadata-only", "uncommitted"
+		writeJSON(w, 200, meta)
+		return
+	}
+	if status == "QUARANTINED" || labels.Has(classify.Credentials) || labels.Has(classify.PII) {
+		meta.Mode, meta.Reason, meta.Labels = "metadata-only", "sensitive-content", labels.Names()
+		writeJSON(w, 200, meta)
+		return
+	}
+	mt, _, _ := strings.Cut(f.ContentType, ";")
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	if mt != "text/csv" && mt != "application/x-ndjson" {
+		writeErr(w, 415, "PREVIEW_UNSUPPORTED")
+		return
+	}
+	if s.Objs == nil {
+		writeErr(w, 503, "STORAGE_UNAVAILABLE")
+		return
+	}
+	rc, err := s.Objs.Get(r.Context(), f.Key, 0)
+	if err != nil {
+		writeErr(w, 503, "STORAGE_UNAVAILABLE")
+		return
+	}
+	defer rc.Close()
+	view, truncated := boundedText(rc, previewMaxBytes, previewMaxLines)
+	w.Header().Set("Content-Type", mt+"; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="file-`+id+`.txt"`)
+	w.Header().Set("X-Preview-Mode", "content")
+	if truncated {
+		w.Header().Set("X-Preview-Truncated", "true")
+	}
+	w.WriteHeader(200)
+	_, _ = w.Write(view)
+}
+
+func boundedText(r io.Reader, maxBytes, maxLines int) ([]byte, bool) {
+	br := bufio.NewReader(io.LimitReader(r, int64(maxBytes)+1))
+	out := make([]byte, 0, maxBytes)
+	lines := 0
+	truncated := false
+	for len(out) < maxBytes && lines < maxLines {
+		line, err := br.ReadBytes('\n')
+		if len(line) > maxBytes-len(out) {
+			out = append(out, line[:maxBytes-len(out)]...)
+			truncated = true
+			break
+		}
+		out = append(out, line...)
+		if len(line) > 0 {
+			lines++
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			truncated = true
+			break
+		}
+	}
+	if lines >= maxLines || len(out) >= maxBytes {
+		truncated = true
+	}
+	if _, err := br.Peek(1); err == nil {
+		truncated = true
+	}
+	return out, truncated
+}
+
 type completeReq struct {
 	UploadID string `json:"upload_id"`
 	Parts    []struct {
@@ -445,11 +667,30 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if s.ArchiveMode == "inspect" && archiveMime(strings.ToLower(strings.TrimSpace(strings.SplitN(f.ContentType, ";", 2)[0]))) {
+		rc, ierr := s.Objs.Get(r.Context(), f.Key, 0)
+		if ierr != nil {
+			writeErr(w, 503, "STORAGE_UNAVAILABLE")
+			return
+		}
+		_, ierr = archivecheck.InspectContext(r.Context(), rc, archivecheck.SafeLimits())
+		_ = rc.Close()
+		if ierr != nil {
+			writeErr(w, 422, "ARCHIVE_REJECTED")
+			return
+		}
+		// Archives are committed for metadata review only; never enqueue them
+		// into the text/Parquet worker until an extraction policy exists.
+		s.audit(r, p, audit.CategoryAudit, "upload.archive_inspect", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
+		writeJSON(w, 200, map[string]string{"file_object_id": id, "status": "committed", "mode": "archive_inspect"})
+		return
+	}
 	job, err := s.Jobs.Enqueue(r.Context(), p.TenantID, f.SourceID, id)
 	if err != nil {
 		writeErr(w, 503, "UNAVAILABLE")
 		return
 	}
+	s.audit(r, p, audit.CategoryAudit, "upload.complete", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
 	writeJSON(w, 200, map[string]string{"file_object_id": id, "status": "committed", "job_id": job})
 }
 

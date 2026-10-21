@@ -2,25 +2,37 @@ package adminapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/astryon/audit"
 	"github.com/astryon/connector-manager/internal/registry"
+	goauth "github.com/astryon/go-common/auth"
 )
 
 const (
-	id1 = "11111111-1111-1111-1111-111111111111"
-	src = "22222222-2222-2222-2222-222222222222"
+	id1      = "11111111-1111-1111-1111-111111111111"
+	src      = "22222222-2222-2222-2222-222222222222"
+	tenantID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 )
 
 type fakeAuth struct {
-	p   registry.Principal
+	p   goauth.Principal
 	err error
 }
 
-func (f fakeAuth) Authenticate(*http.Request) (registry.Principal, error) { return f.p, f.err }
+func (f fakeAuth) Authenticate(*http.Request) (goauth.Principal, error) { return f.p, f.err }
+
+type fakeAudit struct{ events []audit.Event }
+
+func (f *fakeAudit) Submit(e audit.Event) error {
+	f.events = append(f.events, e)
+	return nil
+}
 
 type fakeStore struct {
 	tenants []string
@@ -59,7 +71,7 @@ func do(s *Server, method, path, body string) *httptest.ResponseRecorder {
 }
 
 func srv(st *fakeStore) *Server {
-	return &Server{Store: st, Auth: fakeAuth{p: registry.Principal{TenantID: "t1", Scopes: map[string]bool{registry.ManageScope: true}}}}
+	return &Server{Store: st, Auth: fakeAuth{p: goauth.Principal{TenantID: tenantID, Subject: "actor-1", ACR: "mfa", Scopes: []string{registry.ManageScope}}}}
 }
 
 func TestAuthAndScope(t *testing.T) {
@@ -68,11 +80,11 @@ func TestAuthAndScope(t *testing.T) {
 	if w := do(s, "GET", "/v1/connectors", ""); w.Code != 401 {
 		t.Fatalf("got %d", w.Code)
 	}
-	s.Auth = fakeAuth{p: registry.Principal{TenantID: "t1"}}
+	s.Auth = fakeAuth{p: goauth.Principal{TenantID: tenantID, Subject: "actor-1"}}
 	if w := do(s, "GET", "/v1/connectors", ""); w.Code != 403 {
 		t.Fatalf("got %d", w.Code)
 	}
-	s.Auth = fakeAuth{p: registry.Principal{Scopes: map[string]bool{registry.ManageScope: true}}}
+	s.Auth = fakeAuth{p: goauth.Principal{Scopes: []string{registry.ManageScope}}}
 	if w := do(s, "GET", "/v1/connectors", ""); w.Code != 401 {
 		t.Fatalf("no tenant must be 401, got %d", w.Code)
 	}
@@ -94,7 +106,7 @@ func TestTenantFromPrincipalOnly(t *testing.T) {
 	do(s, "GET", "/v1/connectors/"+id1, "")
 	do(s, "POST", "/v1/connectors/"+id1+"/pause", "")
 	for _, tn := range st.tenants {
-		if tn != "t1" {
+		if tn != tenantID {
 			t.Fatalf("tenant %q", tn)
 		}
 	}
@@ -162,11 +174,100 @@ func TestListPaginationAndErrors(t *testing.T) {
 }
 
 func TestPauseResume(t *testing.T) {
+	a := &fakeAudit{}
 	s := srv(&fakeStore{})
+	s.Audit = a
 	if w := do(s, "POST", "/v1/connectors/"+id1+"/pause", ""); !strings.Contains(w.Body.String(), `"enabled":false`) {
 		t.Fatal(w.Body)
 	}
 	if w := do(s, "POST", "/v1/connectors/"+id1+"/resume", ""); !strings.Contains(w.Body.String(), `"enabled":true`) {
 		t.Fatal(w.Body)
 	}
+	if len(a.events) != 2 || a.events[0].Action != "connector.pause" || a.events[1].Action != "connector.resume" {
+		t.Fatalf("audit events: %+v", a.events)
+	}
+	for _, e := range a.events {
+		if e.TenantID != tenantID || e.Subject != "actor-1" || e.ACR != "mfa" || e.Outcome != audit.OutcomeSuccess || e.Resource.ID != id1 {
+			t.Fatalf("bad audit identity/outcome: %+v", e)
+		}
+		if _, err := e.Normalize(time.Now()); err != nil {
+			t.Fatalf("event rejected by audit library: %v", err)
+		}
+		if len(e.Details) != 0 {
+			t.Fatalf("unexpected audit details: %+v", e.Details)
+		}
+	}
+}
+
+func TestCreateAuditExcludesConfigAndCredentialReference(t *testing.T) {
+	a := &fakeAudit{}
+	s := srv(&fakeStore{})
+	s.Audit = a
+	w := do(s, "POST", "/v1/connectors", `{"source_id":"`+src+`","name":"a","kind":"REST_PULL","secret_ref":"env://VERY_SECRET_NAME","config":{"url":"https://internal.example/path"}}`)
+	if w.Code != http.StatusCreated || len(a.events) != 1 {
+		t.Fatalf("response=%d audit=%+v", w.Code, a.events)
+	}
+	e := a.events[0]
+	if e.Action != "connector.create" || e.Outcome != audit.OutcomeSuccess || e.Resource.ID != id1 ||
+		e.Details["source_id"] != src || e.Details["connector_kind"] != "REST_PULL" {
+		t.Fatalf("event: %+v", e)
+	}
+	if _, err := e.Normalize(time.Now()); err != nil {
+		t.Fatalf("event rejected by audit library: %v", err)
+	}
+	b, _ := json.Marshal(e)
+	for _, forbidden := range []string{"VERY_SECRET_NAME", "internal.example", "secret_ref", `"config"`, "pwd,otp"} {
+		if strings.Contains(string(b), forbidden) {
+			t.Fatalf("audit leaked %q: %s", forbidden, b)
+		}
+	}
+}
+
+func TestMutationFailureAuditedWithBoundedErrorCode(t *testing.T) {
+	a := &fakeAudit{}
+	s := srv(&fakeStore{err: ErrConflict})
+	s.Audit = a
+	w := do(s, "POST", "/v1/connectors", `{"source_id":"`+src+`","name":"a","kind":"REST_PULL","secret_ref":"env://K"}`)
+	if w.Code != http.StatusConflict || len(a.events) != 1 {
+		t.Fatalf("response=%d audit=%+v", w.Code, a.events)
+	}
+	e := a.events[0]
+	if e.Outcome != audit.OutcomeFailure || e.Details["error_code"] != "conflict" || e.Resource.ID != "" {
+		t.Fatalf("event: %+v", e)
+	}
+	if _, err := e.Normalize(time.Now()); err != nil {
+		t.Fatalf("event rejected by audit library: %v", err)
+	}
+}
+
+func TestDeniedAuditNeedsValidatedPrincipal(t *testing.T) {
+	a := &fakeAudit{}
+	s := &Server{Store: &fakeStore{}, Audit: a, Auth: fakeAuth{err: ErrUnauthenticated}}
+	if w := do(s, "GET", "/v1/connectors", ""); w.Code != http.StatusUnauthorized || len(a.events) != 0 {
+		t.Fatalf("invalid token must not be audited with a synthetic tenant: %d %+v", w.Code, a.events)
+	}
+	s.Auth = fakeAuth{p: goauth.Principal{TenantID: "11111111-2222-3333-4444-555555555555", ClientID: "client-1", ACR: "mfa", AMR: []string{"pwd", "otp"}}}
+	w := do(s, "GET", "/v1/connectors", "")
+	if w.Code != http.StatusForbidden || len(a.events) != 1 {
+		t.Fatalf("response=%d audit=%+v", w.Code, a.events)
+	}
+	e := a.events[0]
+	if e.Action != "auth.denied" || e.Category != audit.CategorySecurity || e.Outcome != audit.OutcomeDenied ||
+		e.TenantID != "11111111-2222-3333-4444-555555555555" || e.ClientID != "client-1" || e.ACR != "mfa" {
+		t.Fatalf("event: %+v", e)
+	}
+	if _, ok := e.Details["amr"]; ok || strings.Contains(strings.Join(mapValues(e.Details), ","), "otp") {
+		t.Fatalf("AMR must not be stored: %+v", e.Details)
+	}
+	if _, err := e.Normalize(time.Now()); err != nil {
+		t.Fatalf("event rejected by audit library: %v", err)
+	}
+}
+
+func mapValues(m map[string]string) []string {
+	v := make([]string, 0, len(m))
+	for _, x := range m {
+		v = append(v, x)
+	}
+	return v
 }

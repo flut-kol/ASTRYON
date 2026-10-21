@@ -12,6 +12,8 @@
 // write is retried while PostgreSQL is down before the job is abandoned (log "ALERT export_job_abandoned").
 // EXPORT_PPROF_ADDR (off) = loopback-only debug listener with pprof and /debug/vars counters.
 // EXPORT_METRICS_ADDR (off) = loopback-only Prometheus /metrics (astryon_export_*).
+// EXPORT_AUDIT_MODE=off|best_effort|required (best_effort with EXPORT_PG_URL, else off) enables PG-backed API audit. EXPORT_AUDIT_PG_URL defaults to
+// EXPORT_PG_URL. EXPORT_AUDIT_QUEUE_SIZE, _BATCH_SIZE, _FLUSH_INTERVAL, _WRITE_TIMEOUT and _RETRIES bound the writer.
 // Without EXPORT_PG_URL jobs and quota are in memory (lost on restart, per process); see README.
 package main
 
@@ -27,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	auditlib "github.com/astryon/audit"
 	"github.com/astryon/export-worker/internal/export"
 	goauth "github.com/astryon/go-common/auth"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -85,16 +88,17 @@ func main() {
 		TTL:     time.Duration(envInt("EXPORT_URL_TTL_SECONDS", 900)) * time.Second,
 	}
 	startDebug(os.Getenv("EXPORT_PPROF_ADDR"))
-	startMetrics(os.Getenv("EXPORT_METRICS_ADDR"))
 	maxDay, maxConc := envInt("EXPORT_MAX_PER_DAY", 0), envInt("EXPORT_MAX_CONCURRENT_PER_TENANT", 2)
 	s := &export.Server{Auth: auth, Runner: runner, Audit: runner.Audit, Workers: envInt("EXPORT_WORKERS", 2)}
 	stopDisp := func(context.Context) {}
+	var jobPool *pgxpool.Pool
 	if pgURL := os.Getenv("EXPORT_PG_URL"); pgURL != "" {
 		pool, err := pgxpool.New(context.Background(), pgURL)
 		if err != nil {
 			log.Fatalf("postgres: %v", err)
 		}
 		defer pool.Close()
+		jobPool = pool
 		host, _ := os.Hostname()
 		lease := time.Duration(envInt("EXPORT_LEASE_SECONDS", 60)) * time.Second
 		store := &export.PGJobStore{DB: export.PoolDB{Pool: pool}, Lease: lease,
@@ -124,6 +128,52 @@ func main() {
 		s.Jobs = &export.MemoryJobStore{}
 		s.Quota = &export.MemoryQuota{MaxPerDay: maxDay, MaxConcurrent: maxConc}
 	}
+
+	var auditWriter *auditlib.Writer
+	mode := os.Getenv("EXPORT_AUDIT_MODE")
+	if mode == "" {
+		mode = "off"
+		if os.Getenv("EXPORT_PG_URL") != "" {
+			mode = "best_effort"
+		}
+	}
+	switch mode {
+	case "off":
+	case "best_effort", "required":
+		auditURL := env("EXPORT_AUDIT_PG_URL", os.Getenv("EXPORT_PG_URL"))
+		if auditURL == "" {
+			log.Fatal("EXPORT_AUDIT_MODE requires EXPORT_AUDIT_PG_URL or EXPORT_PG_URL")
+		}
+		auditPool := jobPool
+		if auditPool == nil || auditURL != os.Getenv("EXPORT_PG_URL") {
+			var err error
+			auditPool, err = pgxpool.New(context.Background(), auditURL)
+			if err != nil {
+				log.Fatalf("audit postgres: %v", err)
+			}
+			defer auditPool.Close()
+		}
+		auditWriteTimeout := envDuration("EXPORT_AUDIT_WRITE_TIMEOUT", 5*time.Second)
+		auditWriter = auditlib.NewWriter(auditPool, auditlib.Config{
+			QueueSize:     envInt("EXPORT_AUDIT_QUEUE_SIZE", 1024),
+			BatchSize:     envInt("EXPORT_AUDIT_BATCH_SIZE", 100),
+			FlushInterval: envDuration("EXPORT_AUDIT_FLUSH_INTERVAL", 500*time.Millisecond),
+			WriteTimeout:  auditWriteTimeout,
+			Retries:       envInt("EXPORT_AUDIT_RETRIES", 2),
+			OnDrop: func(e auditlib.Event, reason error) {
+				log.Printf("audit event dropped action=%s: %v", e.Action, reason)
+			},
+		})
+		s.APIAudit = &export.APIAudit{Writer: auditWriter, RequiredCreate: mode == "required", SyncTimeout: auditWriteTimeout}
+		export.Metrics.SetAuditStatsProvider(func() export.AuditWriterStats {
+			st := auditWriter.Stats()
+			return export.AuditWriterStats{Queued: st.Queued, Written: st.Written, Dropped: st.Dropped, Rejected: st.Rejected}
+		})
+		log.Printf("API audit: PostgreSQL mode=%s queue=%d", mode, envInt("EXPORT_AUDIT_QUEUE_SIZE", 1024))
+	default:
+		log.Fatalf("EXPORT_AUDIT_MODE: invalid value %q (want off, best_effort or required)", mode)
+	}
+	startMetrics(os.Getenv("EXPORT_METRICS_ADDR"))
 	srv := &http.Server{Addr: env("LISTEN_ADDR", ":8083"), Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 
 	errc := make(chan error, 1)
@@ -143,4 +193,11 @@ func main() {
 	}
 	stopDisp(ctx)   // dispatcher mode: stop claiming, wait for running jobs until ctx expires, then FAIL them (shutdown)
 	s.Shutdown(ctx) // in-memory mode: waits for local jobs until ctx expires, then marks them FAILED
+	if auditWriter != nil {
+		auditCtx, auditCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := auditWriter.Close(auditCtx); err != nil {
+			log.Printf("audit shutdown: %v", err)
+		}
+		auditCancel()
+	}
 }

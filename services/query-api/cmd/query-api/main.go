@@ -5,6 +5,8 @@
 // QUERY_MAX_EXECUTION_SECONDS QUERY_MAX_RESULT_ROWS QUERY_MAX_MEMORY_BYTES.
 // Shared limits across replicas: QUERY_REDIS_URL (redis://[user:pass@]host:port[/db]) QUERY_REDIS_FAILURE (local|closed) QUERY_REDIS_NODES QUERY_REDIS_TOPOLOGY_REFRESH_SECONDS QUERY_REDIS_SENTINELS QUERY_REDIS_MASTER_NAME QUERY_REDIS_LEASE_SECONDS.
 // Active version (replay cutover): QUERY_PG_URL (role without BYPASSRLS) QUERY_VERSION_CACHE_SECONDS (default 5). Unset = processing_version required.
+// Audit: QUERY_AUDIT_PG_URL (opt-in), QUERY_AUDIT_QUEUE_SIZE, QUERY_AUDIT_BATCH_SIZE,
+// QUERY_AUDIT_FLUSH_INTERVAL_MS, QUERY_AUDIT_WRITE_TIMEOUT_MS, QUERY_AUDIT_DRAIN_TIMEOUT_SECONDS.
 // Neither AAS nor the dev token configured -> every request is rejected (fail closed).
 package main
 
@@ -13,7 +15,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	goauth "github.com/astryon/go-common/auth"
@@ -37,7 +41,11 @@ func (denyAll) Authenticate(*http.Request) (query.Principal, error) {
 func main() {
 	var auth query.Authenticator = denyAll{}
 	rejects := &dpopRejects{}
-	serveMetrics(rejects)
+	auditRT, err := startAudit(context.Background(), os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	serveMetrics(rejects, auditRT)
 	if os.Getenv("AAS_BASE_URL") != "" {
 		cfg, err := dpopConfig(aasConfig())
 		if err != nil {
@@ -79,6 +87,12 @@ func main() {
 	}
 	s := &query.Server{Auth: auth, Limiter: limiter, Caps: caps, CHURL: env("CH_URL", "http://localhost:8123"), CHDatabase: env("CH_DATABASE", "astryon"),
 		CHUser: os.Getenv("CH_USER"), CHPass: os.Getenv("CH_PASSWORD")}
+	if auditRT != nil {
+		s.Audit = auditRT.writer
+		log.Print("query-api: PostgreSQL audit writer enabled")
+	} else {
+		log.Print("query-api: audit writer disabled (QUERY_AUDIT_PG_URL unset)")
+	}
 	if v := os.Getenv("QUERY_AGG_CACHE_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -107,5 +121,27 @@ func main() {
 	}
 	srv := &http.Server{Addr: env("LISTEN_ADDR", ":8082"), Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("query-api listening on %s", srv.Addr)
-	log.Fatal(srv.ListenAndServe())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var serverErr error
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			serverErr = err
+		}
+	case <-stopCtx.Done():
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("query-api shutdown: %v", err)
+		}
+		cancel()
+	}
+	if err := auditRT.Close(); err != nil {
+		log.Printf("query-api audit drain: %v", err)
+	}
+	if serverErr != nil {
+		log.Fatalf("query-api server: %v", serverErr)
+	}
 }

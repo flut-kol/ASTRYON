@@ -51,6 +51,14 @@ func TestFormatsSensitivityAndTags(t *testing.T) {
 	if Select("personal_data").ExportAllowed || Select("financial").ExportAllowed || Select("personal_data").SensitivityFloor != "restricted" {
 		t.Fatal("strictest values")
 	}
+	for _, archive := range []struct{ typ, name string }{
+		{"application/zip", "bundle.zip"}, {"application/x-tar", "bundle.tar"},
+		{"application/gzip", "bundle.gz"}, {"application/gzip", "bundle.tgz"},
+	} {
+		if Select("unknown").AllowsFormat(archive.typ, archive.name) {
+			t.Fatalf("archive unexpectedly accepted: %#v", archive)
+		}
+	}
 }
 
 func TestPolicyOutcomes(t *testing.T) {

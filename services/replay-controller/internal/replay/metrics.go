@@ -16,6 +16,7 @@ import (
 // enums only: never tenant, source or replay id. A nil *Metrics is a no-op.
 type Metrics struct {
 	Requested, DryRuns, Approved, PublishErrors atomic.Int64
+	AuditMirrorDropped                          atomic.Int64
 
 	mu         sync.Mutex
 	rejected   map[string]int64 // bounded error code -> count
@@ -90,6 +91,7 @@ func (m *Metrics) WritePrometheus(w io.Writer) {
 		{"replays_dry_run_total", "Authorized replay create calls in dry_run mode", m.DryRuns.Load()},
 		{"replays_approved_total", "Replays accepted for execution (version reserved, job published)", m.Approved.Load()},
 		{"publish_errors_total", "Replay job publish failures", m.PublishErrors.Load()},
+		{"audit_mirror_dropped_total", "Replay audit_log mirror events dropped", m.AuditMirrorDropped.Load()},
 	} {
 		fmt.Fprintf(w, "# HELP %s%s %s\n# TYPE %s%s counter\n%s%s %d\n", p, c.name, c.help, p, c.name, p, c.name, c.v)
 	}

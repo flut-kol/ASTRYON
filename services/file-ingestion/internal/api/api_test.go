@@ -349,3 +349,65 @@ func TestGetReturnsTagsSensitivityAndLabels(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestPreviewIsTenantScopedBoundedAndInline(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeFilesRead}})
+	fs.f = objects.File{ID: fileID, Key: "tenant/object", Size: 12, Committed: true, ContentType: "application/x-ndjson"}
+	s.Objs = objs{body: "{\"ok\":1}\n{\"ok\":2}\n"}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID+"/preview", nil))
+	if w.Code != 200 || w.Header().Get("Content-Disposition") == "" || w.Header().Get("X-Preview-Mode") != "content" || w.Body.String() != "{\"ok\":1}\n{\"ok\":2}\n" {
+		t.Fatalf("%d headers=%v body=%q", w.Code, w.Header(), w.Body.String())
+	}
+	other, _, _, _ := newServer(Principal{TenantID: "99999999-9999-4999-8999-999999999999", Scopes: []string{ScopeFilesRead}})
+	other.Files = s.Files
+	w = httptest.NewRecorder()
+	other.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID+"/preview", nil))
+	if w.Code != 404 {
+		t.Fatalf("cross-tenant: %d", w.Code)
+	}
+}
+
+func TestPreviewSensitiveIsMetadataOnly(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeFilesRead}})
+	fs.f = objects.File{ID: fileID, Key: "tenant/object", Size: 30, Committed: true, ContentType: "application/x-ndjson"}
+	s.Objs = objs{body: `{"password":"do-not-return"}`}
+	s.Insights = insights{}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID+"/preview", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"mode":"metadata-only"`) || strings.Contains(w.Body.String(), "do-not-return") {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPreviewRejectsArchivesAndRequiresReadScope(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeFilesRead}})
+	fs.f = objects.File{ID: fileID, Key: "tenant/archive", Size: 4, Committed: true, ContentType: "application/zip"}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID+"/preview", nil))
+	if w.Code != 415 {
+		t.Fatalf("archive: %d %s", w.Code, w.Body.String())
+	}
+	noScope, _, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{"astryon:events:read"}})
+	w = httptest.NewRecorder()
+	noScope.Files = s.Files
+	noScope.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID+"/preview", nil))
+	if w.Code != 403 {
+		t.Fatalf("scope: %d", w.Code)
+	}
+}
+
+func TestArchiveUploadRequiresExplicitInspectMode(t *testing.T) {
+	body := strings.ReplaceAll(okBody, `application/x-ndjson`, `application/zip`)
+	body = strings.ReplaceAll(body, `a.ndjson`, `bundle.zip`)
+	s, _, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	if w := call(s.Handler(), "/v1/files/uploads", body); w.Code != 400 {
+		t.Fatalf("default archive mode accepted: %d", w.Code)
+	}
+	s, _, _, _ = newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	s.ArchiveMode = "inspect"
+	s.Uploads.ContentTypes["application/zip"] = true
+	if w := call(s.Handler(), "/v1/files/uploads", body); w.Code != 201 {
+		t.Fatalf("inspect archive mode rejected: %d %s", w.Code, w.Body.String())
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/astryon/connector-manager/internal/registry"
+	goauth "github.com/astryon/go-common/auth"
 )
 
 type fakeSources struct {
@@ -29,7 +30,13 @@ func (f *fakeSources) GetSource(_ context.Context, t, id string) (Source, error)
 }
 
 func srvWith(scopes map[string]bool, fs *fakeSources) *Server {
-	return &Server{Auth: fakeAuth{p: registry.Principal{TenantID: "tenant-A", Scopes: scopes}}, Store: &fakeStore{}, Sources: fs}
+	ss := make([]string, 0, len(scopes))
+	for scope, enabled := range scopes {
+		if enabled {
+			ss = append(ss, scope)
+		}
+	}
+	return &Server{Auth: fakeAuth{p: goauth.Principal{TenantID: "tenant-A", Subject: "actor", Scopes: ss}}, Store: &fakeStore{}, Sources: fs}
 }
 
 func TestSourcesScopeAndTenant(t *testing.T) {

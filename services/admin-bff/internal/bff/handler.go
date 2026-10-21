@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/astryon/audit"
 )
 
 // CSRFHeader must be present (any value from this list) on every unsafe request; browsers cannot add it
@@ -30,17 +32,20 @@ type Options struct {
 	AfterLoginPath string            // default "/"
 	AllowedOrigins []string          // extra Origins accepted on unsafe requests (UI served from another origin, e.g. the Vite dev server)
 	Logger         *log.Logger
-	Store          Store // session/login/replay store; default: in-process memory (single replica). See NewRedisStore.
+	Store          Store     // session/login/replay store; default: in-process memory (single replica). See NewRedisStore.
+	Audit          AuditSink // optional bounded PostgreSQL audit writer
 }
 
 // Server is the BFF http.Handler.
 type Server struct {
-	o       Options
-	oc      *oidcClient
-	mux     *http.ServeMux
-	store   Store
-	locks   [64]sync.Mutex // per-process refresh serialisation, striped by session id
-	proxies map[string]*httputil.ReverseProxy
+	o            Options
+	oc           *oidcClient
+	mux          *http.ServeMux
+	store        Store
+	locks        [64]sync.Mutex // per-process refresh serialisation, striped by session id
+	proxies      map[string]*httputil.ReverseProxy
+	audit        AuditSink
+	auditMetrics auditMetrics
 }
 
 func New(ctx context.Context, o Options) (*Server, error) {
@@ -63,7 +68,7 @@ func New(ctx context.Context, o Options) (*Server, error) {
 	if o.Logger == nil {
 		o.Logger = log.Default()
 	}
-	s := &Server{o: o, oc: oc, mux: http.NewServeMux(), store: o.Store, proxies: map[string]*httputil.ReverseProxy{}}
+	s := &Server{o: o, oc: oc, mux: http.NewServeMux(), store: o.Store, proxies: map[string]*httputil.ReverseProxy{}, audit: o.Audit}
 	if s.store == nil {
 		s.store = NewMemoryStore(o.MaxSessions, func() time.Time { return s.oc.now() })
 	}
@@ -128,9 +133,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	now := s.oc.now()
 	switch err := s.store.SavePending(r.Context(), state, Pending{verifier, nonce, now.Add(s.o.LoginTimeout)}, s.o.LoginTimeout); {
 	case errors.Is(err, ErrFull):
+		s.loginDeniedBeforeClaims()
 		jsonErr(w, http.StatusServiceUnavailable, "busy", "too many logins in progress")
 		return
 	case err != nil:
+		s.loginDeniedBeforeClaims()
 		s.o.Logger.Printf("login: store: %v", err)
 		jsonErr(w, http.StatusServiceUnavailable, "unavailable", "session store unavailable")
 		return
@@ -146,43 +153,56 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	s.setCookie(w, "astryon_login", "", -1)
 	p, ok, perr := s.store.TakePending(r.Context(), state) // single use
 	if perr != nil {
+		s.loginDeniedBeforeClaims()
 		s.o.Logger.Printf("callback: store: %v", perr)
 		jsonErr(w, http.StatusServiceUnavailable, "unavailable", "session store unavailable")
 		return
 	}
 	if err != nil || state == "" || subtle.ConstantTimeCompare([]byte(c.Value), []byte(state)) != 1 || !ok || s.oc.now().After(p.Exp) {
+		s.loginDeniedBeforeClaims()
 		jsonErr(w, http.StatusBadRequest, "invalid_state", "login state is missing, expired or does not belong to this browser")
 		return
 	}
 	if e := q.Get("error"); e != "" {
+		s.loginDeniedBeforeClaims()
 		jsonErr(w, http.StatusUnauthorized, "login_denied", "AAS refused the login: "+safeCode(e))
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
+		s.loginDeniedBeforeClaims()
 		jsonErr(w, http.StatusBadRequest, "invalid_request", "missing code")
 		return
 	}
 	tok, err := s.oc.exchange(r.Context(), code, p.Verifier)
 	if err != nil {
+		s.loginDeniedBeforeClaims()
 		s.o.Logger.Printf("code exchange failed: %v", err)
 		jsonErr(w, http.StatusBadGateway, "token_exchange_failed", "could not complete the login")
 		return
 	}
-	sub, sid := "", ""
+	claims := identityClaims{}
 	if tok.ID != "" {
-		if sub, sid, err = s.oc.idClaims(tok.ID, p.Nonce); err != nil {
+		if claims, err = s.oc.idClaims(tok.ID, p.Nonce); err != nil {
+			s.loginDeniedBeforeClaims()
 			s.o.Logger.Printf("id_token rejected: %v", err)
 			jsonErr(w, http.StatusUnauthorized, "invalid_id_token", "identity token was rejected")
 			return
 		}
+	} else {
+		s.loginDeniedBeforeClaims()
+		jsonErr(w, http.StatusUnauthorized, "invalid_id_token", "identity token was rejected")
+		return
 	}
 	id := randString(32)
-	if err := s.store.CreateSession(r.Context(), id, Record{Tok: tok, Sub: sub, SID: sid, Created: s.oc.now()}, s.o.SessionMaxAge); err != nil {
+	rec := Record{Tok: tok, Sub: claims.Sub, SID: claims.SID, Tenant: claims.TenantID, Client: claims.ClientID, ACR: claims.ACR, AMR: claims.AMR, Created: s.oc.now()}
+	if err := s.store.CreateSession(r.Context(), id, rec, s.o.SessionMaxAge); err != nil {
+		s.auditSession(rec, "session.login", audit.OutcomeFailure)
 		s.o.Logger.Printf("callback: store: %v", err)
 		jsonErr(w, http.StatusServiceUnavailable, "unavailable", "session store unavailable")
 		return
 	}
+	s.auditSession(rec, "session.login", audit.OutcomeSuccess)
 	s.setCookie(w, "astryon_session", id, int(s.o.SessionMaxAge.Seconds()))
 	http.Redirect(w, r, s.o.AfterLoginPath, http.StatusFound)
 }
@@ -214,6 +234,7 @@ func (s *Server) lookup(r *http.Request) (string, *Record) {
 	}
 	if s.oc.now().Sub(rec.Created) > s.o.SessionMaxAge {
 		_ = s.store.DeleteSession(r.Context(), c.Value)
+		s.auditSession(rec, "session.expired", audit.OutcomeSuccess)
 		return "", nil
 	}
 	return c.Value, &rec
@@ -259,6 +280,11 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if id != "" {
 		if err := s.store.DeleteSession(r.Context(), id); err != nil {
 			s.o.Logger.Printf("logout: store: %v", err)
+			if se != nil {
+				s.auditSession(*se, "session.logout", audit.OutcomeFailure)
+			}
+		} else if se != nil {
+			s.auditSession(*se, "session.logout", audit.OutcomeSuccess)
 		}
 	}
 	s.setCookie(w, "astryon_session", "", -1)
@@ -305,6 +331,8 @@ func (s *Server) accessToken(ctx context.Context, id string) (string, bool) {
 		return rec.Tok.Access, true
 	}
 	if rec.Tok.Refresh == "" {
+		_ = s.store.DeleteSession(ctx, id)
+		s.auditSession(rec, "session.expired", audit.OutcomeSuccess)
 		return "", false
 	}
 	nt, err := s.oc.refresh(ctx, rec.Tok.Refresh)
@@ -314,6 +342,7 @@ func (s *Server) accessToken(ctx context.Context, id string) (string, bool) {
 		}
 		s.o.Logger.Printf("refresh failed, session dropped: %v", err)
 		_ = s.store.DeleteSession(ctx, id)
+		s.auditSession(rec, "session.expired", audit.OutcomeSuccess)
 		return "", false
 	}
 	if nt.Refresh == "" {

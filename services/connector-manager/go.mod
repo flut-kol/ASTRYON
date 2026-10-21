@@ -3,6 +3,7 @@ module github.com/astryon/connector-manager
 go 1.27.0
 
 require (
+	github.com/astryon/audit v0.0.0
 	github.com/astryon/event-contracts v0.0.0
 	github.com/astryon/go-common v0.0.0
 	github.com/jackc/pgx/v5 v5.5.5
@@ -22,4 +23,5 @@ require (
 )
 
 replace github.com/astryon/event-contracts => ../../libs/event-contracts
+replace github.com/astryon/audit => ../../libs/audit
 replace github.com/astryon/go-common => ../../libs/go-common

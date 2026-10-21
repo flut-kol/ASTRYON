@@ -26,6 +26,7 @@ const (
 	DefaultLimit = 100
 	MaxLimit     = 1000
 	MaxRange     = 31 * 24 * time.Hour
+	MaxTextQuery = 256
 	maxBody      = 1 << 20
 )
 
@@ -42,6 +43,7 @@ type Server struct {
 	Versions                          VersionResolver // active processing_version per source; nil = processing_version required
 	AggCacheTTL                       time.Duration   // >0 caches aggregate results this long (opt-in; results may be that stale)
 	AggCacheMax                       int             // cache entry bound; 0 = DefaultAggCacheMax
+	Audit                             AuditSink       // nil disables PostgreSQL audit persistence
 
 	aggOnce sync.Once
 	aggC    *aggCache
@@ -50,6 +52,7 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/query/events", s.wrap("events", s.events))
+	mux.HandleFunc("POST /v1/query/text", s.wrap("text", s.text))
 	mux.HandleFunc("POST /v1/query/aggregate", s.wrap("aggregate", s.aggregate))
 	s.summaryHandlers(mux)
 	return mux
@@ -90,16 +93,23 @@ func (s *Server) serve(group string, w http.ResponseWriter, r *http.Request, h h
 	p, err := s.Auth.Authenticate(r)
 	if err != nil {
 		Stats.authFailure("unauthenticated")
+		Stats.auditGap("unauthenticated_no_tenant")
 		fail(&apiError{status: 401, Code: "unauthenticated", Message: "invalid or missing credentials"})
 		return
 	}
 	if !p.HasScope(ScopeQueryRead) {
 		Stats.authFailure("missing_scope")
+		if uuidRe.MatchString(p.TenantID) {
+			s.auditDenied(p, group, rid)
+		} else {
+			Stats.auditGap("invalid_tenant")
+		}
 		fail(&apiError{status: 403, Code: "forbidden", Message: "missing scope " + ScopeQueryRead})
 		return
 	}
 	if !uuidRe.MatchString(p.TenantID) {
 		Stats.authFailure("invalid_tenant")
+		Stats.auditGap("invalid_tenant")
 		fail(&apiError{status: 403, Code: "forbidden", Message: "principal has no valid tenant"})
 		return
 	}
@@ -267,6 +277,71 @@ func (s *Server) events(ctx context.Context, p Principal, body []byte) (any, err
 		w.params.Set("param_p_ce", c.E)
 	}
 	q := fmt.Sprintf(`SELECT event_id, source_id, batch_id, processing_version, event_type, event_time, entity_id, attributes, payload, quality_flags
+FROM %s WHERE %s ORDER BY event_time, event_id
+LIMIT 1 BY tenant_id, source_id, event_id, processing_version
+LIMIT %d FORMAT JSONEachRow`, s.table(), strings.Join(w.sql, " AND "), req.Limit+1)
+	rows, err := s.run(ctx, q, w.params)
+	if err != nil {
+		return nil, err
+	}
+	next := ""
+	if len(rows) > req.Limit {
+		rows = rows[:req.Limit]
+		last := rows[len(rows)-1]
+		t, _ := last["event_time"].(string)
+		id, _ := last["event_id"].(string)
+		if len(t) >= 23 {
+			next = encodeCursor(cursor{T: t[:23], E: id})
+		}
+	}
+	return map[string]any{"items": rows, "next_cursor": next}, nil
+}
+
+// TextRequest is the body of POST /v1/query/text. The query is tokenized by
+// ClickHouse hasToken; it is deliberately bounded because this endpoint is
+// intended for interactive AdminUI lookup, not arbitrary full-text search.
+type TextRequest struct {
+	Filter
+	Query  string `json:"query"`
+	Limit  int    `json:"limit"`
+	Cursor string `json:"cursor"`
+}
+
+func (s *Server) text(ctx context.Context, p Principal, body []byte) (any, error) {
+	var req TextRequest
+	if err := decode(body, &req); err != nil {
+		return nil, err
+	}
+	if n := len(strings.TrimSpace(req.Query)); n == 0 || n > MaxTextQuery {
+		return nil, bad("invalid_query", fmt.Sprintf("query must be 1..%d bytes", MaxTextQuery))
+	}
+	if req.Limit == 0 {
+		req.Limit = DefaultLimit
+	}
+	if req.Limit < 1 || req.Limit > MaxLimit {
+		return nil, bad("invalid_limit", fmt.Sprintf("limit must be 1..%d", MaxLimit))
+	}
+	if err := s.resolveVersion(ctx, p, &req.Filter); err != nil {
+		return nil, err
+	}
+	w, err := req.Filter.build(p)
+	if err != nil {
+		return nil, err
+	}
+	// Keep the query bound (never interpolated) and use hasToken directly so a
+	// payload token-bloom/inverted index can be selected by ClickHouse.
+	w.add("hasToken(payload, {p_text:String})", "p_text", strings.TrimSpace(req.Query))
+	if req.Cursor != "" {
+		c, err := decodeCursor(req.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		w.add("(event_time, event_id) > ({p_ct:DateTime64(3, 'UTC')}, {p_ce:UUID})", "p_ct", c.T)
+		w.params.Set("param_p_ce", c.E)
+	}
+	// Return only metadata. Payload and attributes may contain sensitive file
+	// contents and are never exposed by the AdminUI search endpoint.
+	q := fmt.Sprintf(`SELECT event_id, source_id, batch_id, processing_version, event_type, event_time, entity_id, quality_flags
 FROM %s WHERE %s ORDER BY event_time, event_id
 LIMIT 1 BY tenant_id, source_id, event_id, processing_version
 LIMIT %d FORMAT JSONEachRow`, s.table(), strings.Join(w.sql, " AND "), req.Limit+1)

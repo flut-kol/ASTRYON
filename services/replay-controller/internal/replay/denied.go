@@ -27,12 +27,15 @@ type DeniedEvent struct {
 	EventID   string    `json:"event_id"`
 	Time      time.Time `json:"ts"`
 	Action    string    `json:"action"` // auth.denied
+	TenantID  string    `json:"-"`      // trusted claim for the optional audit_log mirror; never in the machine denial payload
 	RequestID string    `json:"request_id"`
 	Path      string    `json:"path"`
 	Method    string    `json:"method"`
 	Reason    string    `json:"reason"`
 	RemoteIP  string    `json:"remote_ip"`
 	Subject   string    `json:"subject,omitempty"`
+	ClientID  string    `json:"-"` // trusted claim for the optional audit_log mirror
+	ACR       string    `json:"-"` // trusted claim for the optional audit_log mirror
 }
 
 // DeniedSink is implemented by sinks that can record auth.denied events (Kafka key = truncated remote_ip).
@@ -152,6 +155,12 @@ const (
 // auditDenied records an auth.denied event best effort: rate limited per (remote_ip, reason), published asynchronously
 // with bounded concurrency so a slow broker never delays or blocks the 401/403 response.
 func (h *Handler) auditDenied(r *http.Request, reason, subject string) {
+	h.auditDeniedPrincipal(r, reason, Principal{Subject: subject})
+}
+
+// auditDeniedPrincipal carries tenant and actor claims only after successful token validation. An
+// unauthenticated request intentionally has no tenant and is never mirrored into audit_log.
+func (h *Handler) auditDeniedPrincipal(r *http.Request, reason string, p Principal) {
 	ds, ok := h.Audit.(DeniedSink)
 	if !ok {
 		return
@@ -164,8 +173,9 @@ func (h *Handler) auditDenied(r *http.Request, reason, subject string) {
 	if !h.denyLim.allow(ip + "|" + reason) {
 		return
 	}
-	e := DeniedEvent{Time: time.Now().UTC(), Action: ActionAuthDenied, RequestID: requestID(r.Header.Get("X-Request-Id")),
-		Path: safeStr(r.URL.Path, 128), Method: safeStr(r.Method, 16), Reason: reason, RemoteIP: ip, Subject: safeStr(subject, 128)}
+	e := DeniedEvent{Time: time.Now().UTC(), Action: ActionAuthDenied, TenantID: p.TenantID, RequestID: requestID(r.Header.Get("X-Request-Id")),
+		Path: safeStr(r.URL.Path, 128), Method: safeStr(r.Method, 16), Reason: reason, RemoteIP: ip,
+		Subject: safeStr(p.Subject, 128), ClientID: safeStr(p.ClientID, 128), ACR: safeStr(p.ACR, 128)}
 	hh := sha256.Sum256([]byte(strings.Join([]string{ActionAuthDenied, e.RequestID, e.Reason, e.RemoteIP, e.Path, e.Method}, "\x1f")))
 	e.EventID = hex.EncodeToString(hh[:16])
 	select {

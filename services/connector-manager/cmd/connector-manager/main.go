@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/astryon/audit"
 	"github.com/astryon/connector-manager/internal/adminapi"
 	"github.com/astryon/connector-manager/internal/cdc"
 	"github.com/astryon/connector-manager/internal/connstore"
@@ -52,6 +53,10 @@ func run(ctx context.Context, getenv func(string) string) error {
 			return errors.New("ASTRYON_CONNECTOR_SYNC_INTERVAL must be a positive duration")
 		}
 	}
+	auditCfg, err := loadAuditConfig(getenv)
+	if err != nil {
+		return err
+	}
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		return fmt.Errorf("postgres: %w", err)
@@ -82,10 +87,64 @@ func run(ctx context.Context, getenv func(string) string) error {
 		defer stopCDC()
 	}
 
+	var auditWriter *audit.Writer
+	var auditPool *pgxpool.Pool
+	if auditCfg.PGURL != "" {
+		pc, err := pgxpool.ParseConfig(auditCfg.PGURL)
+		if err != nil {
+			return errors.New("ASTRYON_AUDIT_PG_URL is invalid")
+		}
+		pc.MaxConns = auditCfg.PGMaxConns
+		auditPool, err = pgxpool.NewWithConfig(ctx, pc)
+		if err != nil {
+			return fmt.Errorf("audit postgres: %w", err)
+		}
+		pingCtx, cancel := context.WithTimeout(ctx, auditCfg.WriteTimeout)
+		err = auditPool.Ping(pingCtx)
+		cancel()
+		if err != nil {
+			auditPool.Close()
+			return fmt.Errorf("audit postgres: %w", err)
+		}
+		retries := auditCfg.Retries
+		if retries == 0 {
+			retries = -1 // audit.Config reserves zero for its default of two retries.
+		}
+		auditWriter = audit.NewWriter(auditPool, audit.Config{QueueSize: auditCfg.QueueSize, BatchSize: auditCfg.BatchSize,
+			FlushInterval: auditCfg.FlushInterval, WriteTimeout: auditCfg.WriteTimeout, Retries: retries,
+			OnDrop: func(e audit.Event, reason error) {
+				log.Printf("connector-manager audit event dropped: action=%s reason_type=%T", e.Action, reason)
+			}})
+	}
+
+	var admin *http.Server
+	if addr := getenv("ASTRYON_CONNECTOR_ADMIN_ADDR"); addr != "" {
+		auth, err := newAuthenticator(ctx, getenv)
+		if err != nil {
+			if auditWriter != nil {
+				closeCtx, cancel := context.WithTimeout(context.Background(), auditCfg.DrainTimeout)
+				_ = auditWriter.Close(closeCtx)
+				cancel()
+				auditPool.Close()
+			}
+			return fmt.Errorf("admin auth: %w", err)
+		}
+		if auditWriter == nil {
+			log.Print("WARNING: ASTRYON_AUDIT_PG_URL unset: connector admin mutations and authorization denials are not persisted")
+		}
+		cs := &connstore.Store{Pool: pool}
+		api := &adminapi.Server{Auth: auth, Store: cs, Sources: cs, Audit: auditWriter}
+		admin = &http.Server{Addr: addr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	}
+
 	var srv *http.Server
 	if addr := getenv("ASTRYON_CONNECTOR_METRICS_ADDR"); addr != "" {
 		mux := http.NewServeMux()
-		mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) { r.M.WritePrometheus(w) })
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+			r.M.WritePrometheus(w)
+			writeAuditMetrics(w, auditWriter)
+		})
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 		srv = &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
@@ -94,16 +153,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 			}
 		}()
 	}
-	var admin *http.Server
-	if addr := getenv("ASTRYON_CONNECTOR_ADMIN_ADDR"); addr != "" {
-		auth, err := newAuthenticator(ctx, getenv)
-		if err != nil {
-			return fmt.Errorf("admin auth: %w", err)
-		}
-		cs := &connstore.Store{Pool: pool}
-		api := &adminapi.Server{Auth: auth, Store: cs, Sources: cs}
-		admin = &http.Server{Addr: addr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	if admin != nil {
 		go func() {
 			if err := admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("admin server: %v", err)
@@ -132,6 +182,14 @@ func run(ctx context.Context, getenv func(string) string) error {
 	}
 	if admin != nil {
 		_ = admin.Shutdown(sctx)
+	}
+	if auditWriter != nil {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), auditCfg.DrainTimeout)
+		if closeErr := auditWriter.Close(closeCtx); closeErr != nil {
+			log.Printf("connector-manager audit drain: %v", closeErr)
+		}
+		closeCancel()
+		auditPool.Close()
 	}
 	return err
 }

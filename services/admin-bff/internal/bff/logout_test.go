@@ -186,8 +186,8 @@ func storeContract(t *testing.T, st Store) {
 	}
 	id2 := "s-" + randString(6)
 	_ = st.CreateSession(ctx, id2, Record{Sub: sub, SID: "sid2-" + randString(4), Created: time.Now()}, time.Hour)
-	if n, err := st.DeleteBySID(ctx, sid); n != 1 || err != nil {
-		t.Fatalf("DeleteBySID = %d %v", n, err)
+	if deleted, err := st.DeleteBySID(ctx, sid); len(deleted) != 1 || err != nil {
+		t.Fatalf("DeleteBySID = %d %v", len(deleted), err)
 	}
 	if _, ok, _ := st.GetSession(ctx, id); ok {
 		t.Fatal("sid delete missed")
@@ -195,15 +195,15 @@ func storeContract(t *testing.T, st Store) {
 	if _, ok, _ := st.GetSession(ctx, id2); !ok {
 		t.Fatal("sid delete too broad")
 	}
-	if n, _ := st.DeleteBySub(ctx, sub); n != 1 {
-		t.Fatalf("DeleteBySub = %d", n)
+	if deleted, _ := st.DeleteBySub(ctx, sub); len(deleted) != 1 {
+		t.Fatalf("DeleteBySub = %d", len(deleted))
 	}
 	_ = st.CreateSession(ctx, id, rec, time.Hour)
 	_ = st.DeleteSession(ctx, id)
 	if _, ok, _ := st.GetSession(ctx, id); ok {
 		t.Fatal("delete failed")
 	}
-	if n, _ := st.DeleteBySID(ctx, sid); n != 0 {
+	if deleted, _ := st.DeleteBySID(ctx, sid); len(deleted) != 0 {
 		t.Fatal("index not cleaned")
 	}
 	state := randString(8)

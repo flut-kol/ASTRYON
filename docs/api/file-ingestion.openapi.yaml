@@ -127,7 +127,37 @@ paths:
         '422':
           description: |
             `CHECKSUM_MISMATCH` (content differs from the declared SHA-256/size; the object was deleted, create a new upload) or
-            `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry).
+            `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry), or
+            `ARCHIVE_REJECTED` (when archive inspection is enabled and the bounded safety inspection fails). In
+            `FILE_ARCHIVE_MODE=inspect`, allow-listed ZIP/TAR/GZIP uploads are inspected as metadata only and return
+            `mode: archive_inspect` without creating a processing job. The default mode rejects archive MIME types.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/preview:
+    get:
+      operationId: previewUpload
+      summary: Preview safe text content or receive redacted metadata
+      description: |
+        Requires `astryon:data:read` (or `astryon:uploads:write`) and is tenant-scoped. Only committed `text/csv`
+        and `application/x-ndjson` objects can be returned inline, capped at 64 KiB and 200 lines. The response is
+        metadata-only for uncommitted, quarantined, credentials-labelled, or PII-labelled objects; matched values are
+        never returned. Archives and Parquet are not extracted or previewed. `X-Preview-Truncated: true` indicates a
+        safe content response was capped.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Inline safe content or metadata-only JSON
+          headers:
+            X-Preview-Mode: { schema: { type: string, enum: [content, metadata-only] } }
+            X-Preview-Truncated: { schema: { type: boolean } }
+          content:
+            text/plain:
+              schema: { type: string, description: Bounded CSV/NDJSON content; values are returned only when the object is safe. }
+            application/json:
+              schema: { $ref: '#/components/schemas/PreviewMetadata' }
+        '415':
+          description: Unsupported preview format, including archives and Parquet.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         default: { $ref: '#/components/responses/Error' }
   /v1/jobs:
@@ -209,7 +239,13 @@ components:
         tags:
           type: object
           maxProperties: 16
-          description: Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles require tags (e.g. `purpose`).
+          description: |
+            Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles
+            require tags (e.g. `purpose`). Archive password candidates are never enabled by a generic upload option:
+            both `archive_passwords=enabled|true|1` and a non-empty `archive_password_campaign` are required. The
+            latter selects an administrator-managed, tenant-scoped candidate set; it is not a generated dictionary or
+            unrestricted brute force. Missing/invalid tags mean zero password attempts. Candidate values are never
+            persisted, returned, or written to logs/audit.
           additionalProperties: { type: string, maxLength: 64 }
         sensitivity:
           type: string
@@ -303,6 +339,15 @@ components:
         file_object_id: { type: string, format: uuid }
         status: { const: committed }
         job_id: { type: string, format: uuid }
+    PreviewMetadata:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, const: metadata-only }
+        reason: { type: string, description: Reason such as uncommitted, quarantined, sensitive_labels, or unsupported_format. }
+        file_object_id: { type: string, format: uuid }
+        content_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
     JobStatus: { type: string, enum: [NEW, QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED, QUARANTINED] }
     Job:
       type: object

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -209,25 +210,37 @@ func (c *oidcClient) assertion() (string, error) {
 
 // idClaims checks the ID token received directly from the token endpoint over TLS (OIDC Core 3.1.3.7 allows
 // TLS server validation in place of a signature): issuer, audience, expiry and nonce. It returns sub.
-func (c *oidcClient) idClaims(idToken, nonce string) (sub, sid string, err error) {
+type identityClaims struct {
+	Sub, SID, TenantID, ClientID, ACR string
+	AMR                               []string
+}
+
+var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+func (c *oidcClient) idClaims(idToken, nonce string) (identityClaims, error) {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
-		return "", "", errors.New("id_token malformed")
+		return identityClaims{}, errors.New("id_token malformed")
 	}
 	raw, err2 := base64.RawURLEncoding.DecodeString(parts[1])
 	if err2 != nil {
-		return "", "", errors.New("id_token malformed")
+		return identityClaims{}, errors.New("id_token malformed")
 	}
 	var cl struct {
-		Iss   string `json:"iss"`
-		Sub   string `json:"sub"`
-		Aud   any    `json:"aud"`
-		Exp   int64  `json:"exp"`
-		Nonce string `json:"nonce"`
-		SID   string `json:"sid"`
+		Iss      string   `json:"iss"`
+		Sub      string   `json:"sub"`
+		Aud      any      `json:"aud"`
+		Exp      int64    `json:"exp"`
+		Nonce    string   `json:"nonce"`
+		SID      string   `json:"sid"`
+		TenantID string   `json:"tenant_id"`
+		ClientID string   `json:"client_id"`
+		AZP      string   `json:"azp"`
+		ACR      string   `json:"acr"`
+		AMR      []string `json:"amr"`
 	}
 	if json.Unmarshal(raw, &cl) != nil {
-		return "", "", errors.New("id_token malformed")
+		return identityClaims{}, errors.New("id_token malformed")
 	}
 	issuer := c.ep.Issuer
 	if issuer == "" {
@@ -244,17 +257,25 @@ func (c *oidcClient) idClaims(idToken, nonce string) (sub, sid string, err error
 	}
 	switch {
 	case cl.Iss != issuer:
-		return "", "", errors.New("id_token issuer mismatch")
+		return identityClaims{}, errors.New("id_token issuer mismatch")
 	case !aud:
-		return "", "", errors.New("id_token audience mismatch")
+		return identityClaims{}, errors.New("id_token audience mismatch")
 	case cl.Exp <= c.now().Unix():
-		return "", "", errors.New("id_token expired")
+		return identityClaims{}, errors.New("id_token expired")
 	case cl.Nonce != nonce:
-		return "", "", errors.New("id_token nonce mismatch")
+		return identityClaims{}, errors.New("id_token nonce mismatch")
 	case cl.Sub == "":
-		return "", "", errors.New("id_token has no sub")
+		return identityClaims{}, errors.New("id_token has no sub")
+	case !tenantIDPattern.MatchString(cl.TenantID):
+		return identityClaims{}, errors.New("id_token tenant_id is not a UUID")
+	case len(cl.Sub) > 256 || len(cl.ClientID) > 256 || len(cl.AZP) > 256 || len(cl.ACR) > 256:
+		return identityClaims{}, errors.New("id_token identity claim too long")
 	}
-	return cl.Sub, cl.SID, nil
+	clientID := cl.ClientID
+	if clientID == "" {
+		clientID = cl.AZP
+	}
+	return identityClaims{Sub: cl.Sub, SID: cl.SID, TenantID: cl.TenantID, ClientID: clientID, ACR: cl.ACR, AMR: cl.AMR}, nil
 }
 
 func loadKey(path string) (*ecdsa.PrivateKey, error) {

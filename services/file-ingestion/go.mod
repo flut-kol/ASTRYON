@@ -3,6 +3,7 @@ module github.com/astryon/file-ingestion
 go 1.27.0
 
 require (
+	github.com/astryon/audit v0.0.0-00010101000000-000000000000
 	github.com/astryon/go-common v0.0.0-00010101000000-000000000000
 	github.com/astryon/retry-controller v0.0.0-00010101000000-000000000000
 	github.com/jackc/pgx/v5 v5.9.2
@@ -27,6 +28,8 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 )
+
+replace github.com/astryon/audit => ../../libs/audit
 
 replace github.com/astryon/go-common => ../../libs/go-common
 

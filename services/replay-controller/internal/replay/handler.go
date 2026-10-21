@@ -42,7 +42,7 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (Principal, 
 	}
 	if !p.HasScope(ScopeReplayWrite) {
 		h.Metrics.IncRejected("forbidden")
-		h.auditDenied(r, ReasonMissingScope, p.Subject)
+		h.auditDeniedPrincipal(r, ReasonMissingScope, p)
 		writeErr(w, 403, "forbidden", "missing scope "+ScopeReplayWrite)
 		return Principal{}, false
 	}
@@ -95,7 +95,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	h.Metrics.IncRequested(req.DryRun)
 	rid := requestID(r.Header.Get("X-Request-Id"))
 	startEv := func(pl Plan, phase, outcome string) AuditEvent {
-		return AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: ActionStart, ReplayID: pl.JobID,
+		return AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, Action: ActionStart, ReplayID: pl.JobID,
 			SourceID: pl.SourceID, FromVersion: ptr32(int32(pl.BasedOnVersion)), ToVersion: ptr32(int32(pl.ProcessingVersion)), // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 			Outcome: outcome, Phase: phase, RequestID: rid}
 	}
@@ -141,7 +141,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case plan.DryRun:
-		h.record(r.Context(), AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: ActionPlan, ReplayID: plan.JobID,
+		h.record(r.Context(), AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, Action: ActionPlan, ReplayID: plan.JobID,
 			SourceID: plan.SourceID, FromVersion: ptr32(int32(plan.BasedOnVersion)), ToVersion: ptr32(int32(plan.ProcessingVersion)), // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 			Outcome: OutcomeSuccess, RequestID: rid})
 	case prepared == nil:
@@ -180,7 +180,7 @@ func (h *Handler) activate(w http.ResponseWriter, r *http.Request) {
 	rid := requestID(r.Header.Get("X-Request-Id"))
 	replayID := r.PathValue("id")
 	event := func(a Activation, outcome string) AuditEvent {
-		return AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: "replay." + a.Action,
+		return AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, Action: "replay." + a.Action,
 			ReplayID: a.ReplayID, SourceID: a.SourceID, FromVersion: a.PreviousProcessingVersion,
 			ToVersion: ptr32(a.ActiveProcessingVersion), Outcome: outcome, RequestID: rid}
 	}
@@ -205,7 +205,7 @@ func (h *Handler) activate(w http.ResponseWriter, r *http.Request) {
 	}
 	act, err := h.Activator.Activate(r.Context(), p.TenantID, replayID, rb, p.Subject, pre)
 	rejected := func(action string) {
-		h.record(r.Context(), AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: action,
+		h.record(r.Context(), AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, Action: action,
 			ReplayID: replayID, Outcome: OutcomeRejected, RequestID: rid})
 	}
 	reqAction := ActionActivate

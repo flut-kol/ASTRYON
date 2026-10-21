@@ -16,6 +16,9 @@ func TestMetricsRender(t *testing.T) {
 	m.exportDone("row_cap_exceeded", 5, 50, 20)
 	m.exportDone("row_cap_exceeded", 0, 0, 5000)
 	m.queueError("claim")
+	m.SetAuditStatsProvider(func() AuditWriterStats {
+		return AuditWriterStats{Queued: 7, Written: 5, Dropped: 2, Rejected: 1}
+	})
 	var b bytes.Buffer
 	m.WritePrometheus(&b)
 	out := b.String()
@@ -24,6 +27,8 @@ func TestMetricsRender(t *testing.T) {
 		"astryon_export_rows_total 15", "astryon_export_bytes_total 150",
 		`astryon_export_failed_total{code="row_cap_exceeded"} 2`,
 		`astryon_export_queue_errors_total{op="claim"} 1`,
+		"astryon_audit_queued_total 7", "astryon_audit_written_total 5",
+		"astryon_audit_dropped_total 2", "astryon_audit_rejected_total 1",
 		`astryon_export_duration_seconds_bucket{le="1"} 1`,
 		`astryon_export_duration_seconds_bucket{le="60"} 2`,
 		`astryon_export_duration_seconds_bucket{le="+Inf"} 3`,

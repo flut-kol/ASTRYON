@@ -30,11 +30,33 @@ var tenantUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 type BrowserPrincipal struct {
 	TenantID string
 	Subject  string
+	ClientID string
+	ACR      string
 	Scopes   map[string]bool
 }
 
 type BrowserAuthenticator interface {
 	Authenticate(*http.Request) (BrowserPrincipal, error)
+}
+
+// AuditMirror is an optional best-effort secondary audit sink. The Kafka
+// ReplayAuditSink remains authoritative and is always called first on replay
+// publication paths. MirrorEvent contains claims and bounded identifiers only.
+type AuditMirror interface {
+	RecordMirror(context.Context, MirrorEvent) error
+}
+
+type MirrorEvent struct {
+	TenantID     string
+	Subject      string
+	ClientID     string
+	ACR          string
+	Action       string
+	Outcome      string
+	ResourceType string
+	ResourceID   string
+	TraceID      string
+	RequestID    string
 }
 
 // QuarantineRecord contains only browser-safe metadata by default. Original
@@ -76,6 +98,7 @@ type BrowserHandler struct {
 	ReplayPlanner ReplayDryRunPlanner
 	ReplayJobs    ReplayJobPublisher
 	Audit         ReplayAuditSink
+	AuditMirror   AuditMirror
 	Now           func() time.Time
 }
 

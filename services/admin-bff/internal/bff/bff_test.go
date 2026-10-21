@@ -36,10 +36,11 @@ type fakeAAS struct {
 	tokenType  string
 	key        *ecdsa.PrivateKey
 	sub, sid   string
+	tenant     string
 }
 
 func newFakeAAS(t *testing.T) *fakeAAS {
-	f := &fakeAAS{codes: map[string]struct{ challenge, nonce string }{}, expiresIn: 300, tokenType: "Bearer", sub: "user-1", sid: "sid-1"}
+	f := &fakeAAS{codes: map[string]struct{ challenge, nonce string }{}, expiresIn: 300, tokenType: "Bearer", sub: "user-1", sid: "sid-1", tenant: "11111111-1111-4111-8111-111111111111"}
 	f.key, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -100,7 +101,8 @@ func newFakeAAS(t *testing.T) *fakeAAS {
 }
 
 func (f *fakeAAS) idToken(nonce string) string {
-	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": f.sub, "sid": f.sid, "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce})
+	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": f.sub, "sid": f.sid, "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce,
+		"tenant_id": f.tenant, "azp": "astryon-portal", "acr": "mfa", "amr": []string{"pwd", "otp"}})
 	return b64u([]byte(`{"alg":"ES256"}`)) + "." + b64u(cl) + "." + b64u([]byte("sig"))
 }
 

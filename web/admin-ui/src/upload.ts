@@ -1,4 +1,4 @@
-import { call, ApiError, type Ctx } from './http';
+import { call, ApiError, parseError, type Ctx } from './http';
 
 export const SOURCE_TYPES = ['unknown', 'telemetry', 'geo', 'report', 'export', 'config', 'log', 'credentials_bundle', 'personal_data', 'financial', 'media_meta', 'reference'] as const;
 export const SENSITIVITIES = ['public', 'internal', 'restricted'] as const;
@@ -44,6 +44,23 @@ export function labelSummary(l: Labels | undefined): string {
 export interface ListFilter { source_type?: string; sensitivity?: string; tag?: string; status?: string; label?: string; cursor?: string; limit?: string }
 export const listUploads = (c: Ctx, base: string, f: ListFilter) => call<UploadPage>(c, base, '/v1/files/uploads', { query: { ...f } });
 export const getUpload = (c: Ctx, base: string, id: string) => call<UploadItem>(c, base, `/v1/files/uploads/${encodeURIComponent(id)}`);
+
+export type UploadPreview = { mode: 'content' | 'metadata-only'; content_type?: string; content?: string; reason?: string; [key: string]: unknown };
+/** Fetches the bounded, policy-filtered preview. The endpoint may return text for safe files or JSON metadata. */
+export async function previewUpload(c: Ctx, base: string, id: string): Promise<UploadPreview> {
+  const f = c.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
+  const headers: Record<string, string> = { Accept: 'text/plain, application/json' };
+  const tok = c.bff ? null : c.getToken();
+  if (tok) headers.Authorization = `Bearer ${tok}`;
+  let res: Response;
+  try { res = await f(`${base.replace(/\/$/, '')}/v1/files/uploads/${encodeURIComponent(id)}/preview`, { headers, credentials: 'same-origin' }); }
+  catch (e) { throw new ApiError(0, 'network_error', e instanceof Error ? e.message : 'network error'); }
+  const reqId = res.headers.get('X-Request-ID') ?? undefined;
+  if (!res.ok) { let body: unknown; try { body = await res.json(); } catch { /* non-JSON */ } throw parseError(res.status, body, res.statusText || 'request failed', reqId); }
+  const ct = res.headers.get('Content-Type') ?? '';
+  if (ct.includes('json')) return { ...(await res.json() as Record<string, unknown>), mode: 'metadata-only' };
+  return { mode: 'content', content_type: ct, content: await res.text() };
+}
 
 export interface UploadParams { file: File; source_id: string; source_type: string; sensitivity?: string; tags: Record<string, string> }
 export async function uploadFile(c: Ctx, base: string, p: UploadParams, opts: { s3Proxy?: string; onProgress?: (msg: string) => void } = {}): Promise<{ file_object_id: string; job_id: string }> {

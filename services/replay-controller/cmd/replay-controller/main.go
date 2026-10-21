@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	commonaudit "github.com/astryon/audit"
 	goauth "github.com/astryon/go-common/auth"
 	"github.com/astryon/replay-controller/internal/replay"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +76,28 @@ func main() {
 	// Audit: Kafka audit.events.v1 when ASTRYON_KAFKA_BROKERS is set, else JSON lines on stdout (not durable).
 	// REPLAY_AUDIT_MODE=required|best_effort (default required with Kafka): required refuses an activation with 503
 	// before committing it when the audit event cannot be published.
+	m := &replay.Metrics{}
 	var audit replay.AuditSink = &replay.JSONAuditSink{W: os.Stdout}
+	var auditMirror *commonaudit.Writer
+	if u := os.Getenv("REPLAY_AUDIT_PG_URL"); u != "" {
+		pg, err := pgxpool.New(context.Background(), u)
+		if err != nil {
+			log.Fatalf("REPLAY_AUDIT_PG_URL: %v", err)
+		}
+		defer pg.Close()
+		auditMirror = commonaudit.NewWriter(pg, commonaudit.Config{OnDrop: func(_ commonaudit.Event, reason error) {
+			m.AuditMirrorDropped.Add(1)
+			log.Printf("replay audit: audit_log mirror drop: %v", reason)
+		}})
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := auditMirror.Close(ctx); err != nil {
+				log.Printf("replay audit: audit_log writer close: %v", err)
+			}
+		}()
+		log.Print("audit_log mirror enabled (REPLAY_AUDIT_PG_URL)")
+	}
 	kafkaOn := os.Getenv("ASTRYON_KAFKA_BROKERS") != ""
 	auditRequired, err := replay.ParseAuditMode(os.Getenv("REPLAY_AUDIT_MODE"), kafkaOn)
 	if err != nil {
@@ -103,7 +125,9 @@ func main() {
 	}
 	log.Printf("audit mode: required=%v", auditRequired) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
 	// REPLAY_METRICS_ADDR (off when unset): GET /metrics; a bare ":9107" binds 127.0.0.1 only, set a host to expose it.
-	m := &replay.Metrics{}
+	if auditMirror != nil {
+		audit = &replay.AuditMirrorSink{Primary: audit, Writer: auditMirror, Metrics: m}
+	}
 	replay.ServeMetrics(os.Getenv("REPLAY_METRICS_ADDR"), m.WritePrometheus, log.Printf)
 	pl := &replay.Planner{Alloc: alloc, Counter: ch, Publisher: replay.MeteredPublisher{Next: pub, M: m}}
 	addr := os.Getenv("REPLAY_ADDR")

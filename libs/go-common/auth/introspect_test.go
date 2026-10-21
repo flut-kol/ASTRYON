@@ -103,7 +103,7 @@ func (f *fakeAAS) assertionOK(a string) bool {
 
 func activeResp(jti string) map[string]any {
 	return map[string]any{"active": true, "sub": "u", "client_id": "svc", "jti": jti, "tenant_id": tenantID, "scope": "a b",
-		"exp": float64(time.Now().Add(time.Hour).Unix())}
+		"acr": "urn:astryon:acr:mfa", "amr": []any{"pwd", "otp"}, "exp": float64(time.Now().Add(time.Hour).Unix())}
 }
 
 func TestIntrospectorActiveInactiveAndCache(t *testing.T) {
@@ -116,7 +116,9 @@ func TestIntrospectorActiveInactiveAndCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err := in.Introspect(context.Background(), "good")
-	if err != nil || !r.Active || r.Principal().TenantID != tenantID || !r.Principal().HasScope("b") {
+	p := r.Principal()
+	if err != nil || !r.Active || p.TenantID != tenantID || !p.HasScope("b") ||
+		p.ACR != "urn:astryon:acr:mfa" || strings.Join(p.AMR, ",") != "pwd,otp" {
 		t.Fatalf("active: %+v %v", r, err)
 	}
 	_, _ = in.Introspect(context.Background(), "good")
@@ -142,6 +144,31 @@ func TestIntrospectorActiveInactiveAndCache(t *testing.T) {
 	_, _ = in.Introspect(context.Background(), "bad")
 	if f.hits.Load() != h+1 {
 		t.Fatal("negative cache did not expire")
+	}
+}
+
+func TestIntrospectionPrincipalOptionalAuthenticationContextClaims(t *testing.T) {
+	for name, claims := range map[string]map[string]any{
+		"absent":        {},
+		"wrong acr type": {"acr": true, "amr": []any{"pwd"}},
+		"wrong amr type": {"acr": "mfa", "amr": "pwd"},
+		"mixed amr":      {"acr": "mfa", "amr": []any{"pwd", false}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := (Introspection{Active: true, Claims: claims}).Principal()
+			if name == "wrong acr type" {
+				if p.ACR != "" || strings.Join(p.AMR, ",") != "pwd" {
+					t.Fatalf("authentication context = ACR %q, AMR %v", p.ACR, p.AMR)
+				}
+				return
+			}
+			if name != "absent" && p.ACR != "mfa" {
+				t.Fatalf("ACR = %q", p.ACR)
+			}
+			if p.AMR != nil {
+				t.Fatalf("AMR = %v, want nil", p.AMR)
+			}
+		})
 	}
 }
 

@@ -15,42 +15,34 @@ import (
 // aasAuth adapts the shared AAS verifier; any failure collapses to ErrUnauthenticated (fail closed).
 type aasAuth struct{ v *goauth.Verifier }
 
-func (a aasAuth) Authenticate(r *http.Request) (registry.Principal, error) {
+func (a aasAuth) Authenticate(r *http.Request) (goauth.Principal, error) {
 	p, err := a.v.Authenticate(r)
 	if err != nil {
-		return registry.Principal{}, adminapi.ErrUnauthenticated
+		return goauth.Principal{}, adminapi.ErrUnauthenticated
 	}
-	return toPrincipal(p.TenantID, p.Scopes), nil
-}
-
-func toPrincipal(tenant string, scopes []string) registry.Principal {
-	m := make(map[string]bool, len(scopes))
-	for _, s := range scopes {
-		m[s] = true
-	}
-	return registry.Principal{TenantID: tenant, Scopes: m}
+	return p, nil
 }
 
 // devAuth is DEV-ONLY: one static bearer token -> one fixed principal.
 type devAuth struct {
 	token string
-	p     registry.Principal
+	p     goauth.Principal
 }
 
-func (d devAuth) Authenticate(r *http.Request) (registry.Principal, error) {
+func (d devAuth) Authenticate(r *http.Request) (goauth.Principal, error) {
 	const pre = "Bearer "
 	h := r.Header.Get("Authorization")
 	if d.token == "" || len(h) <= len(pre) || !strings.EqualFold(h[:len(pre)], pre) ||
 		subtle.ConstantTimeCompare([]byte(strings.TrimSpace(h[len(pre):])), []byte(d.token)) != 1 {
-		return registry.Principal{}, adminapi.ErrUnauthenticated
+		return goauth.Principal{}, adminapi.ErrUnauthenticated
 	}
 	return d.p, nil
 }
 
 type denyAll struct{}
 
-func (denyAll) Authenticate(*http.Request) (registry.Principal, error) {
-	return registry.Principal{}, adminapi.ErrUnauthenticated
+func (denyAll) Authenticate(*http.Request) (goauth.Principal, error) {
+	return goauth.Principal{}, adminapi.ErrUnauthenticated
 }
 
 // newAuthenticator: AAS when ASTRYON_AAS_BASE_URL (+ ISSUER, AUDIENCE, ENV, ALLOWED_AZP, TOKEN_TYPE) is set;
@@ -60,7 +52,8 @@ func newAuthenticator(ctx context.Context, getenv func(string) string) (adminapi
 		if getenv("ASTRYON_CONNECTOR_DEV_TENANT") == "" {
 			return nil, errors.New("ASTRYON_CONNECTOR_DEV_TOKEN needs ASTRYON_CONNECTOR_DEV_TENANT")
 		}
-		return devAuth{token: t, p: toPrincipal(getenv("ASTRYON_CONNECTOR_DEV_TENANT"), []string{registry.ManageScope, adminapi.SourcesReadScope})}, nil
+		return devAuth{token: t, p: goauth.Principal{TenantID: getenv("ASTRYON_CONNECTOR_DEV_TENANT"),
+			ClientID: "connector-manager-dev", Scopes: []string{registry.ManageScope, adminapi.SourcesReadScope}}}, nil
 	}
 	if base := getenv("ASTRYON_AAS_BASE_URL"); base != "" {
 		var azp []string

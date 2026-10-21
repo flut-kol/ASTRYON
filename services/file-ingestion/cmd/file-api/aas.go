@@ -17,7 +17,7 @@ func (a aasAuthenticator) Authenticate(r *http.Request) (api.Principal, error) {
 	if err != nil {
 		return api.Principal{}, api.ErrUnauthenticated
 	}
-	return api.Principal{TenantID: p.TenantID, Scopes: p.Scopes}, nil
+	return api.Principal{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, AMR: p.AMR, Scopes: p.Scopes}, nil
 }
 
 // aasConfig reads AAS_BASE_URL AAS_ISSUER AAS_AUDIENCE AAS_ENV AAS_ALLOWED_AZP AAS_TOKEN_TYPE and the optional DPoP

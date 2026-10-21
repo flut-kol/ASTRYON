@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/parse"
 	"github.com/astryon/file-ingestion/internal/profile"
+	malwarescan "github.com/astryon/file-ingestion/internal/scanner"
 )
 
 // JobStore is the subset of *jobs.Store the worker needs.
@@ -60,6 +62,13 @@ type Sink interface {
 	Accept(ctx context.Context, j jobs.Job, valid, invalid []Item) error
 }
 
+// MalwareScanner is the bounded, fail-closed scanner gate used before the
+// first parser/sink pass. Implementations must never return engine output or
+// file contents in a verdict.
+type MalwareScanner interface {
+	Scan(context.Context, malwarescan.File) malwarescan.Verdict
+}
+
 // quarantined is returned by run when a content policy holds the file back before anything reached the sink.
 type quarantined struct {
 	code   string
@@ -98,6 +107,13 @@ type Config struct {
 	LineageDestination jobs.Destination
 	// Parquet bounds the Parquet reader (MaxRecordBytes is taken from the profile/worker setting).
 	Parquet parse.ParquetLimits
+	// MalwareScanner is optional for development. When configured, a fresh
+	// job is staged and scanned before any bytes can reach the sink.
+	MalwareScanner MalwareScanner
+	// ScannerStageDir is the directory used for short-lived scanner files.
+	ScannerStageDir string
+	// ScannerMaxBytes bounds local staging. Oversized objects are held back.
+	ScannerMaxBytes int64
 }
 
 // Metrics are plain atomic counters; Prometheus text via WritePrometheus.
@@ -181,6 +197,9 @@ func New(c Config) *Worker {
 	}
 	if c.LineageDestination == "" {
 		c.LineageDestination = jobs.ClickHouseBulk
+	}
+	if c.ScannerMaxBytes <= 0 {
+		c.ScannerMaxBytes = 1 << 30
 	}
 	return &Worker{Config: c}
 }
@@ -326,6 +345,11 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 	if prof.Parser != "ndjson" && prof.Parser != "csv" {
 		return Permanent("parser_unavailable")
 	}
+	if w.MalwareScanner != nil && len(j.Checkpoint) == 0 {
+		if err := w.scanObject(ctx, j); err != nil {
+			return err
+		}
+	}
 	pol := prof.EffectiveCredentialsPolicy(w.Policies, j.TenantID, j.SourceID)
 	var scanner *classify.Scanner
 	if !prof.Gates(pol) {
@@ -453,6 +477,47 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		return err
 	}
 	return flush()
+}
+
+// scanObject stages the verified object to a private temporary file and asks
+// the configured provider(s) to inspect it. The path is never exposed outside
+// the scanner call and is removed before returning. Scanners run before any
+// parser or sink call and errors remain retryable by the normal job state
+// machine. Positive verdicts are quarantined, never sent to the sink.
+func (w *Worker) scanObject(ctx context.Context, j jobs.Job) error {
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	dir := w.ScannerStageDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	staged, cleanup, err := malwarescan.Stage(ctx, dir, rc, w.ScannerMaxBytes)
+	if err != nil {
+		if errors.Is(err, malwarescan.ErrStageTooLarge) {
+			return quarantined{code: "SCANNER_SIZE_LIMIT"}
+		}
+		return fmt.Errorf("scanner staging: %w", err)
+	}
+	defer cleanup()
+	staged.Name = j.FileObjectID
+	v := w.MalwareScanner.Scan(ctx, staged)
+	switch v.Status {
+	case malwarescan.Clean:
+		return nil
+	case malwarescan.Infected:
+		return quarantined{code: "MALWARE_DETECTED"}
+	case malwarescan.Encrypted:
+		return quarantined{code: "SCANNER_ENCRYPTED"}
+	case malwarescan.ScanError:
+		// Provider outages/timeouts are deliberately retryable. Do not turn
+		// an unavailable scanner into an ingest allow decision.
+		return fmt.Errorf("malware scanner unavailable: %s", v.ReasonCode)
+	default:
+		return fmt.Errorf("malware scanner returned unknown verdict")
+	}
 }
 
 // accept hands a batch to the sink, then records its lineage. Both must succeed before the caller checkpoints.

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/astryon/audit"
 	"github.com/astryon/file-ingestion/internal/joblist"
 )
 
@@ -67,6 +68,9 @@ func (s *Server) jobsPrincipal(w http.ResponseWriter, r *http.Request) (Principa
 			return p, true
 		}
 	}
+	s.audit(r, p, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied, audit.Resource{Type: "jobs_api"}, map[string]string{
+		"reason": "missing_scope", "required_scope": ScopeJobsRead,
+	})
 	writeErr(w, 403, "FORBIDDEN")
 	return Principal{}, false
 }

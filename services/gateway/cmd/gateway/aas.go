@@ -18,7 +18,7 @@ func (a aasAuthenticator) Authenticate(r *http.Request) (gateway.Principal, erro
 	if err != nil {
 		return gateway.Principal{}, gateway.ErrUnauthenticated
 	}
-	return gateway.Principal{TenantID: p.TenantID, Scopes: p.Scopes}, nil
+	return gateway.Principal{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, AMR: p.AMR, Scopes: p.Scopes}, nil
 }
 
 func aasConfig(getenv func(string) string) auth.Config {

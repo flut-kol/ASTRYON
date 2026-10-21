@@ -33,6 +33,24 @@ Sprint 08 (`DPP-036` .. `DPP-040`). Library packages only so far; there is no ex
   `_PRIMARY_KEY` (comma list), `_GROUP`, `_SCHEMA_VERSION`, `_PROCESSING_VERSION`. Not yet: reading these from the `connectors` row, a PostgreSQL-backed
   `PositionStore`, live Debezium/Kafka test.
 
+## Admin API audit
+
+When `ASTRYON_AUDIT_PG_URL` is set, the admin API uses the bounded asynchronous PostgreSQL writer from
+`libs/audit`. It records `connector.create`, `connector.pause`, `connector.resume`, and `auth.denied` for a
+validated principal that lacks a scope. Invalid or missing tokens are not assigned a synthetic tenant and are
+not written. Identity, tenant and `acr` come from the validated principal; `amr`, connector config, secret
+references, payloads and PII are never stored. Create events contain only connector id, source id and connector
+kind; failures add a bounded error code.
+
+Writer bounds are configurable with `ASTRYON_AUDIT_QUEUE_SIZE`, `_BATCH_SIZE`, `_FLUSH_INTERVAL`,
+`_WRITE_TIMEOUT`, `_RETRIES`, `_DRAIN_TIMEOUT`, and `_PG_MAX_CONNS`. The metrics listener exposes
+`astryon_audit_{queued,written,dropped,rejected}_total`; drops also produce identifier-free log messages. SIGTERM
+drains the audit queue before closing its pool.
+
+There are currently no source create/update/pause/resume, connector update, or credential-reference mutation
+endpoints in this service. Audit events for those actions must be added with the endpoints rather than inventing
+write paths solely for audit.
+
 ## Not yet
 
 - Kafka `Emitter` for `raw.events.v1` (gateway has its own TLS/SASL/mTLS producer; extract a shared client first), a `SecretRef` resolver (Vault),

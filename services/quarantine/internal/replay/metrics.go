@@ -19,12 +19,22 @@ var (
 )
 
 type metricsSet struct {
-	browse  [4]atomic.Int64
-	plans   [3]atomic.Int64
-	publish [7]atomic.Int64
-	candBkt [10]atomic.Int64 // per-bucket, last is +Inf
-	candCnt atomic.Int64
-	candSum atomic.Int64
+	browse       [4]atomic.Int64
+	plans        [3]atomic.Int64
+	publish      [7]atomic.Int64
+	candBkt      [10]atomic.Int64 // per-bucket, last is +Inf
+	candCnt      atomic.Int64
+	candSum      atomic.Int64
+	mirrorOK     atomic.Int64
+	mirrorErrors atomic.Int64
+}
+
+func (m *metricsSet) incMirror(ok bool) {
+	if ok {
+		m.mirrorOK.Add(1)
+	} else {
+		m.mirrorErrors.Add(1)
+	}
 }
 
 func idx(set []string, v string) int {
@@ -110,4 +120,5 @@ func (m *metricsSet) WritePrometheus(w io.Writer) {
 	cum += m.candBkt[len(candidateLE)].Load()
 	fmt.Fprintf(w, "astryon_quarantine_replay_candidates_bucket{le=\"+Inf\"} %d\nastryon_quarantine_replay_candidates_sum %d\nastryon_quarantine_replay_candidates_count %d\n",
 		cum, m.candSum.Load(), m.candCnt.Load())
+	fmt.Fprintf(w, "# HELP astryon_quarantine_audit_mirror_total Optional PG audit mirror writes\n# TYPE astryon_quarantine_audit_mirror_total counter\nastryon_quarantine_audit_mirror_total{outcome=\"written\"} %d\nastryon_quarantine_audit_mirror_total{outcome=\"error\"} %d\n", m.mirrorOK.Load(), m.mirrorErrors.Load())
 }

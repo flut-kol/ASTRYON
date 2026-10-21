@@ -20,7 +20,11 @@ type Pending struct {
 type Record struct {
 	Tok     Tokens
 	Sub     string
-	SID     string // AAS session id (ID token "sid"), the key of OIDC back-channel logout
+	SID     string   // AAS session id (ID token "sid"), the key of OIDC back-channel logout
+	Tenant  string   // tenant_id from the validated ID token
+	Client  string   // client_id/azp from the validated ID token
+	ACR     string   // authentication context from the validated ID token
+	AMR     []string // authentication methods from the validated ID token; retained for future AAS-defined step-up policy
 	Created time.Time
 }
 
@@ -33,8 +37,8 @@ type Store interface {
 	GetSession(ctx context.Context, id string) (Record, bool, error)
 	UpdateSession(ctx context.Context, id string, r Record, ttl time.Duration) error
 	DeleteSession(ctx context.Context, id string) error
-	DeleteBySID(ctx context.Context, sid string) (int, error)
-	DeleteBySub(ctx context.Context, sub string) (int, error)
+	DeleteBySID(ctx context.Context, sid string) ([]Record, error)
+	DeleteBySub(ctx context.Context, sub string) ([]Record, error)
 	SeenJTI(ctx context.Context, jti string, ttl time.Duration) (first bool, err error)
 }
 
@@ -122,24 +126,24 @@ func (m *memStore) DeleteSession(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *memStore) deleteWhere(f func(Record) bool) int {
+func (m *memStore) deleteWhere(f func(Record) bool) []Record {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := 0
+	var deleted []Record
 	for k, v := range m.sessions {
 		if f(v) {
 			delete(m.sessions, k)
-			n++
+			deleted = append(deleted, v)
 		}
 	}
-	return n
+	return deleted
 }
 
-func (m *memStore) DeleteBySID(_ context.Context, sid string) (int, error) {
+func (m *memStore) DeleteBySID(_ context.Context, sid string) ([]Record, error) {
 	return m.deleteWhere(func(r Record) bool { return r.SID == sid }), nil
 }
 
-func (m *memStore) DeleteBySub(_ context.Context, sub string) (int, error) {
+func (m *memStore) DeleteBySub(_ context.Context, sub string) ([]Record, error) {
 	return m.deleteWhere(func(r Record) bool { return r.Sub == sub }), nil
 }
 

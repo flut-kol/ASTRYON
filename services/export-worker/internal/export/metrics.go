@@ -18,7 +18,12 @@ type metrics struct {
 	buckets                         [9]int64 // last = +Inf, non-cumulative
 	sumSeconds                      float64
 	count                           int64
+	auditStats                      func() AuditWriterStats
 }
+
+// AuditWriterStats mirrors the library's monotonic writer counters without
+// exposing tenant or resource identifiers as metric labels.
+type AuditWriterStats struct{ Queued, Written, Dropped, Rejected uint64 }
 
 var durationBuckets = [8]float64{1, 5, 15, 60, 300, 900, 1800, 3600}
 
@@ -49,6 +54,13 @@ func (m *metrics) queueError(op string) {
 	m.mu.Unlock()
 }
 
+// SetAuditStatsProvider connects a PG audit writer to the existing metrics endpoint.
+func (m *metrics) SetAuditStatsProvider(fn func() AuditWriterStats) {
+	m.mu.Lock()
+	m.auditStats = fn
+	m.mu.Unlock()
+}
+
 // WritePrometheus renders the metrics in Prometheus text format 0.0.4.
 func (m *metrics) WritePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE astryon_export_started_total counter\nastryon_export_started_total %d\n", m.started.Load())
@@ -57,6 +69,17 @@ func (m *metrics) WritePrometheus(w io.Writer) {
 	fmt.Fprintf(w, "# TYPE astryon_export_bytes_total counter\nastryon_export_bytes_total %d\n", m.bytes.Load())
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.auditStats != nil {
+		s := m.auditStats()
+		fmt.Fprint(w, "# TYPE astryon_audit_queued_total counter\n")
+		fmt.Fprintf(w, "astryon_audit_queued_total %d\n", s.Queued)
+		fmt.Fprint(w, "# TYPE astryon_audit_written_total counter\n")
+		fmt.Fprintf(w, "astryon_audit_written_total %d\n", s.Written)
+		fmt.Fprint(w, "# TYPE astryon_audit_dropped_total counter\n")
+		fmt.Fprintf(w, "astryon_audit_dropped_total %d\n", s.Dropped)
+		fmt.Fprint(w, "# TYPE astryon_audit_rejected_total counter\n")
+		fmt.Fprintf(w, "astryon_audit_rejected_total %d\n", s.Rejected)
+	}
 	fmt.Fprint(w, "# TYPE astryon_export_failed_total counter\n")
 	writeLabelled(w, "astryon_export_failed_total", "code", m.failed)
 	fmt.Fprint(w, "# TYPE astryon_export_queue_errors_total counter\n")

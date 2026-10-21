@@ -73,7 +73,12 @@ Scope `astryon:uploads:write`; tenant only from the Principal (bodies with `tena
   row and enqueues the `process_file` job (idempotent: repeating returns the same job). 422 `checksum_mismatch` (object deleted) / `upload_incomplete`.
 Env: see `cmd/file-api/main.go` (`FILE_API_PG_URL`, `FILE_S3_*`, AAS + optional DPoP like query-api, dev token for local use only).
 Proven end to end with the built binary against MinIO + PostgreSQL 16: create, part PUT, complete, job QUEUED, repeat idempotent, 401 without token.
-Contract: `docs/api/file-ingestion.openapi.yaml`; errors in `docs/errors/api-error-catalog.md` (`{code, message}`). Upload quotas: see below. Not yet: malware scan.
+Contract: `docs/api/file-ingestion.openapi.yaml`; errors in `docs/errors/api-error-catalog.md` (`{code, message}`). Upload quotas: see below.
+The Go `internal/scanner` package contains bounded HTTP adapters for Windows Defender and ClamAV, normalized verdicts
+(`clean`, `infected`, `encrypted`, `error`), staging limits and a retry-aware circuit breaker. The adapters never return
+raw engine output and never log file contents. Wiring a scanner into the upload/worker pipeline remains an explicit
+deployment choice; an unavailable scanner must fail closed or remain retryable according to the deployment policy,
+never silently mark an unscanned object clean.
 
 ## Direct ClickHouse path (`internal/chsink`, `cmd/file-worker`)
 
@@ -92,19 +97,54 @@ Proven end to end with the built binaries on MinIO + PostgreSQL 16 + ClickHouse 
 error row in ClickHouse with correct offsets, job SUCCEEDED with `events_processed=3`, `events_failed=1` and the final checkpoint; three identical inserts of one batch
 left 3 event rows and 1 error row.
 
+The env-gated `FILEINGEST_E2E=1 go test ./internal/e2e` also uploads a real multi-row-group Parquet object through the HTTP multipart API and verifies the
+checksum-committed object in MinIO/PostgreSQL, the SUCCEEDED job counters and row-group checkpoint in PostgreSQL, normalized rows in ClickHouse, and the
+worker's emitted batch-lineage contract. Batch lineage is still memory/log only: there is no PostgreSQL lineage table or recorder, so it is not durable across
+worker restarts. The E2E keeps this gap explicit instead of claiming PostgreSQL lineage persistence.
+
 ## Operations
 
 Both binaries serve Prometheus text on `FILE_METRICS_ADDR` (off when unset; keep it loopback or cluster-internal): `astryon_file_worker_*`
 (jobs claimed/succeeded/failed/retried/fenced, batches, records, invalid records, sink errors) and `astryon_file_api_requests_total{route,code}`.
+The file API queues `upload.create`, `upload.complete`, and validated-principal `auth.denied` records through the bounded `libs/audit` PostgreSQL
+writer using `FILE_API_PG_URL`; invalid-token 401s have no trusted tenant and are deliberately not persisted. The record contains only the validated
+tenant/actor/ACR, upload UUID, trace/request IDs, action and outcome—never filename, tags, object payload, PII or secrets. Tune bounds with
+`FILE_AUDIT_QUEUE_SIZE` (max 65536), `FILE_AUDIT_BATCH_SIZE` (max 1000), `FILE_AUDIT_FLUSH_MS`, `FILE_AUDIT_WRITE_TIMEOUT_MS`,
+`FILE_AUDIT_RETRIES` (0..10) and `FILE_AUDIT_DRAIN_SECONDS`; queue/write drops are logged without identity data and exposed as
+`astryon_file_api_audit_{queued,written,dropped,rejected}_total`. SIGINT/SIGTERM stops HTTP intake, drains the writer for the configured bound,
+then closes PostgreSQL. There is no cancel endpoint yet, hence no synthetic `upload.cancel` event.
 Alert rules are in `infra/observability/prometheus-rules.yaml` (group `astryon-file-ingestion`). One `Dockerfile` builds either binary
 (`--build-arg CMD=file-api|file-worker`, context = repository root; both images built OK, 12 MB).
 
+## Malware scanner and archive password policy
+
+Scanner providers are separate sources, not a replacement for the ingestion classifier. A deployment may run both
+Windows Defender and ClamAV and combine their normalized verdicts: `infected` or `encrypted` holds the object for
+quarantine, `error` with `retryable=true` retries, and only a positive `clean` result can satisfy a clean-scan gate.
+Provider URLs and credentials belong to service configuration; they are never accepted from an upload request. Store
+only provider name, normalized status/reason code, file checksum and timestamps in operational state/audit.
+
+Worker scanner wiring is opt-in and disabled by default. Set `FILE_SCANNER_MODE=optional` or `required` together
+with `FILE_SCANNER_DEFENDER_URL` and/or `FILE_SCANNER_CLAMAV_URL` to enable the bounded pre-sink gate. Both modes
+currently fail closed; the distinction is reserved for deployment policy. Optional settings are
+`FILE_SCANNER_TIMEOUT` (duration, default `30s`), `FILE_SCANNER_STAGE_DIR` (private local staging directory),
+`FILE_SCANNER_MAX_STAGE_BYTES` (default `1073741824`), `FILE_SCANNER_CIRCUIT_FAILURES` (default `3`), and
+`FILE_SCANNER_CIRCUIT_COOLDOWN` (default `30s`). URLs are never logged: the worker logs only provider count, mode,
+timeout, and staging limit. With `off` (the default), no scanner HTTP calls or staging occur.
+
+Password-protected archives have a separate, deliberately narrow path. Candidate lookup is disabled unless the upload
+contains both `archive_passwords=enabled|true|1` and a non-empty `archive_password_campaign=<campaign-id>` tag. The
+campaign resolves a tenant-scoped list previously curated by an administrator. This is not dictionary generation or
+unbounded brute force: candidates are capped and time-bounded, and plaintext candidates never enter tags, logs,
+metrics, audit events or API responses. Missing/invalid tags cause zero attempts. A successful candidate does not by
+itself bypass malware scanning or archive safety limits.
+
 ## Remaining work
 
-- malware/content scanning, object lifecycle rules, request rate limits;
+- object lifecycle rules and request rate limits for the configured Defender/ClamAV worker gate;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
 - per-source mapping/config for the sink (event type, time and entity fields), Parquet output;
-- actual Parquet normalization, ClickHouse bulk ingest and durable lineage.
+- durable PostgreSQL lineage (Parquet normalization and direct ClickHouse ingest are implemented and covered by the env-gated E2E).
 
 ## Upload quotas (file-api)
 
@@ -122,6 +162,32 @@ Same tenant RLS as the sibling tables; the tenant comes only from the Principal.
 
 **Upload creation** accepts `source_type`, `tags` (max 16, key `^[a-z][a-z0-9_.-]{0,31}$`, value <= 64 chars of `[A-Za-z0-9_.:/@+ -]`) and `sensitivity`
 (public|internal|restricted). `GET /v1/files/uploads/{id}` returns them with the latest job (`status`, `error` code, `labels`). 
+
+**Preview**: `GET /v1/files/uploads/{id}/preview` requires `astryon:data:read` (or the existing
+`astryon:uploads:write` scope), is tenant-scoped, and serves only committed `text/csv` or
+`application/x-ndjson` objects. The response is `Content-Disposition: inline`, capped at 64 KiB and
+200 lines (`X-Preview-Truncated: true` when capped). Uncommitted, `QUARANTINED`, credentials-labelled,
+or PII-labelled objects return metadata only; matched values are never returned. ZIP/TAR/GZIP and all
+other archive formats are rejected by the upload allowlist and preview endpoint. Archive extraction is
+intentionally not implemented until a design provides nesting, path-traversal, decompression-ratio and
+resource limits.
+
+The opt-in `internal/archive` package provides that first inspection layer for a future quarantine/admin
+workflow; it is not wired into normal ingestion. `Inspect`/`InspectContext` recognize ZIP, TAR and GZIP,
+inspect metadata only, reject absolute/UNC/`..` paths, ZIP encryption, symlinks and TAR hardlinks, detect
+nested archives, and enforce bounded compressed bytes (64 MiB), expanded bytes (1 GiB), file count (10,000),
+compression ratio (100:1), and nesting depth (2). Results include deterministic reason codes such as
+`unsafe_path`, `encrypted`, `symlink`, `compression_ratio`, `expanded_bytes`, `file_count`, and
+`nesting_depth`. ZIP input is buffered only up to the compressed-byte limit because Go's ZIP reader requires
+random access; all limits remain fail-closed and callers should keep archive reports metadata-only.
+Password candidates are an explicit opt-in only: callers must supply both tags
+`archive_passwords=enabled|true|1` and a non-empty `archive_password_campaign=<campaign-id>` before
+consulting an external `PasswordProvider`. Candidate count/time remain bounded; no generated dictionaries,
+password logging, or plaintext password persistence is allowed. Missing or invalid tags mean zero attempts.
+Set `FILE_ARCHIVE_MODE=inspect` to enable the file API integration point: archive MIME/extension pairs are
+accepted, checksum-verified, inspected with those limits at upload completion, and returned as
+`mode=archive_inspect` without creating a worker job. The default empty mode rejects archive uploads exactly
+as before. Inspection failures return `ARCHIVE_REJECTED` and are never sent to a sink.
 
 **List** `GET /v1/files/uploads` (`internal/listing`): tenant from the Principal plus RLS, keyset cursor on `(created_at, id)` DESC (`limit` default 50, max 200,
 `next_cursor` opaque), filters `source_type`, `sensitivity`, `status` (latest job, incl. `QUARANTINED`), `label` (`contains_geo|contains_credentials|contains_pii`),

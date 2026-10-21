@@ -5,11 +5,20 @@ Read API over ClickHouse. Contract: `docs/api/query-api.openapi.yaml`.
 | Endpoint | Purpose |
 |---|---|
 | `POST /v1/query/events` | tenant-filtered events, keyset cursor, `limit` ≤ 1000, range ≤ 31 days |
+| `POST /v1/query/text` | tenant-filtered token search over file payloads using ClickHouse `hasToken`, metadata-only results, keyset cursor |
 | `POST /v1/query/aggregate` | whitelisted `metrics` (count, bytes, distinct_entities, distinct_batches) and `group_by` (source_id, event_type, hour, day) |
 | `GET /v1/metrics/summary`, `GET /v1/quality/summary` | latest revision (`argMax(.., revision)`) of the hourly/daily aggregates written by `ch-aggregator` |
 
 Rules: tenant comes only from the verified token; `processing_version` is optional only when `QUERY_PG_URL` is set (see below), else required; all values are bound ClickHouse
 parameters; queries run `readonly=1` with time/memory/row limits; duplicates are removed with `LIMIT 1 BY`.
+
+Text search accepts the common `from`, `to`, `source_id`, and `processing_version` filters plus a required
+`query` token (1–256 bytes), `limit` (1–1000), and opaque `cursor`. The query is passed as the bound
+`p_text` parameter to `hasToken(payload, {p_text:String})`, allowing the ClickHouse payload token-bloom
+index (`idx_payload_text`) to be used. No SQL, tenant field, or arbitrary filter fields are accepted.
+Responses contain event metadata only; `payload` and `attributes` are intentionally excluded because file
+text may contain credentials, PII, or other sensitive content. As with the other query endpoints, the
+tenant predicate is built only from the validated token principal.
 
 ## Active processing version (replay cutover)
 With `QUERY_PG_URL` set (PostgreSQL role WITHOUT BYPASSRLS; table `source_active_versions`, migration 0010, written by `replay-controller`
@@ -25,6 +34,14 @@ With `QUERY_PG_URL` set (PostgreSQL role WITHOUT BYPASSRLS; table `source_active
 Env: `LISTEN_ADDR` (:8082), `CH_URL`, `CH_DATABASE`, `CH_USER`, `CH_PASSWORD`.
 Auth (token needs scope `astryon:query:read` and a tenant claim): `AAS_BASE_URL`, `AAS_ISSUER`, `AAS_AUDIENCE`, `AAS_ENV`,
 `AAS_ALLOWED_AZP`. Optional L3 (live token status, fail closed on AAS outage): `AAS_INTROSPECTION_KEY_FILE` (enables it), `AAS_INTROSPECTION_CLIENT_ID`, `AAS_INTROSPECTION_KEY_ID`. Optional DPoP (L2, `Authorization: DPoP` + `DPoP` proof header): `AAS_PUBLIC_BASE_URL` (enables it), `AAS_REDIS_URL` + `AAS_REDIS_CA_FILE` (shared replay store; per-instance otherwise), `AAS_REQUIRE_DPOP=true`. `QUERY_METRICS_ADDR` (e.g. `127.0.0.1:9102`) serves `/metrics` with `astryon_query_api_dpop_rejected_total{reason}`; off when unset. Optional: `QUERY_PG_URL`, `QUERY_VERSION_CACHE_SECONDS`. Dev only: `QUERY_DEV_TOKEN` + `QUERY_DEV_TENANT`. With neither, every request is rejected.
+
+Tenant-scoped security audit is opt-in with `QUERY_AUDIT_PG_URL` (a PostgreSQL role without `BYPASSRLS`). A validated
+principal denied for missing `astryon:query:read` produces `auth.denied`; invalid credentials and principals without a
+trusted tenant are deliberately not written because no tenant may be invented. Those gaps, queue drops and rejected events
+are visible through `QUERY_METRICS_ADDR`. Optional writer bounds are `QUERY_AUDIT_QUEUE_SIZE`, `QUERY_AUDIT_BATCH_SIZE`,
+`QUERY_AUDIT_FLUSH_INTERVAL_MS`, `QUERY_AUDIT_WRITE_TIMEOUT_MS` and `QUERY_AUDIT_DRAIN_TIMEOUT_SECONDS`. Shutdown stops
+HTTP admission before draining the bounded audit queue. Audit records contain actor IDs, ACR, route/reason and request ID;
+they never contain AMR, query parameters, request bodies, credentials or tokens.
 
 Tenant protection (DPP-050; in-memory per instance unless `QUERY_REDIS_URL` is set, keyed only by the verified token's tenant, idle tenants evicted;
 over limit -> HTTP 429 `rate_limited` with `Retry-After`, or `too_many_concurrent_queries`):

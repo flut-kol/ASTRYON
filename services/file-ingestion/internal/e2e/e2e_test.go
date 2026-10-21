@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/parquet-go/parquet-go"
+
 	"github.com/astryon/file-ingestion/internal/api"
 	"github.com/astryon/file-ingestion/internal/chsink"
 	"github.com/astryon/file-ingestion/internal/classify"
@@ -42,6 +44,30 @@ func (a staticAuth) Authenticate(*http.Request) (api.Principal, error) {
 	return api.Principal{TenantID: a.tenant, Scopes: []string{api.ScopeUploadsWrite}}, nil
 }
 
+type parquetRow struct {
+	ID    string `parquet:"id"`
+	TS    string `parquet:"ts"`
+	Value int64  `parquet:"value"`
+}
+
+func parquetFile(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := parquet.NewGenericWriter[parquetRow](&buf, parquet.MaxRowsPerRowGroup(2))
+	rows := []parquetRow{
+		{ID: "p1", TS: "2026-10-01T00:00:03Z", Value: 11},
+		{ID: "p2", TS: "2026-10-01T00:00:04Z", Value: 12},
+		{ID: "p3", TS: "2026-10-01T00:00:05Z", Value: 13},
+	}
+	if _, err := w.Write(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func docker(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := exec.Command("docker", args...).CombinedOutput()
@@ -55,7 +81,9 @@ func docker(t *testing.T, args ...string) string {
 func start(t *testing.T, port string, args ...string) (cid, hostport string) {
 	t.Helper()
 	a := append([]string{"run", "-d", "--rm", "-p", "127.0.0.1::" + port}, args...)
-	cid = docker(t, a...)
+	// A first run may pull the image and write progress to stderr. docker() intentionally captures stderr for
+	// diagnostics, so select the final line containing the detached container id.
+	cid = lastLine(docker(t, a...))
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", cid).Run() })
 	p := docker(t, "port", cid, port+"/tcp")
 	p = strings.Split(p, "\n")[0]
@@ -148,6 +176,9 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 	wait(t, "minio bucket", func() bool {
 		return exec.Command("docker", "exec", s3ID, "sh", "-c", "mc alias set l http://127.0.0.1:9000 "+minioUser+" "+minioPass+" && (mc mb --ignore-existing l/"+bucket+")").Run() == nil
 	})
+	// The Bitnami image briefly starts MinIO for setup, then replaces that process with the final server. `mc mb`
+	// can succeed against the setup process; wait past that hand-off so multipart PUTs do not race a socket reset.
+	time.Sleep(6 * time.Second)
 
 	pool, err := pgxpool.New(ctx, "postgres://app:pw@127.0.0.1:"+pgPort+"/postgres")
 	if err != nil {
@@ -160,7 +191,7 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 
 	srv := &api.Server{Auth: staticAuth{tenant}, Bucket: bucket, Files: files, Objs: s3c, Multipart: s3c, Jobs: store, Insights: store,
 		Uploads: upload.Service{Store: api.MultipartStarter{C: s3c}, Now: time.Now, MaxBytes: 1 << 20, MaxParts: 4,
-			ContentTypes: map[string]bool{"text/csv": true, "application/x-ndjson": true}}}
+			ContentTypes: map[string]bool{"text/csv": true, "application/x-ndjson": true, worker.ParquetContentType: true}}}
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -169,12 +200,13 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lineage := &jobs.MemLineage{}
 	w := worker.New(worker.Config{Store: store, Source: objects.Source{Store: files, Objs: s3c, Bucket: bucket}, Sink: sink,
-		BatchSize: 2, Heartbeat: 10 * time.Second, Poll: 100 * time.Millisecond})
+		BatchSize: 2, Heartbeat: 10 * time.Second, Poll: 100 * time.Millisecond, Lineage: lineage})
 
-	upl := func(name, ctype, stype, body string) string {
+	upl := func(name, ctype, stype string, body []byte) string {
 		t.Helper()
-		sum := sha256.Sum256([]byte(body))
+		sum := sha256.Sum256(body)
 		req, _ := json.Marshal(map[string]any{"source_id": source, "filename": name, "content_type": ctype, "sha256": hex.EncodeToString(sum[:]),
 			"size_bytes": len(body), "parts": 1, "source_type": stype})
 		var cr struct {
@@ -183,7 +215,7 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 			PartURLs     []string `json:"part_urls"`
 		}
 		doJSON(t, ts.URL+"/v1/files/uploads", req, 201, &cr)
-		pr, _ := http.NewRequest(http.MethodPut, cr.PartURLs[0], strings.NewReader(body))
+		pr, _ := http.NewRequest(http.MethodPut, cr.PartURLs[0], bytes.NewReader(body))
 		resp, err := http.DefaultClient.Do(pr)
 		if err != nil || resp.StatusCode != 200 {
 			t.Fatalf("part PUT: %v %v", err, resp)
@@ -194,10 +226,22 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 		return cr.FileObjectID
 	}
 
-	csvOK := upl("ok.csv", "text/csv", "report", "id,ts,value\na,2026-10-01T00:00:00Z,1\nb,2026-10-01T00:00:01Z,2\nc,2026-10-01T00:00:02Z,3\n")
-	cred := upl("cred.csv", "text/csv", "report", "id,ts,password\nx,2026-10-01T00:00:00Z,hunter2-SuperSecretValue\ny,2026-10-01T00:00:01Z,another-secret-9\n")
-	geo := upl("geo.csv", "text/csv", "geo", "id,ts,lat,lon\ng1,2026-10-01T00:00:00Z,50.45,30.52\ng2,2026-10-01T00:00:01Z,48.85,2.35\n")
-	bad := upl("bad.csv", "text/csv", "report", "id,ts,value\nm1,2026-10-01T00:00:00Z,1\nm2,2026-10-01T00:00:01Z\nm3,2026-10-01T00:00:02Z,3\n")
+	csvOK := upl("ok.csv", "text/csv", "report", []byte("id,ts,value\na,2026-10-01T00:00:00Z,1\nb,2026-10-01T00:00:01Z,2\nc,2026-10-01T00:00:02Z,3\n"))
+	cred := upl("cred.csv", "text/csv", "report", []byte("id,ts,password\nx,2026-10-01T00:00:00Z,hunter2-SuperSecretValue\ny,2026-10-01T00:00:01Z,another-secret-9\n"))
+	geo := upl("geo.csv", "text/csv", "geo", []byte("id,ts,lat,lon\ng1,2026-10-01T00:00:00Z,50.45,30.52\ng2,2026-10-01T00:00:01Z,48.85,2.35\n"))
+	bad := upl("bad.csv", "text/csv", "report", []byte("id,ts,value\nm1,2026-10-01T00:00:00Z,1\nm2,2026-10-01T00:00:01Z\nm3,2026-10-01T00:00:02Z,3\n"))
+	parquetBody := parquetFile(t)
+	parquetID := upl("rows.parquet", worker.ParquetContentType, "report", parquetBody)
+
+	// The completed, checksum-verified source must remain readable from MinIO before the worker runs.
+	pf, err := files.Get(ctx, tenant, parquetID)
+	parquetSum := sha256.Sum256(parquetBody)
+	if err != nil || !pf.Committed || !strings.EqualFold(pf.SHA256, hex.EncodeToString(parquetSum[:])) {
+		t.Fatalf("parquet file object: %+v err=%v", pf, err)
+	}
+	if n, err := s3c.Head(ctx, pf.Key); err != nil || n != int64(len(parquetBody)) {
+		t.Fatalf("parquet MinIO object: size=%d err=%v", n, err)
+	}
 
 	for i := 0; i < 10; i++ {
 		ran, err := w.RunOnce(ctx)
@@ -254,6 +298,34 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 	}
 	if code := chq(fmt.Sprintf("SELECT error_code, sample_payload FROM processing_errors_local WHERE batch_id='%s'", bad), ""); !strings.HasPrefix(code, "ERR_CSV_MALFORMED") {
 		t.Errorf("error row = %q", code)
+	}
+
+	if s := sum(parquetID); s.Status != "SUCCEEDED" || count("events_normalized_local", parquetID) != "3" || count("processing_errors_local", parquetID) != "0" {
+		t.Errorf("parquet: %+v events=%s errors=%s", s, count("events_normalized_local", parquetID), count("processing_errors_local", parquetID))
+	}
+	if got := chq(fmt.Sprintf("SELECT entity_id FROM events_normalized_local WHERE batch_id='%s' ORDER BY entity_id", parquetID), ""); got != "p1\np2\np3" {
+		t.Errorf("parquet entity ids = %q", got)
+	}
+	pgState := strings.TrimSpace(psql(`SELECT set_config('astryon.platform_admin','on',false); SELECT status::text || '|' || events_processed::text || '|' || events_failed::text || '|' || COALESCE(payload->'checkpoint'->>'NextGroup','') FROM jobs WHERE file_object_id='` + parquetID + `'::uuid`))
+	if !strings.HasSuffix(pgState, "SUCCEEDED|3|0|2") {
+		t.Errorf("parquet PG state/checkpoint = %q", pgState)
+	}
+
+	// Durable lineage has no PostgreSQL repository/schema yet. Verify the worker still emits the supported
+	// in-process batch lineage contract, and keep this assertion explicit until a PG recorder is implemented.
+	var parquetBatches, parquetRows int
+	for _, b := range lineage.All() {
+		if b.SourceFileID != parquetID {
+			continue
+		}
+		parquetBatches++
+		parquetRows += b.Valid
+		if b.Destination != jobs.ClickHouseBulk || b.SourceChecksum != strings.ToLower(pf.SHA256) || b.JobID == "" || b.Validate() != nil {
+			t.Errorf("parquet lineage: %+v", b)
+		}
+	}
+	if parquetBatches != 2 || parquetRows != 3 {
+		t.Errorf("parquet lineage batches=%d rows=%d", parquetBatches, parquetRows)
 	}
 }
 

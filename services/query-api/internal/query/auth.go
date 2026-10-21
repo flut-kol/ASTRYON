@@ -13,6 +13,10 @@ const ScopeQueryRead = "astryon:query:read"
 // Principal is the trusted caller identity. TenantID is the ONLY source of tenant identity.
 type Principal struct {
 	TenantID string
+	Subject  string
+	ClientID string
+	ACR      string
+	AMR      []string
 	Scopes   []string
 }
 

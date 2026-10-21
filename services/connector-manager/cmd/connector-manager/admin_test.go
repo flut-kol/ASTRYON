@@ -20,7 +20,7 @@ func TestDevAuth(t *testing.T) {
 	}
 	r.Header.Set("Authorization", "Bearer tok")
 	p, err := a.Authenticate(r)
-	if err != nil || p.TenantID != "t9" || !p.Scopes[registry.ManageScope] {
+	if err != nil || p.TenantID != "t9" || p.ClientID != "connector-manager-dev" || !p.HasScope(registry.ManageScope) {
 		t.Fatalf("%+v %v", p, err)
 	}
 	r.Header.Set("Authorization", "Bearer nope")

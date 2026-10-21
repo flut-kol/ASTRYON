@@ -16,9 +16,11 @@ export function mockApi(method: string, pathname: string, opts: { fail?: number 
   if (base === 'files' && p === `/v1/files/uploads/${UP}`) {
     return { status: 200, json: { file_object_id: UP, source_id: SRC, source_type: 'telemetry', committed: true, size_bytes: 2048, sensitivity: 'internal', tags: {}, created_at: T, job: { id: 'job-1', status: 'QUARANTINED', labels: { contains_pii: { count: 3, fields: ['email'] } } } } };
   }
+  if (base === 'files' && p === `/v1/files/uploads/${UP}/preview`) return { status: 200, text: '{"ok":1}\n{"ok":2}\n' };
   if (base === 'query' && p === '/v1/query/events') {
     return { status: 200, json: { items: [{ event_id: 'e1', source_id: SRC, event_type: 'sensor.reading', event_time: T, entity_id: 'dev-1', quality_flags: ['late'], payload: '{"v":1}' }], next_cursor: '' } };
   }
+  if (base === 'query' && p === '/v1/query/text') return { status: 200, json: { items: [{ event_id: 'e1', source_id: SRC, event_type: 'sensor.reading', event_time: T, entity_id: 'dev-1', snippet: 'match' }], next_cursor: '' } };
   if (base === 'query' && p === '/v1/metrics/summary') return { status: 200, json: { sources: [{ source_id: SRC, events: 1200, errors: 3 }] } };
   if (base === 'query' && p === '/v1/quality/summary') return { status: 200, json: { sources: [{ source_id: SRC, score: 0.99 }], flags: [{ flag: 'late', events: 5 }] } };
   if (base === 'connectors' && p === '/v1/connectors') return { status: 200, json: { items: [{ id: 'c1', source_id: SRC, name: 'orders-api', kind: 'rest_pull', enabled: true, config: {}, created_at: T }], next_cursor: '' } };

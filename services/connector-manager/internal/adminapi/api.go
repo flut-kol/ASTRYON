@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astryon/audit"
 	"github.com/astryon/connector-manager/internal/registry"
+	goauth "github.com/astryon/go-common/auth"
 )
 
 // SourcesReadScope gates the read-only source endpoints.
@@ -85,12 +87,18 @@ type SourceStore interface {
 }
 
 type Authenticator interface {
-	Authenticate(*http.Request) (registry.Principal, error)
+	Authenticate(*http.Request) (goauth.Principal, error)
+}
+
+// Auditor is implemented by audit.Writer. Submit is deliberately best-effort and non-blocking.
+type Auditor interface {
+	Submit(audit.Event) error
 }
 
 type Server struct {
 	Auth  Authenticator
 	Store Store
+	Audit Auditor
 	// Sources serves GET /v1/sources[/{id}] (nil = 503); needs SourcesReadScope.
 	Sources SourceStore
 }
@@ -107,25 +115,28 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-type handler func(w http.ResponseWriter, r *http.Request, tenant string)
+type handler func(w http.ResponseWriter, r *http.Request, p goauth.Principal)
 
 func (s *Server) guard(scope string, h handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		_ = traceID(w, r)
 		p, err := s.Auth.Authenticate(r)
 		if err != nil || p.TenantID == "" {
 			writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "authentication required")
 			return
 		}
-		if !p.Scopes[scope] {
+		if !p.HasScope(scope) {
+			s.audit(r, p, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied,
+				audit.Resource{Type: "scope", ID: scope}, map[string]string{"method": r.Method})
 			writeErr(w, r, http.StatusForbidden, "forbidden", "missing scope "+scope)
 			return
 		}
-		h(w, r, p.TenantID)
+		h(w, r, p)
 	}
 }
 
-func (s *Server) list(w http.ResponseWriter, r *http.Request, tenant string) {
+func (s *Server) list(w http.ResponseWriter, r *http.Request, p goauth.Principal) {
 	limit := defaultLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -140,7 +151,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, tenant string) {
 		writeErr(w, r, http.StatusBadRequest, "invalid_request", "invalid cursor")
 		return
 	}
-	items, err := s.Store.List(r.Context(), tenant, after, limit+1)
+	items, err := s.Store.List(r.Context(), p.TenantID, after, limit+1)
 	if err != nil {
 		storeErr(w, r, err)
 		return
@@ -156,13 +167,13 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request, tenant string) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
-func (s *Server) get(w http.ResponseWriter, r *http.Request, tenant string) {
+func (s *Server) get(w http.ResponseWriter, r *http.Request, p goauth.Principal) {
 	id := r.PathValue("id")
 	if !uuidRE.MatchString(id) {
 		writeErr(w, r, http.StatusBadRequest, "invalid_request", "invalid connector id")
 		return
 	}
-	c, err := s.Store.Get(r.Context(), tenant, id)
+	c, err := s.Store.Get(r.Context(), p.TenantID, id)
 	if err != nil {
 		storeErr(w, r, err)
 		return
@@ -171,22 +182,30 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, tenant string) {
 }
 
 func (s *Server) toggle(enabled bool) handler {
-	return func(w http.ResponseWriter, r *http.Request, tenant string) {
+	return func(w http.ResponseWriter, r *http.Request, p goauth.Principal) {
 		id := r.PathValue("id")
 		if !uuidRE.MatchString(id) {
 			writeErr(w, r, http.StatusBadRequest, "invalid_request", "invalid connector id")
 			return
 		}
-		c, err := s.Store.SetEnabled(r.Context(), tenant, id, enabled)
+		action := "connector.pause"
+		if enabled {
+			action = "connector.resume"
+		}
+		c, err := s.Store.SetEnabled(r.Context(), p.TenantID, id, enabled)
 		if err != nil {
+			s.audit(r, p, audit.CategoryAudit, action, audit.OutcomeFailure,
+				audit.Resource{Type: "connector", ID: id}, map[string]string{"error_code": auditErrorCode(err)})
 			storeErr(w, r, err)
 			return
 		}
+		s.audit(r, p, audit.CategoryAudit, action, audit.OutcomeSuccess,
+			audit.Resource{Type: "connector", ID: c.ID}, nil)
 		writeJSON(w, http.StatusOK, c)
 	}
 }
 
-func (s *Server) create(w http.ResponseWriter, r *http.Request, tenant string) {
+func (s *Server) create(w http.ResponseWriter, r *http.Request, p goauth.Principal) {
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/json") {
 		writeErr(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 		return
@@ -207,15 +226,21 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request, tenant string) {
 		writeErr(w, r, http.StatusBadRequest, "invalid_request", "trailing data after JSON body")
 		return
 	}
-	if msg := validate(in, tenant); msg != "" {
+	if msg := validate(in, p.TenantID); msg != "" {
 		writeErr(w, r, http.StatusUnprocessableEntity, "invalid_connector", msg)
 		return
 	}
-	c, err := s.Store.Create(r.Context(), tenant, in)
+	details := map[string]string{"source_id": in.SourceID, "connector_kind": in.Kind}
+	c, err := s.Store.Create(r.Context(), p.TenantID, in)
 	if err != nil {
+		details["error_code"] = auditErrorCode(err)
+		s.audit(r, p, audit.CategoryAudit, "connector.create", audit.OutcomeFailure,
+			audit.Resource{Type: "connector"}, details)
 		storeErr(w, r, err)
 		return
 	}
+	s.audit(r, p, audit.CategoryAudit, "connector.create", audit.OutcomeSuccess,
+		audit.Resource{Type: "connector", ID: c.ID}, details)
 	w.Header().Set("Location", "/v1/connectors/"+c.ID)
 	writeJSON(w, http.StatusCreated, c)
 }
@@ -263,6 +288,30 @@ func storeErr(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
+func auditErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return "not_found"
+	case errors.Is(err, ErrConflict):
+		return "conflict"
+	case errors.Is(err, ErrBadReference):
+		return "bad_reference"
+	default:
+		return "internal"
+	}
+}
+
+func (s *Server) audit(r *http.Request, p goauth.Principal, category audit.Category, action string,
+	outcome audit.Outcome, resource audit.Resource, details map[string]string,
+) {
+	if s.Audit == nil {
+		return
+	}
+	e := audit.NewEvent(audit.Claims{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR},
+		category, action, outcome, resource).WithTrace("", r.Header.Get("X-Request-ID")).WithDetails(details)
+	_ = s.Audit.Submit(e)
+}
+
 type errBody struct {
 	Code    string         `json:"code"`
 	Message string         `json:"message"`
@@ -282,6 +331,7 @@ func traceID(w http.ResponseWriter, r *http.Request) string {
 		id = hex.EncodeToString(b)
 	}
 	w.Header().Set("X-Request-ID", id)
+	r.Header.Set("X-Request-ID", id)
 	return id
 }
 

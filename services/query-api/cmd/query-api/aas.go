@@ -34,7 +34,7 @@ func (a aasAuthenticator) Authenticate(r *http.Request) (query.Principal, error)
 			return query.Principal{}, query.ErrUnauthenticated
 		}
 	}
-	return query.Principal{TenantID: p.TenantID, Scopes: p.Scopes}, nil
+	return query.Principal{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, AMR: p.AMR, Scopes: p.Scopes}, nil
 }
 
 // sameIdentity mirrors auth.RequireActive: every identity field AAS returned must equal the verified one.

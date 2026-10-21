@@ -81,9 +81,18 @@ func main() {
 		}
 		defer kafka.Close()
 	}
+	auditCtx, auditCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	mirror, auditPool, err := newAuditMirror(auditCtx, os.Getenv)
+	auditCancel()
+	if err != nil {
+		log.Fatalf("audit mirror: %v", err)
+	}
+	if mirror != nil {
+		defer auditPool.Close()
+	}
 	serveMetrics(os.Getenv("QUARANTINE_METRICS_ADDR"))
 	handler := (replay.BrowserHandler{
-		Auth: authenticator, Store: store, ReplayPlanner: store, ReplayJobs: kafka, Audit: kafka,
+		Auth: authenticator, Store: store, ReplayPlanner: store, ReplayJobs: kafka, Audit: kafka, AuditMirror: mirror,
 	}).Routes()
 	server := &http.Server{Addr: env("LISTEN_ADDR", ":8085"), Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 
@@ -101,6 +110,9 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if err := mirror.close(ctx); err != nil {
+		log.Printf("audit mirror shutdown: %v", err)
+	}
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}

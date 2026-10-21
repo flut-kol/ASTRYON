@@ -3,9 +3,11 @@ package adminapi
 import (
 	"net/http"
 	"strconv"
+
+	goauth "github.com/astryon/go-common/auth"
 )
 
-func (s *Server) listSources(w http.ResponseWriter, r *http.Request, tenant string) {
+func (s *Server) listSources(w http.ResponseWriter, r *http.Request, p goauth.Principal) {
 	if s.Sources == nil {
 		writeErr(w, r, http.StatusServiceUnavailable, "unavailable", "sources store not configured")
 		return
@@ -31,7 +33,7 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request, tenant stri
 		writeErr(w, r, http.StatusBadRequest, "invalid_request", "invalid cursor")
 		return
 	}
-	items, err := s.Sources.ListSources(r.Context(), tenant, after, limit+1)
+	items, err := s.Sources.ListSources(r.Context(), p.TenantID, after, limit+1)
 	if err != nil {
 		storeErr(w, r, err)
 		return
@@ -47,7 +49,7 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request, tenant stri
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
-func (s *Server) getSource(w http.ResponseWriter, r *http.Request, tenant string) {
+func (s *Server) getSource(w http.ResponseWriter, r *http.Request, p goauth.Principal) {
 	if s.Sources == nil {
 		writeErr(w, r, http.StatusServiceUnavailable, "unavailable", "sources store not configured")
 		return
@@ -57,7 +59,7 @@ func (s *Server) getSource(w http.ResponseWriter, r *http.Request, tenant string
 		writeErr(w, r, http.StatusBadRequest, "invalid_request", "invalid source id")
 		return
 	}
-	src, err := s.Sources.GetSource(r.Context(), tenant, id)
+	src, err := s.Sources.GetSource(r.Context(), p.TenantID, id)
 	if err != nil {
 		storeErr(w, r, err)
 		return

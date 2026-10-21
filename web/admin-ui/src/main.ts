@@ -6,7 +6,7 @@ import { applyTheme, getTheme, setTheme, THEMES, type Theme } from './theme';
 import { getSource, getToken, loginUrl, setSource, setToken, takeTokenFromHash } from './auth';
 import { ApiError, type Ctx } from './http';
 import { parseProm } from './prom';
-import { getUpload, listUploads, parseTags, SENSITIVITIES, SOURCE_TYPES, STATUSES, uploadFile, type UploadItem } from './upload';
+import { getUpload, listUploads, parseTags, previewUpload, SENSITIVITIES, SOURCE_TYPES, STATUSES, uploadFile, type UploadItem } from './upload';
 import { fmtNum, lastHours, localToRfc3339, metricsSummary, qualitySummary, queryEvents } from './query';
 import { CONNECTOR_KINDS, createConnector, listConnectors, parseConfig, setConnectorEnabled, validateConnector } from './connectors';
 import { createExport, getExport, isTerminal, knownExports, rememberExport, validateSpec, type ExportJob } from './exports';
@@ -14,6 +14,7 @@ import { canPublish, listQuarantine, planReplay, publishReplay, type ReplayReque
 import { listJobs } from './jobs';
 import { listSources } from './sources';
 import { listReplays, REPLAY_STATUSES } from './replays';
+import { searchText } from './textSearch';
 
 const env = import.meta.env;
 const B = {
@@ -38,6 +39,7 @@ if (frag) { setToken(frag); history.replaceState(null, '', location.pathname + l
 const ROUTES: [string, string, (el: HTMLElement) => void | Promise<void>][] = [
   ['overview', 'Overview', overview], ['uploads', 'Uploads', uploads], ['events', 'Events', events],
   ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['replays', 'Replays', replaysPage], ['jobs', 'Jobs', jobsPage], ['sources', 'Sources', sourcesPage],
+  ['files', 'File API', filesPage], ['search', 'Text search', textSearchPage], ['access', 'Access & roles', accessPage],
 ];
 
 function na(what: string) { return h('div', { class: 'na' }, t('{what}: API not available in this build.', { what })); }
@@ -62,8 +64,13 @@ function sourceInput() { return h('input', { size: '38', placeholder: t('source 
 
 async function overview(el: HTMLElement) {
   const out = live(); out.append(t('Loading...'));
-  el.append(h('h2', {}, t('Overview')), out);
-  const kp = (l: string, v: string, cls = '') => h('div', { class: 'card kpi' }, h('span', { class: 'mut' }, l), h('b', { class: cls }, v));
+  el.append(h('div', { class: 'page-hero' },
+    h('div', { class: 'eyebrow' }, t('Operations console')),
+    h('h2', {}, t('Overview')),
+    h('p', { class: 'hero-copy' }, t('A calm, tenant-safe view of ingestion, processing and data quality.')),
+  ), out);
+  const kp = (l: string, v: string, cls = '', detail = '') => h('div', { class: 'card kpi' },
+    h('span', { class: 'kpi-label' }, l), h('b', { class: cls }, v), detail ? h('span', { class: 'kpi-detail' }, detail) : null);
   const kpis: Node[] = [];
   try {
     const r = await fetch(`${B.gateway}/healthz`);
@@ -74,13 +81,36 @@ async function overview(el: HTMLElement) {
   try {
     const r = await fetch(`${B.gateway}/metrics`);
     if (r.ok) {
-      const s = parseProm(await r.text()).filter((x) => x.name.startsWith('astryon_') && x.name.endsWith('_total'));
+      const metrics = parseProm(await r.text()).filter((x) => x.name.startsWith('astryon_') && x.name.endsWith('_total'));
+      const total = metrics.find((x) => x.name === 'astryon_gateway_ack_total' && !Object.keys(x.labels).length)?.value ?? 0;
+      const errors = metrics.find((x) => x.name === 'astryon_gateway_ack_errors_total' && !Object.keys(x.labels).length)?.value ?? 0;
+      kpis.push(kp(t('Accepted events'), fmtNum(total), 'ok', t('gateway acknowledgements')));
+      kpis.push(kp(t('Ack errors'), fmtNum(errors), errors ? 'err' : 'ok', t('last exposed counter')));
+      const s = metrics;
       counters = s.length ? table(['metric', 'labels', 'value'], s.map((x) => [x.name, Object.entries(x.labels).map(([k, v]) => `${k}=${v}`).join(' '), fmtNum(x.value)]), 'Gateway counters') : h('span', { class: 'mut' }, t('no counters yet'));
     }
   } catch { /* leave default */ }
+  if (!kpis.length) kpis.push(kp(t('Accepted events'), '—', '', t('waiting for gateway metrics')), kp(t('Ack errors'), '—', '', t('waiting for gateway metrics')));
   clear(out);
-  out.append(h('div', { class: 'kpis' }, kpis), h('div', { class: 'card' }, h('h3', {}, t('Gateway counters (public /metrics)')), counters),
-    h('div', { class: 'card mut' }, t('File API and query API expose no public health endpoint in this build; their pages report errors inline.')));
+  const service = (name: string, state: string, cls: string, note: string) => h('div', { class: 'service-row' },
+    h('span', { class: `status-dot ${cls}` }), h('div', { class: 'service-copy' }, h('b', {}, name), h('span', { class: 'mut small' }, note)), h('span', { class: `status-pill ${cls}` }, state));
+  out.append(h('div', { class: 'kpis' }, kpis),
+    h('div', { class: 'overview-grid' },
+      h('div', { class: 'card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('System health')), h('p', { class: 'mut small' }, t('Live reachability from this session'))), h('span', { class: 'live-badge' }, h('span', { class: 'status-dot ok' }), t('Live'))),
+        h('div', { class: 'service-list' },
+          service('Gateway', t('Healthy'), 'ok', t('Ingestion and public metrics')),
+          service('Query API', t('Available on demand'), 'neutral', t('Open Events or Quality to check')),
+          service('File API', t('Available on demand'), 'neutral', t('Open Uploads or Jobs to check')),
+          service('Control plane', t('Protected'), 'neutral', t('Connectors, sources and replays')))),
+      h('div', { class: 'card quick-card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('Quick actions')), h('p', { class: 'mut small' }, t('Common operator workflows')))),
+        h('div', { class: 'quick-actions' },
+          h('a', { class: 'quick-action', href: '#/uploads' }, svg(ICONS.uploads, 18), h('span', {}, h('b', {}, t('Upload data')), h('small', {}, t('CSV, NDJSON or Parquet')))),
+          h('a', { class: 'quick-action', href: '#/events' }, svg(ICONS.events, 18), h('span', {}, h('b', {}, t('Explore events')), h('small', {}, t('Tenant-scoped search')))),
+          h('a', { class: 'quick-action', href: '#/quality' }, svg(ICONS.quality, 18), h('span', {}, h('b', {}, t('Review quality')), h('small', {}, t('Metrics and flags')))),
+          h('a', { class: 'quick-action', href: '#/quarantine' }, svg(ICONS.quarantine, 18), h('span', {}, h('b', {}, t('Handle quarantine')), h('small', {}, t('Dry-run before replay')))),
+        ))),
+    h('div', { class: 'card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('Gateway counters')), h('p', { class: 'mut small' }, t('Public /metrics, no tenant labels')))), counters),
+    h('div', { class: 'callout' }, h('span', { class: 'callout-icon' }, 'i'), h('div', {}, h('b', {}, t('Privacy by design')), h('p', { class: 'mut small' }, t('Tenant identity comes from the validated token. The UI never sends tenant_id in a query, form or header.')))));
 }
 
 function uploadForm(onDone: () => void) {
@@ -159,6 +189,15 @@ async function uploads(el: HTMLElement) {
 function detailCard(u: UploadItem) {
   const j = u.job;
   const quarantined = j?.status === 'QUARANTINED';
+  const previewOut = live('preview-output');
+  const previewButton = h('button', { type: 'button', class: 'pri', onclick: async () => {
+    clear(previewOut); previewOut.append(t('Loading preview...'));
+    try {
+      const p = await previewUpload(ctx, B.files, u.file_object_id); clear(previewOut);
+      if (p.mode === 'content') previewOut.append(h('pre', { class: 'file-preview' }, p.content ?? ''));
+      else previewOut.append(h('div', { class: 'callout' }, h('b', {}, t('Metadata only')), h('p', { class: 'mut small' }, p.reason ?? t('Content is hidden by policy or this file type is unsupported.'))));
+    } catch (e) { clear(previewOut); previewOut.append(errBox(e)); }
+  } }, t('View safe preview'));
   return h('div', { class: 'card' }, h('h3', {}, t('Upload {id}', { id: u.file_object_id })),
     table(['field', 'value'], [
       [t('source'), u.source_id], [t('source type'), human('sourceType', u.source_type)], [t('sensitivity'), human('sensitivity', u.sensitivity)], [t('committed'), u.committed ? t('yes') : t('no')], [t('size'), `${fmtBytes(u.size_bytes)} (${fmtNum(u.size_bytes)} ${t('bytes')})`],
@@ -168,7 +207,8 @@ function detailCard(u: UploadItem) {
       [t('error'), j?.error ? (errorText(j.error, 0) ?? human('reason', j.error)) : '-'],
       [t('content labels (counts only)'), Object.entries(j?.labels ?? {}).map(([k, v]) => `${human('label', k)}: ${v.count} (${t('{n} fields', { n: v.fields.length })})`).join('; ') || '-'],
       [t('profile'), u.profile ? `${t('retention')}: ${human('retention', u.profile.retention_class) || '-'}; ${t('export')}: ${u.profile.export_allowed === undefined ? '-' : u.profile.export_allowed ? t('allowed') : t('not allowed')}` : '-'],
-    ], 'Upload details'), quarantined ? h('p', { class: 'warn' }, t('Held back by content policy: nothing reached the sink.')) : null);
+    ], 'Upload details'), quarantined ? h('p', { class: 'warn' }, t('Held back by content policy: nothing reached the sink.')) : null,
+    h('div', { class: 'preview-panel' }, h('div', { class: 'card-heading' }, h('div', {}, h('h4', {}, t('File content')), h('p', { class: 'mut small' }, t('Only bounded, safe text is shown; sensitive values remain hidden.'))), previewButton), previewOut));
 }
 
 function rangeControls() {
@@ -369,6 +409,78 @@ async function sourcesPage(el: HTMLElement) {
   await load();
 }
 
+async function filesPage(el: HTMLElement) {
+  el.append(h('div', { class: 'page-hero' },
+    h('div', { class: 'eyebrow' }, t('Ingestion')),
+    h('h2', {}, t('File API')),
+    h('p', { class: 'hero-copy' }, t('Upload intake, processing jobs and content-policy outcomes in one place.'))));
+  const out = live(); out.append(t('Loading...'));
+  try {
+    const [uploadsPage, jobsPageData] = await Promise.all([
+      listUploads(ctx, B.files, { limit: '8' }),
+      listJobs(ctx, B.files, { cursor: undefined }),
+    ]);
+    const uploadsCount = uploadsPage.items.length;
+    const jobs = jobsPageData.items;
+    const succeeded = jobs.filter((j) => j.status === 'SUCCEEDED').length;
+    const held = jobs.filter((j) => j.status === 'QUARANTINED').length;
+    const failed = jobs.filter((j) => j.status === 'FAILED').length;
+    const card = (label: string, value: string, tone = '') => h('div', { class: 'card kpi' }, h('span', { class: 'kpi-label' }, label), h('b', { class: tone }, value));
+    clear(out);
+    out.append(h('div', { class: 'kpis' }, card(t('Recent uploads'), fmtNum(uploadsCount)), card(t('Succeeded jobs'), fmtNum(succeeded), 'ok'), card(t('Quarantined'), fmtNum(held), held ? 'warn' : 'ok'), card(t('Failed jobs'), fmtNum(failed), failed ? 'err' : 'ok')),
+      h('div', { class: 'overview-grid' },
+        h('div', { class: 'card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('Recent uploads')), h('p', { class: 'mut small' }, t('Open Uploads for filters and detail'))), h('a', { class: 'text-link', href: '#/uploads' }, t('View all'))),
+          uploadsCount ? table(['id', 'type', 'status', 'size', 'created'], uploadsPage.items.map((u) => [h('a', { href: '#/uploads', class: 'text-link' }, u.file_object_id.slice(0, 12)), human('sourceType', u.source_type), h('span', { class: u.job?.status === 'FAILED' ? 'err' : u.job?.status === 'QUARANTINED' ? 'warn' : 'ok' }, human('status', u.job?.status) || t('pending')), fmtBytes(u.size_bytes), timeEl(u.created_at)]), 'Recent file uploads') : h('span', { class: 'mut' }, t('No uploads yet.'))),
+        h('div', { class: 'card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('Processing jobs')), h('p', { class: 'mut small' }, t('Read-only operational snapshot'))), h('a', { class: 'text-link', href: '#/jobs' }, t('View jobs'))),
+          jobs.length ? table(['job', 'status', 'processed', 'failed'], jobs.slice(0, 8).map((j) => [j.id.slice(0, 12), h('span', { class: j.status === 'FAILED' ? 'err' : j.status === 'QUARANTINED' ? 'warn' : j.status === 'SUCCEEDED' ? 'ok' : '' }, human('status', j.status)), fmtNum(j.events_processed), fmtNum(j.events_failed)]), 'Recent processing jobs') : h('span', { class: 'mut' }, t('No jobs yet.')))),
+      h('div', { class: 'callout' }, h('span', { class: 'callout-icon' }, 'i'), h('div', {}, h('b', {}, t('File safety')), h('p', { class: 'mut small' }, t('Labels show counts only. Credentials and personal-data values never appear in the admin UI.')))));
+  } catch (e) { clear(out); out.append(e instanceof ApiError && e.unavailable ? na(t('File API is not running or not reachable')) : errBox(e)); }
+}
+
+async function textSearchPage(el: HTMLElement) {
+  el.append(h('div', { class: 'page-hero' },
+    h('div', { class: 'eyebrow' }, t('ClickHouse explorer')),
+    h('h2', {}, t('Text search')),
+    h('p', { class: 'hero-copy' }, t('Find indexed tokens in normalized file content without writing SQL.'))));
+  const c = rangeControls(); const q = h('input', { size: '34', maxlength: '128', placeholder: t('word or token'), autocomplete: 'off' }); const out = live(); let stack: string[] = [];
+  const load = async (cursor?: string) => {
+    clear(out); out.append(t('Searching...'));
+    const from = localToRfc3339(c.from.value), to = localToRfc3339(c.to.value), text = q.value.trim();
+    if (!from || !to || !text) { clear(out); out.append(h('div', { class: 'err', role: 'alert' }, t('A search term and time range are required.'))); return; }
+    try {
+      const p = await searchText(ctx, B.query, { text, from, to, source_id: c.source.value.trim() || undefined, processing_version: c.pv.value ? Number(c.pv.value) : undefined, cursor });
+      clear(out);
+      if (p.items.length) {
+        out.append(table(['time', 'type', 'entity', 'source', 'event', 'match'], p.items.map((x) => [timeEl(x.event_time), x.event_type ?? '-', x.entity_id ?? '-', x.source_id, x.event_id, x.snippet ?? text]), 'Text search results'),
+          h('p', { class: 'mut small' }, t('Search is tenant-scoped and backed by the ClickHouse token index.')));
+      } else out.append(h('div', { class: 'mut' }, t('No indexed matches.')));
+      const nav = h('div', { class: 'row' }); if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, t('Previous'))); if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, t('Next'))); out.append(nav);
+    } catch (e) { clear(out); out.append(e instanceof ApiError && e.unavailable ? na(t('Query API is not running or not reachable')) : errBox(e)); }
+  };
+  el.append(h('div', { class: 'card' }, h('div', { class: 'row' }, field('Search token', q), field('From', c.from), field('To', c.to), field('Source ID', c.source), field('Proc. version', c.pv), h('button', { class: 'pri', onclick: () => { stack = []; void load(); } }, t('Search'))), h('p', { class: 'mut small' }, t('Search uses normalized, masked file content. SQL and tenant_id are never sent from the browser.')), out));
+}
+
+async function accessPage(el: HTMLElement) {
+  const roles: [string, string, string[]][] = [
+    ['platform-admin', 'Platform administration', ['query:read', 'uploads:write', 'export:read', 'export:write', 'connectors:write', 'sources:read', 'jobs:read', 'replay:read', 'replay:write', 'quarantine:read', 'quarantine-payload:read', 'quarantine-replay:read', 'quarantine-replay:write']],
+    ['tenant-admin', 'Tenant administration', ['query:read', 'uploads:write', 'export:read', 'export:write', 'connectors:write', 'sources:read', 'jobs:read', 'replay:read', 'replay:write', 'quarantine:read', 'quarantine-payload:read', 'quarantine-replay:read', 'quarantine-replay:write']],
+    ['operator', 'Operations', ['query:read', 'uploads:write', 'connectors:write', 'sources:read', 'jobs:read', 'replay:read', 'replay:write', 'quarantine:read', 'quarantine-replay:read']],
+    ['analyst', 'Analytics', ['query:read', 'export:read']],
+    ['auditor', 'Audit', ['query:read', 'sources:read', 'jobs:read', 'quarantine:read']],
+    ['service-account', 'Service account', ['events:write']],
+  ];
+  const domains: [string, string, string][] = [
+    ['File API / uploads / jobs', 'uploads:write, jobs:read', '#/files'], ['Events / text search / quality', 'query:read', '#/events'],
+    ['Sources / connectors', 'sources:read, connectors:write', '#/sources'], ['Exports', 'export:read, export:write', '#/exports'],
+    ['Replays', 'replay:read, replay:write', '#/replays'], ['Quarantine', 'quarantine:read, quarantine:replay:write', '#/quarantine'],
+  ];
+  el.append(h('div', { class: 'page-hero' }, h('div', { class: 'eyebrow' }, t('Administration')), h('h2', {}, t('Access & roles')), h('p', { class: 'hero-copy' }, t('Role and scope visibility for the same data sources exposed in this console.'))),
+    h('div', { class: 'callout' }, h('span', { class: 'callout-icon' }, 'i'), h('div', {}, h('b', {}, t('Roles are managed by the external AAS')), h('p', { class: 'mut small' }, t('This console does not mutate roles or permissions. The validated token is the source of truth; changes are made in AAS and take effect on the next session.')))),
+    h('div', { class: 'card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('Role catalogue')), h('p', { class: 'mut small' }, t('Reference matrix; effective access is always checked by each service.')))),
+      h('div', { class: 'role-grid' }, roles.map(([name, label, scopes]) => h('article', { class: 'role-card' }, h('h4', {}, name), h('p', { class: 'mut small' }, t(label)), h('div', { class: 'chips' }, scopes.map((s) => h('span', { class: 'chip' }, s))))))),
+    h('div', { class: 'card' }, h('h3', {}, t('Data domains and menu access')), table(['menu / data domain', 'required scopes', 'open'], domains.map(([name, scope, href]) => [name, scope, h('a', { class: 'text-link', href }, t('Open'))]), 'Data domains')));
+}
+
 async function replaysPage(el: HTMLElement) {
   el.append(h('h2', {}, t('Replays')));
   const list = live(); let stack: string[] = [];
@@ -467,12 +579,22 @@ const ICONS: Record<string, string[]> = {
   replays: ['M3 12a9 9 0 1 0 3-6.7', 'M3 4v5h5', 'M12 8v4l3 2'],
   jobs: ['M4 6h16', 'M4 12h16', 'M4 18h10'],
   sources: ['M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z', 'M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6', 'M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3'],
+  files: ['M5 4h9l5 5v11H5z', 'M14 4v6h6', 'M8 14h8', 'M8 17h6'],
+  search: ['M11 4a7 7 0 1 0 4.9 12L21 21', 'M11 8v6', 'M8 11h6'],
+  access: ['M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z', 'M9 12l2 2 4-4'],
 };
 const THEME_ICONS: Record<Theme, string[]> = {
   system: ['M3 5h18v11H3z', 'M8 20h8', 'M12 16v4'],
   light: ['M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z', 'M12 2v2', 'M12 20v2', 'M4.9 4.9l1.4 1.4', 'M17.7 17.7l1.4 1.4', 'M2 12h2', 'M20 12h2', 'M4.9 19.1l1.4-1.4', 'M17.7 6.3l1.4-1.4'],
   dark: ['M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z'],
 };
+const NAV_COLLAPSED_KEY = 'astryon_admin_nav_collapsed';
+function navIsCollapsed() { return localStorage.getItem(NAV_COLLAPSED_KEY) === '1'; }
+function toggleNav() {
+  localStorage.setItem(NAV_COLLAPSED_KEY, navIsCollapsed() ? '0' : '1');
+  prefChange = true;
+  render();
+}
 function logo() {
   const el = svg(['M4 19L12 4l8 15', 'M8 13h8'], 28);
   el.setAttribute('stroke-width', '2.2');
@@ -493,10 +615,15 @@ function prefs(): HTMLElement {
 }
 // Shared page shell: skip link, banner, labelled navigation with aria-current, focusable main landmark.
 function shell(root: HTMLElement, page: string, session: HTMLElement): HTMLElement {
-  const nav = h('nav', { 'aria-label': t('Main') }, ROUTES.map(([k, l]) => h('a', { href: `#/${k}`, class: k === page ? 'on' : '', ...(k === page ? { 'aria-current': 'page' } : {}) }, svg(ICONS[k] ?? ICONS.jobs, 18), h('span', {}, t(l)))));
+  const groups: [string, string[]][] = [['Monitor', ['overview', 'events', 'quality', 'search']], ['Operate', ['files', 'uploads', 'jobs', 'exports', 'quarantine', 'replays']], ['Manage', ['connectors', 'sources', 'access']]];
+  const nav = h('nav', { 'aria-label': t('Main') }, groups.map(([label, keys]) => h('div', { class: 'nav-group' },
+    h('span', { class: 'nav-label' }, t(label)), keys.map((key) => { const route = ROUTES.find(([k]) => k === key)!; return h('a', { href: `#/${key}`, title: t(route[1]), class: key === page ? 'on' : '', ...(key === page ? { 'aria-current': 'page' } : {}) }, svg(ICONS[key] ?? ICONS.jobs, 18), h('span', {}, t(route[1]))); }))));
   const main = h('main', { id: 'main', tabindex: '-1' });
+  const collapsed = navIsCollapsed();
+  root.classList.toggle('nav-collapsed', collapsed);
+  const navButton = h('button', { class: 'icon-btn nav-toggle', type: 'button', title: t(collapsed ? 'Expand navigation' : 'Collapse navigation'), 'aria-label': t(collapsed ? 'Expand navigation' : 'Collapse navigation'), 'aria-pressed': String(collapsed), onclick: toggleNav }, svg(['M4 6h16', 'M4 12h16', 'M4 18h16'], 18));
   root.append(h('a', { class: 'skip', href: '#main', onclick: (e: Event) => { e.preventDefault(); main.focus(); } }, t('Skip to main content')),
-    h('header', {}, h('h1', { class: 'brand' }, logo(), 'ASTRYON Admin'), h('div', { class: 'tools' }, session, prefs())),
+    h('header', {}, h('div', { class: 'brand-wrap' }, navButton, h('h1', { class: 'brand' }, logo(), h('span', {}, 'ASTRYON Admin', h('small', {}, t('Data operations'))))), h('div', { class: 'tools' }, session, prefs())),
     h('aside', {}, nav), main);
   const label = ROUTES.find(([k]) => k === page)?.[1];
   document.title = `${t(label ?? 'Not found')} - ASTRYON Admin`;

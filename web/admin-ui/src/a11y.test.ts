@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import axe from 'axe-core';
 import { mockApi } from './mockApi';
 
-const ROUTES = ['overview', 'uploads', 'events', 'quality', 'connectors', 'exports', 'quarantine', 'replays', 'jobs', 'sources'];
+const ROUTES = ['overview', 'uploads', 'events', 'quality', 'connectors', 'exports', 'quarantine', 'replays', 'jobs', 'sources', 'files', 'search', 'access'];
 
 function stubFetch(fail?: number) {
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -75,7 +75,7 @@ describe('axe: Ukrainian UI', () => {
   it('main routes have no serious or critical violations and lang=uk', async () => {
     localStorage.setItem('astryon_admin_lang', 'ua');
     try {
-      for (const route of ['overview', 'uploads', 'events', 'quarantine']) {
+      for (const route of ['overview', 'uploads', 'events', 'quarantine', 'files', 'search', 'access']) {
         await mount(route);
         expect(document.documentElement.lang).toBe('uk');
         expect(await violations(), route).toEqual([]);

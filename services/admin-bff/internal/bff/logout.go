@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/astryon/audit"
 )
 
 // OIDC Back-Channel Logout 1.0: AAS POSTs a signed logout_token to /auth/backchannel-logout when a user's AAS
@@ -258,11 +260,14 @@ func (s *Server) backchannelLogout(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "invalid_request", "logout_token rejected")
 		return
 	}
-	var n int
+	var ended []Record
 	if cl.Sid != "" { // a session id names exactly one AAS session; prefer it over the broader sub
-		n, err = s.store.DeleteBySID(r.Context(), cl.Sid)
+		ended, err = s.store.DeleteBySID(r.Context(), cl.Sid)
 	} else {
-		n, err = s.store.DeleteBySub(r.Context(), cl.Sub)
+		ended, err = s.store.DeleteBySub(r.Context(), cl.Sub)
+	}
+	for _, rec := range ended {
+		s.auditSession(rec, "session.backchannel_logout", audit.OutcomeSuccess)
 	}
 	if err != nil {
 		// The jti is already burned, so AAS's retry of this exact token is refused; the session then ends at its expiry.
@@ -270,6 +275,6 @@ func (s *Server) backchannelLogout(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusServiceUnavailable, "unavailable", "session store unavailable")
 		return
 	}
-	s.o.Logger.Printf("back-channel logout: %d session(s) ended", n)
+	s.o.Logger.Printf("back-channel logout: %d session(s) ended", len(ended))
 	w.WriteHeader(http.StatusOK)
 }

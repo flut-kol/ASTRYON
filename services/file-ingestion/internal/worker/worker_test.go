@@ -15,6 +15,7 @@ import (
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/parse"
+	malwarescan "github.com/astryon/file-ingestion/internal/scanner"
 )
 
 const file = "{\"a\":1}\n{\"a\":2}\nnot json\n{\"a\":4}\n{\"a\":5}\n"
@@ -89,6 +90,56 @@ type fakeSink struct {
 	keys []string
 	bad  int
 	err  error
+}
+
+type fakeMalwareScanner struct {
+	verdict malwarescan.Verdict
+	called  bool
+	path    string
+}
+
+func (f *fakeMalwareScanner) Scan(_ context.Context, in malwarescan.File) malwarescan.Verdict {
+	f.called, f.path = true, in.Path
+	return f.verdict
+}
+
+func TestMalwareScannerRunsBeforeSinkAndCleansStage(t *testing.T) {
+	ms := &fakeMalwareScanner{verdict: malwarescan.Verdict{Status: malwarescan.Clean}}
+	st, sink := &fakeStore{}, &fakeSink{}
+	w := New(Config{Store: st, Source: fakeSource{file, "fp1"}, Sink: sink, BatchSize: 2,
+		Heartbeat: time.Hour, MalwareScanner: ms, ScannerStageDir: t.TempDir()})
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !ms.called || ms.path == "" || !st.succeeded || len(sink.keys) == 0 {
+		t.Fatalf("scanner=%+v store=%+v sink=%+v", ms, st, sink)
+	}
+	if _, err := os.Stat(ms.path); !os.IsNotExist(err) {
+		t.Fatalf("staged scanner file remains: %v", err)
+	}
+}
+
+func TestMalwareScannerQuarantinesPositiveVerdict(t *testing.T) {
+	for _, status := range []malwarescan.Status{malwarescan.Infected, malwarescan.Encrypted} {
+		ms := &fakeMalwareScanner{verdict: malwarescan.Verdict{Status: status}}
+		st, sink := &fakeStore{}, &fakeSink{}
+		w := New(Config{Store: st, Source: fakeSource{file, "fp1"}, Sink: sink, MalwareScanner: ms, ScannerStageDir: t.TempDir(), Heartbeat: time.Hour})
+		if _, err := w.RunOnce(context.Background()); err != nil {
+			t.Fatalf("%s: %v", status, err)
+		}
+		if st.quarCode == "" || st.succeeded || len(sink.keys) != 0 {
+			t.Fatalf("%s: store=%+v sink=%+v", status, st, sink)
+		}
+	}
+}
+
+func TestMalwareScannerErrorRetriesAndNeverSinks(t *testing.T) {
+	ms := &fakeMalwareScanner{verdict: malwarescan.Verdict{Status: malwarescan.ScanError, ReasonCode: "provider_unavailable", Retryable: true}}
+	st, sink := &fakeStore{}, &fakeSink{}
+	w := New(Config{Store: st, Source: fakeSource{file, "fp1"}, Sink: sink, MalwareScanner: ms, ScannerStageDir: t.TempDir(), Heartbeat: time.Hour})
+	if _, err := w.RunOnce(context.Background()); err == nil || !st.failRetry || len(sink.keys) != 0 {
+		t.Fatalf("err=%v store=%+v sink=%+v", err, st, sink)
+	}
 }
 
 func (f *fakeSink) Accept(_ context.Context, _ jobs.Job, valid, invalid []Item) error {

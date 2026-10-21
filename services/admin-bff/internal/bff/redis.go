@@ -187,33 +187,38 @@ func (s *redisStore) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *redisStore) deleteIndexed(ctx context.Context, kind, val string) (int, error) {
+func (s *redisStore) deleteIndexed(ctx context.Context, kind, val string) ([]Record, error) {
 	ik := s.pre + kind + ":" + val
 	v, err := s.rc.do(ctx, "SMEMBERS", ik)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	n := 0
+	var deleted []Record
 	arr, _ := v.([]any)
 	for _, m := range arr {
 		b, _ := m.([]byte)
-		r, err := s.rc.do(ctx, "DEL", s.pre+"s:"+string(b))
-		if err != nil {
-			return n, err
+		id := string(b)
+		rec, ok, getErr := s.GetSession(ctx, id)
+		if getErr != nil {
+			return deleted, getErr
 		}
-		if c, _ := r.(int64); c > 0 {
-			n++
+		r, err := s.rc.do(ctx, "DEL", s.pre+"s:"+id)
+		if err != nil {
+			return deleted, err
+		}
+		if c, _ := r.(int64); c > 0 && ok {
+			deleted = append(deleted, rec)
 		}
 	}
 	_, err = s.rc.do(ctx, "DEL", ik)
-	return n, err
+	return deleted, err
 }
 
-func (s *redisStore) DeleteBySID(ctx context.Context, sid string) (int, error) {
+func (s *redisStore) DeleteBySID(ctx context.Context, sid string) ([]Record, error) {
 	return s.deleteIndexed(ctx, "sid", sid)
 }
 
-func (s *redisStore) DeleteBySub(ctx context.Context, sub string) (int, error) {
+func (s *redisStore) DeleteBySub(ctx context.Context, sub string) ([]Record, error) {
 	return s.deleteIndexed(ctx, "sub", sub)
 }
 

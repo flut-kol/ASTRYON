@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/astryon/audit"
 	ec "github.com/astryon/event-contracts"
 )
 
@@ -28,15 +29,28 @@ const (
 
 // Server is the HTTP gateway.
 type Server struct {
-	cfg  Config
-	auth Authenticator
-	pub  Publisher
-	now  func() time.Time
-	m    metrics
+	cfg   Config
+	auth  Authenticator
+	pub   Publisher
+	audit AuditSink
+	now   func() time.Time
+	m     metrics
 }
 
-func NewServer(cfg Config, a Authenticator, p Publisher) *Server {
-	return &Server{cfg: cfg, auth: a, pub: p, now: time.Now}
+// AuditSink is the non-blocking subset of audit.Writer used on request paths.
+type AuditSink interface {
+	Submit(audit.Event) error
+	Stats() audit.Stats
+}
+
+// NewServer accepts an optional audit sink; persistence stays opt-in.
+func NewServer(cfg Config, a Authenticator, p Publisher, sinks ...AuditSink) *Server {
+	s := &Server{cfg: cfg, auth: a, pub: p, now: time.Now}
+	if len(sinks) > 0 && sinks[0] != nil {
+		s.audit = sinks[0]
+		s.m.auditStats = sinks[0].Stats
+	}
+	return s
 }
 
 // Handler returns the routed handler with request-ID middleware.
@@ -79,11 +93,19 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 func (s *Server) prelude(w http.ResponseWriter, r *http.Request) (Principal, string, bool) {
 	p, err := s.auth.Authenticate(r)
 	if err != nil {
+		// Invalid credentials have no validated tenant. The audit schema requires
+		// one, so never invent a tenant merely to persist this attempt.
+		if r.Header.Get("Authorization") == "" {
+			s.m.auditDeniedUnrecordable.Add(1)
+		} else {
+			s.m.auditTokenInvalidUnrecordable.Add(1)
+		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeErr(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required", nil)
 		return p, "", false
 	}
 	if !ec.IsUUID(p.TenantID) || !p.HasScope(ScopeEventsWrite) {
+		s.recordDenied(r, p, "missing_scope")
 		writeErr(w, r, http.StatusForbidden, "FORBIDDEN", "missing required scope "+ScopeEventsWrite, nil)
 		return p, "", false
 	}
@@ -149,6 +171,7 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request) {
 	}
 	it := parseItem(body)
 	if it.parseErr == nil && it.env.TenantID != "" && it.env.TenantID != p.TenantID {
+		s.recordDenied(r, p, "tenant_mismatch")
 		writeErr(w, r, http.StatusForbidden, "TENANT_MISMATCH", "tenant_id in body does not match authenticated tenant", nil)
 		return
 	}
@@ -192,6 +215,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	for i, raw := range req.Events {
 		items[i] = parseItem(raw)
 		if items[i].parseErr == nil && items[i].env.TenantID != "" && items[i].env.TenantID != p.TenantID {
+			s.recordDenied(r, p, "tenant_mismatch")
 			writeErr(w, r, http.StatusForbidden, "TENANT_MISMATCH", "tenant_id in body does not match authenticated tenant", map[string]int{"index": i})
 			return
 		}
@@ -214,6 +238,21 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		"accepted": counts["accepted"], "quarantined": counts["quarantined"], "failed": counts["failed"],
 		"results": results, "trace_id": requestID(r.Context()),
 	})
+}
+
+func (s *Server) recordDenied(r *http.Request, p Principal, reason string) {
+	if s.audit == nil {
+		return
+	}
+	e := audit.NewEvent(audit.Claims{
+		TenantID: p.TenantID,
+		Subject:  p.Subject,
+		ClientID: p.ClientID,
+		ACR:      p.ACR,
+	}, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied, audit.Resource{Type: "request"}).
+		WithTrace("", requestID(r.Context())).
+		WithDetails(map[string]string{"reason": reason, "method": r.Method, "route": r.URL.Path})
+	_ = s.audit.Submit(e) // best effort; writer stats expose rejection/drop
 }
 
 // process validates and publishes one event. "accepted" is returned only

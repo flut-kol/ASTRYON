@@ -44,6 +44,7 @@ func (r *requestStats) WritePrometheus(w io.Writer) {
 // no tenant or path labels. Durations cover the whole handler incl. auth, limiter wait and the backend call.
 var routeGroups = []string{"events", "aggregate", "metrics_summary", "quality_summary"}
 var authReasons = []string{"unauthenticated", "missing_scope", "invalid_tenant"}
+var auditGapReasons = []string{"unauthenticated_no_tenant", "invalid_tenant", "disabled", "submit_error"}
 var durationBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 
 type durHist struct {
@@ -55,6 +56,7 @@ type durHist struct {
 var (
 	durations [4]durHist
 	authFails [3]atomic.Int64
+	auditGaps [4]atomic.Int64
 )
 
 func indexOf(set []string, v string) int {
@@ -91,6 +93,12 @@ func (r *requestStats) authFailure(reason string) {
 	}
 }
 
+func (r *requestStats) auditGap(reason string) {
+	if i := indexOf(auditGapReasons, reason); i >= 0 {
+		auditGaps[i].Add(1)
+	}
+}
+
 // WriteDurations renders the histogram and auth-failure counter.
 func (r *requestStats) WriteDurations(w io.Writer) {
 	fmt.Fprint(w, "# HELP astryon_query_api_request_duration_seconds Query request duration by route group\n# TYPE astryon_query_api_request_duration_seconds histogram\n")
@@ -109,5 +117,9 @@ func (r *requestStats) WriteDurations(w io.Writer) {
 	fmt.Fprint(w, "# HELP astryon_query_api_auth_failures_total Rejected authentication/authorization by reason (unauthenticated, missing_scope, invalid_tenant)\n# TYPE astryon_query_api_auth_failures_total counter\n")
 	for i, reason := range authReasons {
 		fmt.Fprintf(w, "astryon_query_api_auth_failures_total{reason=%q} %d\n", reason, authFails[i].Load())
+	}
+	fmt.Fprint(w, "# HELP astryon_query_api_audit_gap_total Security denials not submitted to audit storage by bounded reason\n# TYPE astryon_query_api_audit_gap_total counter\n")
+	for i, reason := range auditGapReasons {
+		fmt.Fprintf(w, "astryon_query_api_audit_gap_total{reason=%q} %d\n", reason, auditGaps[i].Load())
 	}
 }

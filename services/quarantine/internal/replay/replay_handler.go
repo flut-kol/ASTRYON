@@ -140,12 +140,18 @@ func (h BrowserHandler) replayPublish(w http.ResponseWriter, r *http.Request) {
 	if err := h.ReplayJobs.PublishReplayJob(r.Context(), job); err != nil {
 		outcome = "publish_failed"
 		h.recordReplayOutcome(r.Context(), prepared, "aborted", "failed", now().UTC())
+		h.recordMirror(r.Context(), MirrorEvent{TenantID: prepared.TenantID, Subject: prepared.Subject,
+			Action: "quarantine.replay.publish", Outcome: "failure", ResourceType: "quarantine_replay",
+			ResourceID: prepared.ReplayID, TraceID: traceID, RequestID: traceID})
 		writeBrowserError(w, http.StatusBadGateway, "REPLAY_PUBLISH_FAILED", "replay job was not acknowledged", traceID)
 		return
 	}
 	// The prepared record is the fail-closed authorization audit. This outcome
 	// is best effort because the broker has already acknowledged the job.
 	h.recordReplayOutcome(r.Context(), prepared, "committed", "success", now().UTC())
+	h.recordMirror(r.Context(), MirrorEvent{TenantID: prepared.TenantID, Subject: prepared.Subject,
+		Action: "quarantine.replay.publish", Outcome: "success", ResourceType: "quarantine_replay",
+		ResourceID: prepared.ReplayID, TraceID: traceID, RequestID: traceID})
 	outcome = "published"
 	writeBrowserJSON(w, http.StatusAccepted, map[string]any{
 		"job_id": job.JobID, "status": "queued", "candidate_count": job.CandidateCount,
@@ -164,10 +170,27 @@ func (h BrowserHandler) authorizeReplay(w http.ResponseWriter, r *http.Request, 
 	}
 	p.TenantID = strings.ToLower(p.TenantID)
 	if !p.Scopes[scope] {
+		h.recordMirror(r.Context(), MirrorEvent{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID,
+			ACR: p.ACR, Action: "auth.denied", Outcome: "denied", ResourceType: "quarantine_replay",
+			TraceID: traceID, RequestID: traceID})
 		writeBrowserError(w, http.StatusForbidden, "FORBIDDEN", "missing scope "+scope, traceID)
 		return BrowserPrincipal{}, false
 	}
 	return p, true
+}
+
+func (h BrowserHandler) recordMirror(ctx context.Context, e MirrorEvent) {
+	if h.AuditMirror == nil || e.TenantID == "" {
+		return
+	}
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := h.AuditMirror.RecordMirror(detached, e); err != nil {
+		Metrics.incMirror(false)
+		log.Printf("quarantine audit mirror failed: %v", err)
+		return
+	}
+	Metrics.incMirror(true)
 }
 
 func parseReplayRequest(r *http.Request) (ReplayDryRunRequest, error) {

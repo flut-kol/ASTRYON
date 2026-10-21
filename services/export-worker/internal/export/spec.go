@@ -33,6 +33,9 @@ var (
 type Principal struct {
 	TenantID string
 	Subject  string
+	ClientID string
+	ACR      string
+	AMR      []string
 	Scopes   []string // used by the HTTP layer only
 }
 

@@ -43,6 +43,8 @@ type AuditEvent struct {
 	Time        time.Time `json:"ts"`
 	TenantID    string    `json:"tenant_id"`
 	Subject     string    `json:"subject"`
+	ClientID    string    `json:"client_id,omitempty"`
+	ACR         string    `json:"acr,omitempty"`
 	Action      string    `json:"action"`
 	ReplayID    string    `json:"replay_id"` // activation: replay_requests.id; start: job id; plan: empty
 	SourceID    string    `json:"source_id"`
