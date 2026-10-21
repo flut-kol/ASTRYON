@@ -34,10 +34,18 @@ PostgreSQL repository over `jobs`/`job_attempts` (migration 0004), kind `process
 and cannot move a checkpoint or finish the job. A re-claim returns the last checkpoint for resume. Live test (`FILEJOBS_PG_URL`, non-superuser
 role, migrations applied) proved claim exclusion, expiry fencing, resume and backoff on PostgreSQL 16.
 
+## Worker (`internal/worker`)
+
+`Worker.Run/RunOnce`: claim -> range-read from `Checkpoint.NextOffset` via `Source` -> `NDJSONFrom` -> batches (default 500) to an idempotent
+`Sink.Accept(valid, invalid)` -> `SaveCheckpoint` only after the sink accepted. A heartbeat goroutine cancels the work on `ErrFenced`, and a fenced
+worker writes nothing more. Failures: `Permanent(code)` -> FAILED; source fingerprint differing from the checkpoint -> `source_changed` (FAILED);
+anything else -> retryable with backoff. Shutdown leaves the lease to expire (Sweep re-queues from the checkpoint). Tests with fakes (race-clean);
+the concrete S3 `Source`, ClickHouse/Kafka `Sink` and a `cmd/` executable are not written yet.
+
 ## Remaining work
 
 - durable upload completion, checksum verification, malware/content scanning
   and object lifecycle;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
-- atomic sink-plus-checkpoint integration (idempotent sink via `DedupKey`) and the worker executable that drives the store;
+- concrete S3 `Source` (verified checksum as fingerprint), `Sink` (quarantine + normalized path, idempotent on `DedupKey`) and `cmd/file-worker`;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.
