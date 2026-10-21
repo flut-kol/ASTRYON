@@ -7,9 +7,10 @@ const axeSource = createRequire(import.meta.url).resolve('axe-core/axe.min.js');
 const PAGES = ['overview', 'uploads', 'events', 'quality', 'connectors', 'exports', 'quarantine', 'replays'];
 
 for (const scheme of ['light', 'dark'] as const) {
-  test(`axe incl. color-contrast, ${scheme} scheme, all pages`, async ({ page }) => {
+  for (const authed of [true, false]) {
+  test(`axe incl. color-contrast, ${scheme} scheme, ${authed ? 'signed in' : 'signed out'}, all pages`, async ({ page }) => {
     await page.emulateMedia({ colorScheme: scheme });
-    await page.route('**/auth/me', (r) => r.fulfill({ json: { authenticated: true, subject: 'ops@example' } }));
+    await page.route('**/auth/me', (r) => r.fulfill({ json: authed ? { authenticated: true, subject: 'ops@example' } : { authenticated: false } }));
     await page.route('**/api/**', (r) => {
       const m = mockApi(r.request().method(), new URL(r.request().url()).pathname);
       return r.fulfill({ status: m.status, contentType: m.text ? 'text/plain' : 'application/json', body: m.text ?? JSON.stringify(m.json ?? {}) });
@@ -30,4 +31,5 @@ for (const scheme of ['light', 'dark'] as const) {
     }
     expect(bad).toEqual([]);
   });
+  }
 }
