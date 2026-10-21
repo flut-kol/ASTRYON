@@ -135,7 +135,7 @@ components:
     bearer:
       type: http
       scheme: bearer
-      description: AAS access token with scope `astryon:uploads:write` (`Authorization: DPoP` with a proof where DPoP is enabled).
+      description: "AAS access token with scope `astryon:uploads:write` (`Authorization: DPoP` with a proof where DPoP is enabled)."
   responses:
     Error:
       description: |
