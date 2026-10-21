@@ -1,6 +1,6 @@
 // Command query-api serves POST /v1/query/events and /v1/query/aggregate (DPP-029).
 // Env: LISTEN_ADDR (:8082) CH_URL CH_DATABASE CH_USER CH_PASSWORD; DEV ONLY: QUERY_DEV_TOKEN + QUERY_DEV_TENANT.
-// AAS: AAS_BASE_URL AAS_ISSUER AAS_AUDIENCE AAS_ENV AAS_ALLOWED_AZP, optional L3: AAS_INTROSPECTION_KEY_FILE AAS_INTROSPECTION_CLIENT_ID AAS_INTROSPECTION_KEY_ID (tokens need scope astryon:query:read and a tenant claim).
+// AAS: AAS_BASE_URL AAS_ISSUER AAS_AUDIENCE AAS_ENV AAS_ALLOWED_AZP, optional L3: AAS_INTROSPECTION_KEY_FILE AAS_INTROSPECTION_CLIENT_ID AAS_INTROSPECTION_KEY_ID, optional DPoP: AAS_PUBLIC_BASE_URL AAS_REDIS_URL AAS_REDIS_CA_FILE AAS_REQUIRE_DPOP (tokens need scope astryon:query:read and a tenant claim).
 // Limits (DPP-050): QUERY_RATE_PER_SEC QUERY_BURST QUERY_MAX_CONCURRENT QUERY_IDLE_TTL_SECONDS QUERY_MAX_TENANTS
 // QUERY_MAX_EXECUTION_SECONDS QUERY_MAX_RESULT_ROWS QUERY_MAX_MEMORY_BYTES.
 // Shared limits across replicas: QUERY_REDIS_URL (redis://[user:pass@]host:port[/db]) QUERY_REDIS_FAILURE (local|closed) QUERY_REDIS_NODES QUERY_REDIS_TOPOLOGY_REFRESH_SECONDS QUERY_REDIS_SENTINELS QUERY_REDIS_MASTER_NAME QUERY_REDIS_LEASE_SECONDS.
@@ -37,7 +37,11 @@ func (denyAll) Authenticate(*http.Request) (query.Principal, error) {
 func main() {
 	var auth query.Authenticator = denyAll{}
 	if os.Getenv("AAS_BASE_URL") != "" {
-		v, err := goauth.NewVerifier(context.Background(), aasConfig())
+		cfg, err := dpopConfig(aasConfig())
+		if err != nil {
+			log.Fatalf("aas dpop: %v", err)
+		}
+		v, err := goauth.NewVerifier(context.Background(), cfg)
 		if err != nil {
 			log.Fatalf("aas: %v", err)
 		}
