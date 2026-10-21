@@ -71,7 +71,7 @@ func TestLiveLeaseFencingAndResume(t *testing.T) {
 	if err := w1.Heartbeat(ctx, j1); err != nil {
 		t.Fatal(err)
 	}
-	if err := w1.SaveCheckpoint(ctx, j1, []byte(`{"NextOffset":42}`), 10, 1); err != nil {
+	if err := w1.SaveCheckpoint(ctx, j1, []byte(`{"NextOffset":42}`), 10, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	// w1 vanishes: its lease expires, the sweep retries and promotes the job
@@ -89,7 +89,7 @@ func TestLiveLeaseFencingAndResume(t *testing.T) {
 	if err != nil || j2.Fence != 2 || string(j2.Checkpoint) != `{"NextOffset": 42}` {
 		t.Fatalf("w2 claim: %v %+v (checkpoint %s)", err, j2, j2.Checkpoint)
 	}
-	if err := w1.SaveCheckpoint(ctx, j1, []byte(`{"NextOffset":99}`), 1, 0); !errors.Is(err, ErrFenced) {
+	if err := w1.SaveCheckpoint(ctx, j1, []byte(`{"NextOffset":99}`), 1, 0, nil); !errors.Is(err, ErrFenced) {
 		t.Fatalf("stale worker wrote a checkpoint: %v", err)
 	}
 	if err := w1.Succeed(ctx, j1); !errors.Is(err, ErrFenced) {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +30,9 @@ type File struct {
 	ID, SourceID, Bucket, Key, SHA256 string
 	Size                              int64 // declared size, -1 if unknown
 	Committed                         bool
+	SourceType                        string            // processing profile name (internal/profile)
+	Sensitivity                       string            // public|internal|restricted
+	Tags                              map[string]string // client tags, validated by the API
 }
 
 // Store is the file_objects repository (tenant always comes from a trusted caller, never from a request).
@@ -106,9 +110,9 @@ func (s Source) Open(ctx context.Context, j jobs.Job, offset int64) (io.ReadClos
 
 const (
 	sqlSetTenant = `SELECT set_config('astryon.tenant_id', $1, true)`
-	sqlRegister  = `INSERT INTO file_objects (tenant_id, source_id, bucket, object_key, size_bytes, content_type, checksum_sha256)
-		VALUES ($1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), $7) RETURNING id::text`
-	sqlGet = `SELECT id::text, source_id::text, bucket, object_key, COALESCE(checksum_sha256,''), COALESCE(size_bytes,-1), committed_at IS NOT NULL
+	sqlRegister  = `INSERT INTO file_objects (tenant_id, source_id, bucket, object_key, size_bytes, content_type, checksum_sha256, source_type, sensitivity, tags)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), $7, $8, $9, $10::jsonb) RETURNING id::text`
+	sqlGet = `SELECT id::text, source_id::text, bucket, object_key, COALESCE(checksum_sha256,''), COALESCE(size_bytes,-1), committed_at IS NOT NULL, source_type, sensitivity, tags::text
 		FROM file_objects WHERE id = $1::uuid AND tenant_id = $2::uuid AND deleted_at IS NULL`
 	sqlCommit = `UPDATE file_objects SET size_bytes = $3, committed_at = now()
 		WHERE id = $1::uuid AND tenant_id = $2::uuid AND committed_at IS NULL AND deleted_at IS NULL`
@@ -135,8 +139,19 @@ func (p PGStore) tx(ctx context.Context, tenant string, f func(jobs.Tx) error) e
 
 func (p PGStore) Register(ctx context.Context, tenant, source string, f File) (string, error) {
 	var id string
+	st, sens := f.SourceType, f.Sensitivity
+	if st == "" {
+		st = "unknown"
+	}
+	if sens == "" {
+		sens = "internal"
+	}
+	tags, _ := json.Marshal(f.Tags)
+	if f.Tags == nil {
+		tags = []byte("{}")
+	}
 	err := p.tx(ctx, tenant, func(tx jobs.Tx) error {
-		return tx.QueryRow(ctx, sqlRegister, tenant, source, f.Bucket, f.Key, f.Size, "", f.SHA256).Scan(&id)
+		return tx.QueryRow(ctx, sqlRegister, tenant, source, f.Bucket, f.Key, f.Size, "", f.SHA256, st, sens, string(tags)).Scan(&id)
 	})
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) {
@@ -152,9 +167,13 @@ func (p PGStore) Register(ctx context.Context, tenant, source string, f File) (s
 
 func (p PGStore) Get(ctx context.Context, tenant, id string) (File, error) {
 	var f File
+	var tags string
 	err := p.tx(ctx, tenant, func(tx jobs.Tx) error {
-		return tx.QueryRow(ctx, sqlGet, id, tenant).Scan(&f.ID, &f.SourceID, &f.Bucket, &f.Key, &f.SHA256, &f.Size, &f.Committed)
+		return tx.QueryRow(ctx, sqlGet, id, tenant).Scan(&f.ID, &f.SourceID, &f.Bucket, &f.Key, &f.SHA256, &f.Size, &f.Committed, &f.SourceType, &f.Sensitivity, &tags)
 	})
+	if err == nil {
+		_ = json.Unmarshal([]byte(tags), &f.Tags)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return File{}, ErrNotFound
 	}

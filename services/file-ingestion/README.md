@@ -99,3 +99,32 @@ new migration. Defaults: `FILE_MAX_BYTES`, `FILE_QUOTA_OPEN` (20), `FILE_QUOTA_B
 overrides in `tenant_quotas`: `upload_file_max_bytes`/`upload_open_max` (period `total`), `upload_bytes` (period `day`). Quota store errors fail
 closed (503). The check precedes registration, so concurrent requests can overshoot by at most the in-flight count. Metric:
 `astryon_file_api_quota_denied_total{reason}`. Live test: `FILEQUOTA_PG_URL`.
+
+## Tags, source types and content classification
+
+Migration `0012_file_tags_classification` (forward-only, rollback note inside): `file_objects.source_type/tags/sensitivity`, `jobs.content_labels`, job status `QUARANTINED`.
+Same tenant RLS as the sibling tables; the tenant comes only from the Principal.
+
+**Upload creation** accepts `source_type`, `tags` (max 16, key `^[a-z][a-z0-9_.-]{0,31}$`, value <= 64 chars of `[A-Za-z0-9_.:/@+ -]`) and `sensitivity`
+(public|internal|restricted). `GET /v1/files/uploads/{id}` returns them with the latest job (`status`, `error` code, `labels`). There is no list endpoint yet, so
+there is no tag filter; the `tags` GIN and `(tenant_id, sensitivity)` indexes are ready for one.
+
+**Profiles** (`internal/profile`): a static table in code, no user rules. Source types: telemetry, geo, report, export, config, log, credentials_bundle,
+personal_data, financial, media_meta, reference, unknown (default for unknown/omitted: all detectors, strictest detection). Enforced now: content type + extension,
+detectors, separate credentials/geo/PII policies (allow|tag|quarantine|block), sensitivity default and floor (a lower request is raised), required tags, limits
+(file bytes, records, columns, line bytes), required fields + `drop_row`/`fail_file`, sink gating (`NoSink`), `geo` requires valid coordinates.
+Declared metadata, exposed on GET but **pending enforcement**: archive nesting limit, encoding, retention class, required read scope, export flag, mask/tokenize PII,
+dedup-key choice, audit level and alert on findings, macro/executable-attachment detection.
+
+**Classifier** (`internal/classify`): streaming, per record (NDJSON in the worker via `ScanJSON`; `ScanCSV(header,row)` for `parse.CSV`), no file buffering. Detectors: geo
+(lat/lon columns in range, WKT, GeoJSON), credentials (JWT, PEM private key, AWS key ids, `password=`/`secret=`/`api_key` text, secret-named fields, high-entropy token fields),
+PII-lite (email, phone, IBAN mod-97, card Luhn, US SSN shape). Output is `{contains_geo|contains_credentials|contains_pii: {count, fields[]}}`: field names (capped, charset-limited,
+replaced by `(redacted)` if the name itself looks like a secret), never values; nothing is logged. Tests prove values do not reach labels, metrics or logs.
+
+**Policy**: credentials policy precedence is explicit tenant/source override (`FILE_CREDENTIALS_POLICY_OVERRIDES=<tenant>/<source>=block,<tenant>=allow`) > profile > env default
+`FILE_CREDENTIALS_POLICY` (quarantine|block|allow, default quarantine). When any policy can hold the file back, the worker classifies the whole object in a bounded streaming pre-scan
+before the first sink call, so quarantine/block mean nothing was written. quarantine: job `QUARANTINED`, sensitivity raised to restricted; block: job `FAILED` with the catalog code
+(`CREDENTIALS_DETECTED`, `PII_DETECTED`, ...); allow/tag: labels only (merged atomically with each checkpoint). Metrics:
+`astryon_file_worker_content_labels_total{label}` and `astryon_file_worker_policy_actions_total{action}`.
+Live test: `FILETAGS_LIVE=1 go test ./internal/objects -run Live` (throwaway postgres:16 via docker, applies all migrations, non-superuser, removes the container).
+Not wired: CSV in the worker (still NDJSON only).

@@ -34,6 +34,19 @@ item status of `quarantined` is terminal until the input is repaired.
 | 422 | `UPLOAD_INCOMPLETE` | Re-upload missing parts and call complete again with the right ETags. |
 | 502 / 503 | `STORAGE_UNAVAILABLE` / `UNAVAILABLE` | Retry after a short delay. |
 
+### File job outcomes (`GET /v1/files/uploads/{id}` -> `job.error`)
+
+Set by the source-type profile and credentials policy (`FILE_CREDENTIALS_POLICY`); the job is `FAILED` (block) or `QUARANTINED` (nothing was written to the sink).
+
+| Code | Meaning | Client action |
+|---|---|---|
+| `CREDENTIALS_DETECTED` | Credentials were found (field names in `job.labels`, never values). | Remove the secrets, rotate them, and upload again. |
+| `PII_DETECTED` | The profile forbids PII in this file. | Remove or pseudonymize the listed fields, or use a `personal_data` source type with a `purpose` tag. |
+| `GEO_DETECTED` | The profile forbids geo data. | Remove the listed fields. |
+| `GEO_COORDINATES_REQUIRED` | A `geo` upload had no valid coordinate columns or geometries. | Add valid latitude/longitude columns, WKT or GeoJSON. |
+| `SCHEMA_VIOLATION` | A record broke the profile's rules (fail-file profiles). | Fix malformed or incomplete records. |
+| `ROW_LIMIT_EXCEEDED` | More records than the profile allows. | Split the file. |
+
 ## Query API
 
 | HTTP | Code | Client action |

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/parse"
 )
@@ -17,17 +20,21 @@ import (
 const file = "{\"a\":1}\n{\"a\":2}\nnot json\n{\"a\":4}\n{\"a\":5}\n"
 
 type fakeStore struct {
-	mu        sync.Mutex
-	job       jobs.Job
-	claimed   bool
-	cps       []parse.Checkpoint
-	processed int64
-	failed    int64
-	succeeded bool
-	failCode  string
-	failRetry bool
-	hbErr     error
-	saveErr   error
+	mu         sync.Mutex
+	job        jobs.Job
+	claimed    bool
+	cps        []parse.Checkpoint
+	processed  int64
+	failed     int64
+	succeeded  bool
+	failCode   string
+	failRetry  bool
+	hbErr      error
+	saveErr    error
+	deltas     []classify.Labels
+	setLabels  classify.Labels
+	quarCode   string
+	quarLabels classify.Labels
 }
 
 func (s *fakeStore) Claim(context.Context) (jobs.Job, error) {
@@ -40,7 +47,7 @@ func (s *fakeStore) Claim(context.Context) (jobs.Job, error) {
 	return s.job, nil
 }
 func (s *fakeStore) Heartbeat(context.Context, jobs.Job) error { return s.hbErr }
-func (s *fakeStore) SaveCheckpoint(_ context.Context, _ jobs.Job, c json.RawMessage, p, f int64) error {
+func (s *fakeStore) SaveCheckpoint(_ context.Context, _ jobs.Job, c json.RawMessage, p, f int64, l classify.Labels) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.saveErr != nil {
@@ -49,8 +56,19 @@ func (s *fakeStore) SaveCheckpoint(_ context.Context, _ jobs.Job, c json.RawMess
 	var cp parse.Checkpoint
 	_ = json.Unmarshal(c, &cp)
 	s.cps = append(s.cps, cp)
+	if len(l) > 0 {
+		s.deltas = append(s.deltas, l)
+	}
 	s.processed += p
 	s.failed += f
+	return nil
+}
+func (s *fakeStore) SetLabels(_ context.Context, _ jobs.Job, l classify.Labels) error {
+	s.setLabels = l
+	return nil
+}
+func (s *fakeStore) Quarantine(_ context.Context, _ jobs.Job, code string, l classify.Labels) error {
+	s.quarCode, s.quarLabels = code, l
 	return nil
 }
 func (s *fakeStore) Succeed(context.Context, jobs.Job) error { s.succeeded = true; return nil }
@@ -198,5 +216,111 @@ func TestMetricsCountOutcomes(t *testing.T) {
 	_, _ = w2.RunOnce(context.Background())
 	if w2.M.SinkErrors.Load() != 1 || w2.M.Failed.Load() != 1 { // fake Fail reports FAILED
 		t.Fatalf("sink=%d failed=%d", w2.M.SinkErrors.Load(), w2.M.Failed.Load())
+	}
+}
+
+const secretFile = "{\"user\":\"a\",\"password\":\"hunter2-very-secret\"}\n{\"x\":1}\n"
+
+func runJob(t *testing.T, st *fakeStore, data string, pol classify.PolicySet) (*Worker, *fakeSink) {
+	t.Helper()
+	sink := &fakeSink{}
+	w := New(Config{Store: st, Source: fakeSource{data, "fp"}, Sink: sink, BatchSize: 1, Heartbeat: time.Hour, Policies: pol})
+	_, _ = w.RunOnce(context.Background())
+	return w, sink
+}
+
+func TestCredentialsQuarantineWritesNothingToSink(t *testing.T) {
+	st := &fakeStore{}
+	w, sink := runJob(t, st, secretFile, classify.PolicySet{})
+	if st.quarCode != classify.CodeCredentials || len(sink.keys) != 0 || len(st.cps) != 0 || st.succeeded {
+		t.Fatalf("%+v sink=%+v", st, sink)
+	}
+	if !st.quarLabels.Has(classify.Credentials) {
+		t.Fatalf("labels %+v", st.quarLabels)
+	}
+	var b strings.Builder
+	w.M.WritePrometheus(&b)
+	if !strings.Contains(b.String(), `content_labels_total{label="contains_credentials"} 1`) || !strings.Contains(b.String(), `policy_actions_total{action="quarantine"} 1`) {
+		t.Fatal(b.String())
+	}
+}
+
+func TestCredentialsBlockFailsWithCatalogCode(t *testing.T) {
+	st := &fakeStore{}
+	_, sink := runJob(t, st, secretFile, classify.PolicySet{Default: classify.Block})
+	if st.failCode != classify.CodeCredentials || st.failRetry || len(sink.keys) != 0 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestCredentialsAllowTagsAndProcesses(t *testing.T) {
+	st := &fakeStore{}
+	_, sink := runJob(t, st, secretFile, classify.PolicySet{Default: classify.Allow})
+	if !st.succeeded || len(sink.keys) != 2 || len(st.deltas) == 0 || !st.deltas[0].Has(classify.Credentials) {
+		t.Fatalf("%+v sink=%+v", st, sink)
+	}
+}
+
+func TestTenantOverrideBeatsEnvDefault(t *testing.T) {
+	st := &fakeStore{job: jobs.Job{TenantID: "t1", SourceID: "s1"}}
+	_, sink := runJob(t, st, secretFile, classify.PolicySet{Default: classify.Block, Overrides: map[string]classify.Policy{"t1/s1": classify.Allow}})
+	if !st.succeeded || len(sink.keys) != 2 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestProfileOutcomes(t *testing.T) {
+	// credentials_bundle blocks, personal_data quarantines PII, config quarantines credentials, geo requires coordinates
+	pii := "{\"email\":\"jane@example.com\"}\n"
+	cases := []struct {
+		name, typ, data    string
+		wantQuar, wantFail string
+		sunk               int
+	}{
+		{"bundle blocks credentials", "credentials_bundle", secretFile, "", classify.CodeCredentials, 0},
+		{"personal data quarantines pii", "personal_data", pii, "PII_DETECTED", "", 0},
+		{"report tags pii and runs", "report", pii, "", "", 1},
+		{"config quarantines credentials", "config", secretFile, classify.CodeCredentials, "", 0},
+		{"geo without coordinates blocks", "geo", "{\"a\":1}\n", "", "GEO_COORDINATES_REQUIRED", 0},
+		{"geo with coordinates runs", "geo", "{\"lat\":10.5,\"lon\":20.1}\n", "", "", 1},
+		{"telemetry tags geo", "telemetry", "{\"lat\":10.5,\"lon\":20.1}\n", "", "", 1},
+		{"credentials_bundle never sinks", "credentials_bundle", "{\"a\":1}\n", "", "", 0},
+	}
+	for _, c := range cases {
+		st := &fakeStore{job: jobs.Job{SourceType: c.typ}}
+		_, sink := runJob(t, st, c.data, classify.PolicySet{Default: classify.Allow})
+		if st.quarCode != c.wantQuar || st.failCode != c.wantFail || len(sink.keys) != c.sunk {
+			t.Errorf("%s: quar=%q fail=%q sunk=%d", c.name, st.quarCode, st.failCode, len(sink.keys))
+		}
+	}
+}
+
+func TestFailFileProfileRejectsMalformedBeforeSink(t *testing.T) {
+	st := &fakeStore{job: jobs.Job{SourceType: "financial"}}
+	_, sink := runJob(t, st, "{\"a\":1}\nnot json\n", classify.PolicySet{})
+	if st.failCode != "SCHEMA_VIOLATION" || len(sink.keys) != 0 {
+		t.Fatalf("%+v", st)
+	}
+}
+
+func TestMatchedValuesNeverReachLabelsMetricsOrLogs(t *testing.T) {
+	secrets := []string{"hunter2-very-secret", "jane@example.com", "AKIAIOSFODNN7EXAMPLE", "4111111111111111"}
+	data := "{\"password\":\"hunter2-very-secret\",\"contact\":\"jane@example.com\",\"k\":\"AKIAIOSFODNN7EXAMPLE\",\"note\":\"card 4111 1111 1111 1111\",\"AKIAIOSFODNN7EXAMPLE\":\"bob@example.org\"}\n"
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	st := &fakeStore{job: jobs.Job{SourceType: "export"}}
+	w, _ := runJob(t, st, data, classify.PolicySet{Default: classify.Allow})
+	raw, _ := json.Marshal(st.deltas)
+	var prom strings.Builder
+	w.M.WritePrometheus(&prom)
+	all := string(raw) + logs.String() + prom.String()
+	for _, sec := range secrets {
+		if strings.Contains(all, sec) || strings.Contains(all, strings.ReplaceAll(sec, "4111111111111111", "4111 1111 1111 1111")) {
+			t.Fatalf("secret %q leaked in %s", sec, all)
+		}
+	}
+	if !strings.Contains(string(raw), "(redacted)") {
+		t.Fatalf("secret-looking key was not redacted: %s", raw)
 	}
 }

@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
+	"fmt"
+	"github.com/astryon/file-ingestion/internal/classify"
+	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
 	"github.com/astryon/file-ingestion/internal/quota"
 	"github.com/astryon/file-ingestion/internal/s3"
@@ -261,5 +265,87 @@ func TestQuotaMapsTo413And429AndFailsClosed(t *testing.T) {
 	s.WritePrometheus(&b)
 	if !strings.Contains(b.String(), `astryon_file_api_quota_denied_total{reason="open_uploads"} 1`) {
 		t.Fatal(b.String())
+	}
+}
+
+func TestCreateStoresTagsSensitivityAndProfile(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	body := strings.Replace(okBody, `"parts":2`, `"parts":2,"source_type":"report","tags":{"team":"ops","env":"prod"},"sensitivity":"public"`, 1)
+	if w := call(s.Handler(), "/v1/files/uploads", body); w.Code != 201 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if fs.f.SourceType != "report" || fs.f.Sensitivity != "public" || fs.f.Tags["team"] != "ops" {
+		t.Fatalf("%+v", fs.f)
+	}
+	// defaults: unknown source type -> "unknown" profile, internal sensitivity, empty tags
+	s2, fs2, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	call(s2.Handler(), "/v1/files/uploads", strings.Replace(okBody, `"parts":2`, `"parts":2,"source_type":"nonsense"`, 1))
+	if fs2.f.SourceType != "unknown" || fs2.f.Sensitivity != "internal" {
+		t.Fatalf("%+v", fs2.f)
+	}
+}
+
+func TestCreateEnforcesSensitivityFloorRequiredTagsAndBounds(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	with := func(extra string) *httptest.ResponseRecorder {
+		return call(s.Handler(), "/v1/files/uploads", strings.Replace(okBody, `"parts":2`, `"parts":2,`+extra, 1))
+	}
+	if w := with(`"source_type":"config","sensitivity":"public"`); w.Code != 201 || fs.f.Sensitivity != "restricted" {
+		t.Fatalf("floor not applied: %d %+v", w.Code, fs.f)
+	}
+	if w := with(`"source_type":"personal_data"`); w.Code != 400 { // required tag "purpose" missing
+		t.Fatalf("%d", w.Code)
+	}
+	if w := with(`"source_type":"personal_data","tags":{"purpose":"hr"}`); w.Code != 201 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	many := `"tags":{`
+	for i := 0; i < 17; i++ {
+		many += fmt.Sprintf(`"k%d":"v",`, i)
+	}
+	for name, extra := range map[string]string{
+		"too many tags": strings.TrimSuffix(many, ",") + `}`,
+		"bad key":       `"tags":{"Bad Key":"v"}`,
+		"bad value":     `"tags":{"k":"<script>"}`,
+		"long value":    `"tags":{"k":"` + strings.Repeat("a", 65) + `"}`,
+		"bad level":     `"sensitivity":"secret"`,
+		"bad type":      `"source_type":"../x"`,
+	} {
+		if w := with(extra); w.Code != 400 {
+			t.Errorf("%s: %d", name, w.Code)
+		}
+	}
+	if w := with(`"source_type":"config"`); w.Code != 201 {
+		t.Fatal(w.Code)
+	}
+}
+
+type insights struct{}
+
+func (insights) Describe(context.Context, string, string) (jobs.Summary, error) {
+	return jobs.Summary{ID: "job-1", Status: "QUARANTINED", Error: "CREDENTIALS_DETECTED",
+		Labels: classify.Labels{classify.Credentials: {Count: 2, Fields: []string{"password"}}}}, nil
+}
+
+func TestGetReturnsTagsSensitivityAndLabels(t *testing.T) {
+	s, _, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	s.Insights = insights{}
+	call(s.Handler(), "/v1/files/uploads", strings.Replace(okBody, `"parts":2`, `"parts":2,"source_type":"report","tags":{"team":"ops"}`, 1))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID, nil))
+	var got getResp
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if got.Tags["team"] != "ops" || got.SourceType != "report" || got.Job == nil || got.Job.Status != "QUARANTINED" ||
+		got.Job.Labels[classify.Credentials].Count != 2 || got.Profile.RetentionClass != "standard" {
+		t.Fatalf("%+v", got)
+	}
+	// another tenant's id is 404, no auth is 401
+	other, _, _, _ := newServer(Principal{TenantID: "99999999-9999-4999-8999-999999999999", Scopes: []string{ScopeUploadsWrite}})
+	w = httptest.NewRecorder()
+	other.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID, nil))
+	if w.Code != 404 {
+		t.Fatal(w.Code)
 	}
 }

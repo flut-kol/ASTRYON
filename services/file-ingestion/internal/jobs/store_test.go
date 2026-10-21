@@ -2,9 +2,11 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
+	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -36,9 +38,12 @@ func (t *fakeTx) QueryRow(_ context.Context, sql string, a ...any) Row {
 			return scan(func(...any) error { return pgx.ErrNoRows })
 		}
 		return scan(func(d ...any) error { *d[0].(*string), *d[1].(*string) = "job-1", "tenant-1"; return nil })
+	case sqlLabelsGet:
+		return scan(func(d ...any) error { *d[0].(*string) = `{"contains_geo":{"count":2,"fields":["lat"]}}`; return nil })
 	case sqlClaim:
 		return scan(func(d ...any) error {
 			*d[0].(*int), *d[1].(*int), *d[2].(*string), *d[3].(*string) = 2, 3, "file-1", `{"NextOffset":42}`
+			*d[4].(*string), *d[5].(*string) = "src-1", "geo"
 			return nil
 		})
 	}
@@ -77,7 +82,7 @@ func TestStaleWorkerIsFenced(t *testing.T) {
 	j := Job{ID: "job-1", TenantID: "tenant-1", Fence: 1, MaxAttempts: 3}
 	for name, call := range map[string]func(*Store) error{
 		"heartbeat":  func(s *Store) error { return s.Heartbeat(context.Background(), j) },
-		"checkpoint": func(s *Store) error { return s.SaveCheckpoint(context.Background(), j, []byte(`{}`), 1, 0) },
+		"checkpoint": func(s *Store) error { return s.SaveCheckpoint(context.Background(), j, []byte(`{}`), 1, 0, nil) },
 		"succeed":    func(s *Store) error { return s.Succeed(context.Background(), j) },
 		"fail":       func(s *Store) error { _, err := s.Fail(context.Background(), j, "x", true); return err },
 	} {
@@ -108,7 +113,7 @@ func TestFailRetriesUntilBudgetSpent(t *testing.T) {
 
 func TestSaveCheckpointRejectsInvalidJSON(t *testing.T) {
 	tx := &fakeTx{}
-	if err := newStore(tx).SaveCheckpoint(context.Background(), Job{}, []byte(`{`), 0, 0); err == nil || len(tx.log) != 0 {
+	if err := newStore(tx).SaveCheckpoint(context.Background(), Job{}, []byte(`{`), 0, 0, nil); err == nil || len(tx.log) != 0 {
 		t.Fatalf("err=%v log=%v", err, tx.log)
 	}
 }
@@ -124,5 +129,29 @@ func TestSweepOrder(t *testing.T) {
 		if tx.log[i] != w {
 			t.Fatalf("statement %d = %q", i, tx.log[i])
 		}
+	}
+}
+
+func TestSaveCheckpointMergesLabelsInOneTx(t *testing.T) {
+	tx := &fakeTx{}
+	d := classify.Labels{classify.Geo: {Count: 3, Fields: []string{"lon"}}}
+	if err := newStore(tx).SaveCheckpoint(context.Background(), Job{ID: "j", TenantID: "t"}, []byte(`{}`), 1, 0, d); err != nil {
+		t.Fatal(err)
+	}
+	if !tx.committed || tx.log[1] != sqlLabelsGet || tx.log[2] != sqlCheckpoint {
+		t.Fatalf("statements: %v", tx.log)
+	}
+	merged := tx.args[2][8].(string)
+	var l classify.Labels
+	if err := json.Unmarshal([]byte(merged), &l); err != nil || l[classify.Geo].Count != 5 || len(l[classify.Geo].Fields) != 2 {
+		t.Fatalf("merged = %s (%v)", merged, err)
+	}
+}
+
+func TestQuarantineRaisesSensitivity(t *testing.T) {
+	tx := &fakeTx{}
+	err := newStore(tx).Quarantine(context.Background(), Job{ID: "j", TenantID: "t", FileObjectID: "f"}, "CREDENTIALS_DETECTED", classify.Labels{classify.Credentials: {Count: 1, Fields: []string{"pw"}}})
+	if err != nil || tx.log[1] != sqlQuarantine || tx.log[2] != sqlRaise || tx.log[3] != sqlEnd || !tx.committed {
+		t.Fatalf("err=%v statements: %v", err, tx.log)
 	}
 }

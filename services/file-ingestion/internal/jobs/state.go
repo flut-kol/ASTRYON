@@ -13,10 +13,12 @@ const (
 	Succeeded State = "SUCCEEDED"
 	Failed    State = "FAILED"
 	Cancelled State = "CANCELLED"
+	// Quarantined: held back by a content policy (credentials/PII); nothing was written to the sink.
+	Quarantined State = "QUARANTINED"
 )
 
 func (s State) Terminal() bool {
-	return s == Succeeded || s == Failed || s == Cancelled
+	return s == Succeeded || s == Failed || s == Cancelled || s == Quarantined
 }
 
 // Transition validates a state change before it is persisted. Retrying is
@@ -28,7 +30,7 @@ func Transition(from, to State) error {
 	ok := map[State]map[State]bool{
 		New:      {Queued: true, Cancelled: true},
 		Queued:   {Running: true, Cancelled: true},
-		Running:  {Succeeded: true, Retrying: true, Failed: true, Cancelled: true},
+		Running:  {Quarantined: true, Succeeded: true, Retrying: true, Failed: true, Cancelled: true},
 		Retrying: {Queued: true, Failed: true, Cancelled: true},
 	}[from][to]
 	if !ok {

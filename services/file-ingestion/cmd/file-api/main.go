@@ -101,10 +101,11 @@ func main() {
 		types[strings.TrimSpace(t)] = true
 	}
 	db := jobs.PoolDB{Pool: pool}
+	apiJobs := &jobs.Store{DB: db, WorkerID: "file-api"}
 	s := &api.Server{Auth: auth, Quota: quota.Checker{Store: quota.PGStore{DB: db}, Defaults: quota.Limits{
 		MaxFileBytes: num("FILE_MAX_BYTES", 5<<30), MaxOpen: num("FILE_QUOTA_OPEN", 20), BytesPerDay: num("FILE_QUOTA_BYTES_PER_DAY", 100<<30)}},
 		Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c,
-		Jobs: &jobs.Store{DB: db, WorkerID: "file-api"},
+		Jobs: apiJobs, Insights: apiJobs,
 		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
 			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
 	serveMetrics(s.WritePrometheus)

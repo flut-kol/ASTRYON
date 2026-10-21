@@ -16,7 +16,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/astryon/file-ingestion/internal/classify"
+	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/profile"
 	"github.com/astryon/file-ingestion/internal/quota"
 	"github.com/astryon/file-ingestion/internal/s3"
 	"github.com/astryon/file-ingestion/internal/upload"
@@ -54,6 +57,10 @@ type Server struct {
 	Multipart Multipart
 	Jobs      Enqueuer
 	Bucket    string
+	// Insights reads the latest job of a file object for GET (nil = job info omitted); *jobs.Store satisfies it.
+	Insights interface {
+		Describe(ctx context.Context, tenant, fileObject string) (jobs.Summary, error)
+	}
 	// Quota enforces per-tenant upload quotas (nil = unlimited). Store errors fail closed with 503.
 	Quota interface {
 		Check(ctx context.Context, tenant string, size int64) error
@@ -70,6 +77,7 @@ var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/files/uploads", s.count("create", s.create))
+	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
 	return mux
 }
@@ -186,6 +194,33 @@ type createReq struct {
 	SHA256      string `json:"sha256"`
 	SizeBytes   int64  `json:"size_bytes"`
 	Parts       int    `json:"parts"`
+	// SourceType selects a processing profile (internal/profile); unknown values use the "unknown" profile.
+	SourceType  string            `json:"source_type"`
+	Tags        map[string]string `json:"tags"`
+	Sensitivity string            `json:"sensitivity"` // public|internal|restricted; default from the profile, never below its floor
+}
+
+const (
+	maxTags     = 16
+	maxTagValue = 64
+)
+
+var (
+	tagKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,31}$`)
+	tagValRe = regexp.MustCompile(`^[A-Za-z0-9_.:/@+ -]{0,64}$`)
+	typeRe   = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+)
+
+func validTags(t map[string]string) bool {
+	if len(t) > maxTags {
+		return false
+	}
+	for k, v := range t {
+		if !tagKeyRe.MatchString(k) || !tagValRe.MatchString(v) {
+			return false
+		}
+	}
+	return true
 }
 
 type createResp struct {
@@ -209,6 +244,20 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BODY_INVALID")
 		return
 	}
+	if !validTags(in.Tags) || (in.SourceType != "" && !typeRe.MatchString(in.SourceType)) {
+		writeErr(w, 400, "BODY_INVALID")
+		return
+	}
+	prof := profile.Select(in.SourceType)
+	sens, ok := prof.Sensitivity(in.Sensitivity)
+	if !ok || !prof.AllowsFormat(in.ContentType, in.Filename) || prof.MissingTag(in.Tags) != "" {
+		writeErr(w, 400, "BODY_INVALID")
+		return
+	}
+	if prof.MaxBytes > 0 && in.SizeBytes > prof.MaxBytes {
+		writeErr(w, 413, "FILE_TOO_LARGE")
+		return
+	}
 	if s.Quota != nil {
 		if !s.checkQuota(w, r, p.TenantID, in.SizeBytes) {
 			return
@@ -224,7 +273,8 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 502, "STORAGE_UNAVAILABLE")
 		return
 	}
-	id, err := s.Files.Register(r.Context(), p.TenantID, in.SourceID, objects.File{Bucket: s.Bucket, Key: sess.ObjectKey, SHA256: in.SHA256, Size: in.SizeBytes})
+	id, err := s.Files.Register(r.Context(), p.TenantID, in.SourceID, objects.File{Bucket: s.Bucket, Key: sess.ObjectKey, SHA256: in.SHA256, Size: in.SizeBytes,
+		SourceType: prof.Name, Sensitivity: sens, Tags: in.Tags})
 	if err != nil {
 		_ = s.Multipart.Abort(r.Context(), sess.ObjectKey, sess.UploadID)
 		switch {
@@ -269,6 +319,71 @@ func (s *Server) checkQuota(w http.ResponseWriter, r *http.Request, tenant strin
 	s.denied[reason]++
 	s.mu.Unlock()
 	return false
+}
+
+type getResp struct {
+	FileObjectID string            `json:"file_object_id"`
+	SourceID     string            `json:"source_id"`
+	SourceType   string            `json:"source_type"`
+	Committed    bool              `json:"committed"`
+	SizeBytes    int64             `json:"size_bytes"`
+	Sensitivity  string            `json:"sensitivity"`
+	Tags         map[string]string `json:"tags"`
+	// Profile is the declared handling metadata of the source type (retention, read scope, export flag are not enforced yet).
+	Profile struct {
+		RetentionClass    string `json:"retention_class"`
+		RequiredReadScope string `json:"required_read_scope"`
+		ExportAllowed     bool   `json:"export_allowed"`
+	} `json:"profile"`
+	Job *jobResp `json:"job,omitempty"`
+}
+
+type jobResp struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	// Error is the catalog code when the job failed or was quarantined (e.g. CREDENTIALS_DETECTED).
+	Error string `json:"error,omitempty"`
+	// Labels hold per-label match counts and column/field names only, never matched values.
+	Labels classify.Labels `json:"labels"`
+}
+
+func (s *Server) get(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeErr(w, 404, "NOT_FOUND")
+		return
+	}
+	f, err := s.Files.Get(r.Context(), p.TenantID, id)
+	if errors.Is(err, objects.ErrNotFound) {
+		writeErr(w, 404, "NOT_FOUND")
+		return
+	}
+	if err != nil {
+		writeErr(w, 503, "UNAVAILABLE")
+		return
+	}
+	out := getResp{FileObjectID: f.ID, SourceID: f.SourceID, SourceType: f.SourceType, Committed: f.Committed, SizeBytes: f.Size,
+		Sensitivity: f.Sensitivity, Tags: f.Tags}
+	if out.Tags == nil {
+		out.Tags = map[string]string{}
+	}
+	pr := profile.Select(f.SourceType)
+	out.Profile.RetentionClass, out.Profile.RequiredReadScope, out.Profile.ExportAllowed = pr.RetentionClass, pr.RequiredReadScope, pr.ExportAllowed
+	if s.Insights != nil {
+		sum, err := s.Insights.Describe(r.Context(), p.TenantID, id)
+		switch {
+		case err == nil:
+			out.Job = &jobResp{ID: sum.ID, Status: sum.Status, Error: sum.Error, Labels: sum.Labels}
+		case !errors.Is(err, jobs.ErrNoSummary):
+			writeErr(w, 503, "UNAVAILABLE")
+			return
+		}
+	}
+	writeJSON(w, 200, out)
 }
 
 type completeReq struct {

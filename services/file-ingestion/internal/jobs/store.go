@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,6 +25,7 @@ var (
 // that lost its lease and later wakes up cannot write a checkpoint or a result (the compare-and-set fails).
 type Job struct {
 	ID, TenantID, FileObjectID string
+	SourceID, SourceType       string // SourceType is the file object's processing profile name
 	Fence                      int
 	MaxAttempts                int
 	Checkpoint                 json.RawMessage // last persisted parse checkpoint, nil on first run
@@ -77,7 +79,8 @@ const (
 	sqlClaim = `UPDATE jobs SET status = 'RUNNING', attempt_count = attempt_count + 1, locked_by = $3,
 		locked_until = now() + make_interval(secs => $4), started_at = COALESCE(started_at, now())
 		WHERE id = $1::uuid AND tenant_id = $2::uuid
-		RETURNING attempt_count, max_attempts, COALESCE(file_object_id::text,''), COALESCE(payload->'checkpoint','null')::text`
+		RETURNING attempt_count, max_attempts, COALESCE(file_object_id::text,''), COALESCE(payload->'checkpoint','null')::text,
+		COALESCE(source_id::text,''), COALESCE((SELECT f.source_type FROM file_objects f WHERE f.id = jobs.file_object_id AND f.tenant_id = jobs.tenant_id),'unknown')`
 	sqlEnqueue = `INSERT INTO jobs (tenant_id, kind, status, source_id, file_object_id, idempotency_key)
 		VALUES ($1::uuid, '` + Kind + `', 'QUEUED', $2::uuid, $3::uuid, $3)
 		ON CONFLICT (tenant_id, kind, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
@@ -88,7 +91,14 @@ const (
 
 	sqlHeartbeat  = `UPDATE jobs SET locked_until = now() + make_interval(secs => $5)` + fenced
 	sqlCheckpoint = `UPDATE jobs SET payload = jsonb_set(payload, '{checkpoint}', $5::jsonb), events_processed = events_processed + $6,
-		events_failed = events_failed + $7, locked_until = now() + make_interval(secs => $8)` + fenced
+		events_failed = events_failed + $7, locked_until = now() + make_interval(secs => $8),
+		content_labels = CASE WHEN $9::jsonb = '{}'::jsonb THEN content_labels ELSE $9::jsonb END` + fenced
+	sqlLabelsGet  = `SELECT content_labels::text FROM jobs` + fenced + ` FOR UPDATE`
+	sqlLabelsSet  = `UPDATE jobs SET content_labels = $5::jsonb` + fenced
+	sqlQuarantine = `UPDATE jobs SET status = 'QUARANTINED', finished_at = now(), last_error = $5, content_labels = $6::jsonb, locked_by = NULL, locked_until = NULL` + fenced
+	sqlRaise      = `UPDATE file_objects SET sensitivity = 'restricted' WHERE id = $1::uuid AND tenant_id = $2::uuid`
+	sqlJobInfo    = `SELECT id::text, status::text, COALESCE(last_error,''), content_labels::text FROM jobs
+		WHERE tenant_id = $1::uuid AND kind = '` + Kind + `' AND file_object_id = $2::uuid AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`
 	sqlSucceed = `UPDATE jobs SET status = 'SUCCEEDED', finished_at = now(), locked_by = NULL, locked_until = NULL, last_error = NULL` + fenced
 	sqlRetry   = `UPDATE jobs SET status = 'RETRYING', run_after = now() + make_interval(secs => $5), last_error = $6, locked_by = NULL, locked_until = NULL` + fenced
 	sqlFail    = `UPDATE jobs SET status = 'FAILED', finished_at = now(), last_error = $5, locked_by = NULL, locked_until = NULL` + fenced
@@ -158,7 +168,7 @@ func (s *Store) Claim(ctx context.Context) (Job, error) {
 			}
 			return err
 		}
-		if err := tx.QueryRow(ctx, sqlClaim, j.ID, j.TenantID, s.WorkerID, s.lease()).Scan(&j.Fence, &j.MaxAttempts, &j.FileObjectID, &cp); err != nil {
+		if err := tx.QueryRow(ctx, sqlClaim, j.ID, j.TenantID, s.WorkerID, s.lease()).Scan(&j.Fence, &j.MaxAttempts, &j.FileObjectID, &cp, &j.SourceID, &j.SourceType); err != nil {
 			return err
 		}
 		if cp != "" && cp != "null" {
@@ -193,11 +203,89 @@ func (s *Store) Heartbeat(ctx context.Context, j Job) error {
 
 // SaveCheckpoint persists the parse checkpoint and progress deltas atomically with the fence check. Call it only
 // after the sink accepted the records (sinks dedupe on Record.DedupKey, so a crash in between replays safely).
-func (s *Store) SaveCheckpoint(ctx context.Context, j Job, checkpoint json.RawMessage, processed, failed int64) error {
+//
+// labels is the classifier delta for exactly these records; it is merged into jobs.content_labels in the same
+// transaction as the checkpoint, so a replayed batch is never counted twice. Labels hold counts and field names only.
+func (s *Store) SaveCheckpoint(ctx context.Context, j Job, checkpoint json.RawMessage, processed, failed int64, labels classify.Labels) error {
 	if !json.Valid(checkpoint) {
 		return errors.New("jobs: checkpoint is not valid JSON")
 	}
-	return s.fencedWrite(ctx, j, sqlCheckpoint, string(checkpoint), processed, failed, s.lease())
+	if len(labels) == 0 {
+		return s.fencedWrite(ctx, j, sqlCheckpoint, string(checkpoint), processed, failed, s.lease(), "{}")
+	}
+	return s.inTx(ctx, false, j.TenantID, func(tx Tx) error {
+		var cur string
+		if err := tx.QueryRow(ctx, sqlLabelsGet, j.ID, j.TenantID, s.WorkerID, j.Fence).Scan(&cur); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrFenced
+			}
+			return err
+		}
+		merged := classify.Labels{}
+		_ = json.Unmarshal([]byte(cur), &merged)
+		merged.Merge(labels)
+		raw, _ := json.Marshal(merged)
+		n, err := tx.Exec(ctx, sqlCheckpoint, j.ID, j.TenantID, s.WorkerID, j.Fence, string(checkpoint), processed, failed, s.lease(), string(raw))
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrFenced
+		}
+		return nil
+	})
+}
+
+// SetLabels replaces the job's labels (result of a full pre-scan).
+func (s *Store) SetLabels(ctx context.Context, j Job, labels classify.Labels) error {
+	raw, _ := json.Marshal(labels)
+	return s.fencedWrite(ctx, j, sqlLabelsSet, string(raw))
+}
+
+// Quarantine ends the job QUARANTINED with the labels and raises the file object's sensitivity to restricted.
+func (s *Store) Quarantine(ctx context.Context, j Job, code string, labels classify.Labels) error {
+	raw, _ := json.Marshal(labels)
+	return s.inTx(ctx, false, j.TenantID, func(tx Tx) error {
+		n, err := tx.Exec(ctx, sqlQuarantine, j.ID, j.TenantID, s.WorkerID, j.Fence, code, string(raw))
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrFenced
+		}
+		if _, err = tx.Exec(ctx, sqlRaise, j.FileObjectID, j.TenantID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, sqlEnd, j.TenantID, j.ID, j.Fence, "QUARANTINED", code)
+		return err
+	})
+}
+
+// Summary is the API view of a file's latest job.
+type Summary struct {
+	ID, Status, Error string
+	Labels            classify.Labels
+}
+
+// ErrNoSummary means the file has no job yet.
+var ErrNoSummary = errors.New("jobs: no job for file object")
+
+// Describe returns the latest process_file job of a file object for the tenant (labels: counts and field names only).
+func (s *Store) Describe(ctx context.Context, tenant, fileObject string) (Summary, error) {
+	var out Summary
+	var raw string
+	err := s.inTx(ctx, false, tenant, func(tx Tx) error {
+		return tx.QueryRow(ctx, sqlJobInfo, tenant, fileObject).Scan(&out.ID, &out.Status, &out.Error, &raw)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Summary{}, ErrNoSummary
+	}
+	if err != nil {
+		return Summary{}, err
+	}
+	out.Labels = classify.Labels{}
+	_ = json.Unmarshal([]byte(raw), &out.Labels)
+	return out, nil
 }
 
 // Succeed finishes the job.

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/chsink"
+	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
 	"github.com/astryon/file-ingestion/internal/s3"
@@ -75,7 +76,7 @@ func main() {
 		log.Fatal(err)
 	}
 	w := worker.New(worker.Config{Store: store, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
-		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4})
+		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4, Policies: policies()})
 	serveMetrics(w.M.WritePrometheus)
 	go func() { // recovery of vanished workers and promotion of due retries; safe on every replica
 		t := time.NewTicker(10 * time.Second)
@@ -112,4 +113,18 @@ func serveMetrics(write func(io.Writer)) {
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { log.Printf("metrics: %v", srv.ListenAndServe()) }()
+}
+
+// policies reads FILE_CREDENTIALS_POLICY (quarantine|block|allow, default quarantine) and optional
+// FILE_CREDENTIALS_POLICY_OVERRIDES ("<tenant_id>/<source_id>=block,<tenant_id>=allow"). Source-type profiles sit in between.
+func policies() classify.PolicySet {
+	def, err := classify.ParsePolicy(os.Getenv("FILE_CREDENTIALS_POLICY"))
+	if err != nil {
+		log.Fatalf("FILE_CREDENTIALS_POLICY: %v", err)
+	}
+	ov, err := classify.ParseOverrides(os.Getenv("FILE_CREDENTIALS_POLICY_OVERRIDES"))
+	if err != nil {
+		log.Fatalf("FILE_CREDENTIALS_POLICY_OVERRIDES: %v", err)
+	}
+	return classify.PolicySet{Default: def, Overrides: ov}
 }

@@ -9,18 +9,23 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/parse"
+	"github.com/astryon/file-ingestion/internal/profile"
 )
 
 // JobStore is the subset of *jobs.Store the worker needs.
 type JobStore interface {
 	Claim(ctx context.Context) (jobs.Job, error)
 	Heartbeat(ctx context.Context, j jobs.Job) error
-	SaveCheckpoint(ctx context.Context, j jobs.Job, checkpoint json.RawMessage, processed, failed int64) error
+	SaveCheckpoint(ctx context.Context, j jobs.Job, checkpoint json.RawMessage, processed, failed int64, labels classify.Labels) error
+	SetLabels(ctx context.Context, j jobs.Job, labels classify.Labels) error
+	Quarantine(ctx context.Context, j jobs.Job, code string, labels classify.Labels) error
 	Succeed(ctx context.Context, j jobs.Job) error
 	Fail(ctx context.Context, j jobs.Job, code string, retryable bool) (jobs.State, error)
 }
@@ -44,12 +49,23 @@ type Sink interface {
 	Accept(ctx context.Context, j jobs.Job, valid, invalid []Item) error
 }
 
-type permanent struct{ code string }
+// quarantined is returned by run when a content policy holds the file back before anything reached the sink.
+type quarantined struct {
+	code   string
+	labels classify.Labels
+}
+
+func (q quarantined) Error() string { return "quarantined: " + q.code }
+
+type permanent struct {
+	code    string
+	blocked bool // content policy block (metrics)
+}
 
 func (p permanent) Error() string { return "permanent failure: " + p.code }
 
 // Permanent marks an error that must not be retried (the job goes straight to FAILED with code).
-func Permanent(code string) error { return permanent{code} }
+func Permanent(code string) error { return permanent{code: code} }
 
 // Config tunes the worker.
 type Config struct {
@@ -60,14 +76,51 @@ type Config struct {
 	MaxRecordBytes int           // default 1 MiB
 	Poll           time.Duration // idle wait, default 2s
 	Heartbeat      time.Duration // default 15s; must be well below the store lease
+	// Policies is the credentials policy (env default plus tenant/source overrides); the zero value quarantines.
+	// A source-type profile's own policy sits between an explicit override and the default (profile.EffectiveCredentialsPolicy).
+	Policies classify.PolicySet
 }
 
 // Metrics are plain atomic counters; Prometheus text via WritePrometheus.
 type Metrics struct {
 	Claimed, Succeeded, Failed, Retried, Fenced, Batches, Records, InvalidRecords, SinkErrors atomic.Int64
+
+	mu      sync.Mutex
+	labels  map[string]int64 // content label -> jobs it was found in (no values, ever)
+	actions map[string]int64 // quarantine|block
+}
+
+func (m *Metrics) incLabels(l classify.Labels) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.labels == nil {
+		m.labels = map[string]int64{}
+	}
+	for _, n := range l.Names() {
+		m.labels[n]++
+	}
+}
+
+func (m *Metrics) incAction(a string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.actions == nil {
+		m.actions = map[string]int64{}
+	}
+	m.actions[a]++
 }
 
 func (m *Metrics) WritePrometheus(w io.Writer) {
+	m.mu.Lock()
+	fmt.Fprint(w, "# HELP astryon_file_worker_content_labels_total Jobs in which a content label was detected\n# TYPE astryon_file_worker_content_labels_total counter\n")
+	for _, l := range classify.AllLabels {
+		fmt.Fprintf(w, "astryon_file_worker_content_labels_total{label=%q} %d\n", string(l), m.labels[string(l)])
+	}
+	fmt.Fprint(w, "# HELP astryon_file_worker_policy_actions_total Jobs held back by a content policy\n# TYPE astryon_file_worker_policy_actions_total counter\n")
+	for _, a := range []string{"quarantine", "block"} {
+		fmt.Fprintf(w, "astryon_file_worker_policy_actions_total{action=%q} %d\n", a, m.actions[a])
+	}
+	m.mu.Unlock()
 	for _, c := range []struct {
 		name, help string
 		v          int64
@@ -156,14 +209,25 @@ func (w *Worker) process(parent context.Context, j jobs.Job) error {
 		}
 	}()
 
-	err := w.run(ctx, j)
+	seen := classify.Labels{}
+	err := w.run(ctx, j, seen)
 	if cause := context.Cause(ctx); errors.Is(cause, jobs.ErrFenced) || errors.Is(err, jobs.ErrFenced) {
 		w.M.Fenced.Add(1)
 		return jobs.ErrFenced // someone else owns the job now; write nothing
 	}
 	// terminal writes use the parent context: a shutdown still records the outcome
 	fctx := context.WithoutCancel(parent)
+	var q quarantined
+	if errors.As(err, &q) {
+		w.M.incLabels(q.labels)
+		w.M.incAction("quarantine")
+		if qerr := w.Store.Quarantine(fctx, j, q.code, q.labels); qerr != nil {
+			return qerr
+		}
+		return nil
+	}
 	if err == nil {
+		w.M.incLabels(seen)
 		w.M.Succeeded.Add(1)
 		return w.Store.Succeed(fctx, j)
 	}
@@ -174,6 +238,9 @@ func (w *Worker) process(parent context.Context, j jobs.Job) error {
 	code, retry := "worker_error", true
 	if errors.As(err, &p) {
 		code, retry = p.code, false
+		if p.blocked {
+			w.M.incAction("block")
+		}
 	}
 	st, ferr := w.Store.Fail(fctx, j, code, retry)
 	if ferr != nil {
@@ -187,7 +254,62 @@ func (w *Worker) process(parent context.Context, j jobs.Job) error {
 	return err
 }
 
-func (w *Worker) run(ctx context.Context, j jobs.Job) error {
+// prescan classifies the whole object in a streaming pass (bounded memory) before any record reaches the sink, so
+// quarantine/block really mean "nothing was written". It returns the final labels.
+func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) (classify.Labels, error) {
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	sc := prof.NewScanner()
+	err = parse.NDJSONFrom(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, func(r parse.Record) error {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		if prof.OnInvalid == profile.FailFile && (r.Err != nil || prof.CheckRecord(r.Raw) != nil) {
+			return permanent{code: profile.CodeSchema, blocked: true}
+		}
+		if prof.MaxRecords > 0 && int64(r.Number) > prof.MaxRecords {
+			return Permanent(profile.CodeRowLimit)
+		}
+		if r.Err == nil {
+			sc.ScanJSON(r.Raw)
+		}
+		return nil
+	})
+	return sc.Take(), err
+}
+
+func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) error {
+	prof := profile.Select(j.SourceType)
+	if prof.Parser != "ndjson" {
+		return Permanent("parser_unavailable")
+	}
+	pol := prof.EffectiveCredentialsPolicy(w.Policies, j.TenantID, j.SourceID)
+	var scanner *classify.Scanner
+	if !prof.Gates(pol) {
+		scanner = prof.NewScanner() // nothing can hold the file back: classify while processing
+	} else if len(j.Checkpoint) == 0 {
+		labels, err := w.prescan(ctx, j, prof)
+		if err != nil {
+			return err
+		}
+		seen.Merge(labels)
+		if err := w.Store.SetLabels(ctx, j, labels); err != nil {
+			return err
+		}
+		switch out := prof.Evaluate(pol, labels); out.Action {
+		case profile.Quarantine:
+			return quarantined{code: out.Code, labels: labels}
+		case profile.Block:
+			return permanent{code: out.Code, blocked: true}
+		}
+		if prof.NoSink {
+			return nil // classified and labelled; this profile never writes records to the sink
+		}
+	}
+
 	var cp parse.Checkpoint
 	haveCP := len(j.Checkpoint) > 0
 	if haveCP {
@@ -226,7 +348,12 @@ func (w *Worker) run(ctx context.Context, j jobs.Job) error {
 			}
 		}
 		raw, _ := json.Marshal(next)
-		if err := w.Store.SaveCheckpoint(ctx, j, raw, int64(len(valid)), int64(len(invalid))); err != nil {
+		var delta classify.Labels
+		if scanner != nil {
+			delta = scanner.Take()
+			seen.Merge(delta)
+		}
+		if err := w.Store.SaveCheckpoint(ctx, j, raw, int64(len(valid)), int64(len(invalid)), delta); err != nil {
 			return err
 		}
 		w.M.Batches.Add(1)
@@ -236,9 +363,20 @@ func (w *Worker) run(ctx context.Context, j jobs.Job) error {
 		return nil
 	}
 	startOffset, startNumber := cp.NextOffset, cp.NextRecordNumber
-	err = parse.NDJSONFrom(rc, w.MaxRecordBytes, startOffset, startNumber, func(r parse.Record) error {
+	err = parse.NDJSONFrom(rc, prof.MaxRecord(w.MaxRecordBytes), startOffset, startNumber, func(r parse.Record) error {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
+		}
+		if prof.MaxRecords > 0 && int64(r.Number) > prof.MaxRecords {
+			return Permanent(profile.CodeRowLimit)
+		}
+		if r.Err == nil {
+			if cerr := prof.CheckRecord(r.Raw); cerr != nil {
+				r.Err = cerr // drop_row behaviour: routed to processing_errors, the file continues
+			}
+		}
+		if scanner != nil && r.Err == nil {
+			scanner.ScanJSON(r.Raw)
 		}
 		key, kerr := r.DedupKey(fp)
 		if kerr != nil {

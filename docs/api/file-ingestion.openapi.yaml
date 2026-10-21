@@ -47,6 +47,25 @@ paths:
             Retry-After: { schema: { type: integer }, description: Seconds before retrying }
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}:
+    get:
+      operationId: getUpload
+      summary: Read an upload's tags, sensitivity, source type and content labels
+      description: |
+        Requires scope `astryon:uploads:write`. `job.labels` come from the content classifier: per-label match counts and
+        column/field names only, never matched values. `job.status` is `QUARANTINED` when a content policy held the file back
+        (nothing reached the sink; sensitivity was raised to `restricted`); `job.error` then carries the catalog code.
+        `profile` is declared handling metadata of the source type; retention, read scope and export are not enforced yet.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The file object
+          content: { application/json: { schema: { $ref: '#/components/schemas/UploadInfo' } } }
+        '404':
+          description: Not found for this tenant (`NOT_FOUND`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
   /v1/files/uploads/{id}/complete:
     post:
       operationId: completeUpload
@@ -82,7 +101,7 @@ components:
   responses:
     Error:
       description: |
-        400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type); 401 UNAUTHENTICATED;
+        400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type or extension for the source type, bad tags/sensitivity, missing required tag); 401 UNAUTHENTICATED;
         403 FORBIDDEN; 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
       content:
         application/json:
@@ -99,6 +118,22 @@ components:
         sha256: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
         size_bytes: { type: integer, minimum: 1, description: Bounded by the deployment (default 5 GiB). }
         parts: { type: integer, minimum: 1, description: Bounded by the deployment (default 1000, S3 maximum 10000); every part except the last must be at least 5 MiB. }
+        source_type:
+          type: string
+          description: |
+            Processing profile. Unknown or omitted values use `unknown` (all detectors, credentials policy from the deployment default).
+            The profile fixes allowed content types and extensions, classifier detectors, credentials/geo/PII policies
+            (allow|tag|quarantine|block), sensitivity default and floor, required tags, size/row/column/line limits.
+          enum: [unknown, telemetry, geo, report, export, config, log, credentials_bundle, personal_data, financial, media_meta, reference]
+        tags:
+          type: object
+          maxProperties: 16
+          description: Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles require tags (e.g. `purpose`).
+          additionalProperties: { type: string, maxLength: 64 }
+        sensitivity:
+          type: string
+          enum: [public, internal, restricted]
+          description: Defaults to the profile's default (usually `internal`); values below the profile's floor are raised to the floor.
     UploadSession:
       type: object
       required: [file_object_id, upload_id, part_urls, expires_at]
@@ -107,6 +142,42 @@ components:
         upload_id: { type: string }
         part_urls: { type: array, items: { type: string, format: uri }, description: PUT URL for part 1..n in order. }
         expires_at: { type: string, format: date-time }
+    Labels:
+      type: object
+      description: Content labels. Counts and field names only; matched values are never stored or returned.
+      propertyNames: { enum: [contains_geo, contains_credentials, contains_pii] }
+      additionalProperties:
+        type: object
+        required: [count, fields]
+        properties:
+          count: { type: integer, minimum: 1 }
+          fields: { type: array, maxItems: 20, items: { type: string, maxLength: 64 } }
+    UploadInfo:
+      type: object
+      required: [file_object_id, source_id, source_type, committed, size_bytes, sensitivity, tags, profile]
+      properties:
+        file_object_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        source_type: { type: string }
+        committed: { type: boolean }
+        size_bytes: { type: integer }
+        sensitivity: { type: string, enum: [public, internal, restricted] }
+        tags: { type: object, additionalProperties: { type: string } }
+        profile:
+          type: object
+          properties:
+            retention_class: { type: string }
+            required_read_scope: { type: string }
+            export_allowed: { type: boolean }
+        job:
+          type: object
+          description: Latest `process_file` job, absent until the upload is completed.
+          required: [id, status, labels]
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED, QUARANTINED] }
+            error: { type: string, description: 'Catalog code, e.g. CREDENTIALS_DETECTED, PII_DETECTED, GEO_COORDINATES_REQUIRED, SCHEMA_VIOLATION, ROW_LIMIT_EXCEEDED.' }
+            labels: { $ref: '#/components/schemas/Labels' }
     CompleteUpload:
       type: object
       required: [upload_id, parts]
