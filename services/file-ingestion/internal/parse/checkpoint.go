@@ -14,6 +14,9 @@ type Checkpoint struct {
 	// Header holds the CSV column names (record 1) so a resume from a later offset can name columns without
 	// re-reading the start of the object. Names only, never values. Empty for NDJSON.
 	Header []string `json:",omitempty"`
+	// NextGroup is the Parquet row group to resume at (NextOffset is then the row ordinal at its start). Parquet
+	// checkpoints only ever sit on row-group boundaries. Zero for NDJSON/CSV.
+	NextGroup int `json:",omitempty"`
 }
 
 func NewCheckpoint(sourceFingerprint string) (Checkpoint, error) {

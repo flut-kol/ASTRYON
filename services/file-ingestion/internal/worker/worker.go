@@ -36,6 +36,17 @@ type Source interface {
 	Open(ctx context.Context, j jobs.Job, offset int64) (rc io.ReadCloser, fingerprint string, err error)
 }
 
+// RandomSource is implemented by sources that can serve random-access reads. Parquet needs it: the footer sits at
+// the end of the object and row groups are read independently. size is the verified object size.
+type RandomSource interface {
+	OpenAt(ctx context.Context, j jobs.Job) (ra io.ReaderAt, size int64, fingerprint string, err error)
+}
+
+// Outputter is optionally implemented by sinks that write an object per batch; its key lands in the batch lineage.
+type Outputter interface {
+	OutputKey(j jobs.Job, valid []Item) string
+}
+
 // Item is one parsed record with its idempotency key (parse.Record.DedupKey).
 type Item struct {
 	Record   parse.Record
@@ -79,6 +90,14 @@ type Config struct {
 	// Policies is the credentials policy (env default plus tenant/source overrides); the zero value quarantines.
 	// A source-type profile's own policy sits between an explicit override and the default (profile.EffectiveCredentialsPolicy).
 	Policies classify.PolicySet
+	// Lineage, when set, records source file -> batch -> (output) -> pipeline version for every batch the sink accepted.
+	Lineage jobs.LineageRecorder
+	// PipelineVersion labels lineage and normalized output; default "file-ingestion/1".
+	PipelineVersion string
+	// LineageDestination is the destination recorded for sinks that are not Outputters; default CLICKHOUSE_BULK.
+	LineageDestination jobs.Destination
+	// Parquet bounds the Parquet reader (MaxRecordBytes is taken from the profile/worker setting).
+	Parquet parse.ParquetLimits
 }
 
 // Metrics are plain atomic counters; Prometheus text via WritePrometheus.
@@ -156,6 +175,12 @@ func New(c Config) *Worker {
 	}
 	if c.Heartbeat <= 0 {
 		c.Heartbeat = 15 * time.Second
+	}
+	if c.PipelineVersion == "" {
+		c.PipelineVersion = "file-ingestion/1"
+	}
+	if c.LineageDestination == "" {
+		c.LineageDestination = jobs.ClickHouseBulk
 	}
 	return &Worker{Config: c}
 }
@@ -257,14 +282,10 @@ func (w *Worker) process(parent context.Context, j jobs.Job) error {
 // prescan classifies the whole object in a streaming pass (bounded memory) before any record reaches the sink, so
 // quarantine/block really mean "nothing was written". It returns the final labels.
 func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) (classify.Labels, error) {
-	rc, _, err := w.Source.Open(ctx, j, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
 	sc := prof.NewScanner()
 	st := &stream{f: formatOf(j)}
-	err = st.run(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, func(row row) error {
+	var err error
+	emit := func(row row) error {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
@@ -282,7 +303,21 @@ func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) 
 			st.scan(sc, row)
 		}
 		return nil
-	})
+	}
+	if st.f == formatParquet {
+		var ra io.ReaderAt
+		var size int64
+		if ra, size, _, err = w.openParquet(ctx, j); err == nil {
+			err = mapParquetErr(st.runParquet(ra, size, w.parquetLimits(prof), 0, 0, emit))
+		}
+		return sc.Take(), err
+	}
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	err = st.run(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, emit)
 	return sc.Take(), err
 }
 
@@ -315,6 +350,9 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		}
 	}
 
+	if formatOf(j) == formatParquet {
+		return w.runParquet(ctx, j, prof, scanner, seen)
+	}
 	var cp parse.Checkpoint
 	haveCP := len(j.Checkpoint) > 0
 	if haveCP {
@@ -345,11 +383,8 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		if len(pending) == 0 {
 			return nil
 		}
-		if len(valid) > 0 || len(invalid) > 0 {
-			if err := w.Sink.Accept(ctx, j, valid, invalid); err != nil {
-				w.M.SinkErrors.Add(1)
-				return err
-			}
+		if err := w.accept(ctx, j, fp, valid, invalid, pending[0].Number, pending[len(pending)-1].Number); err != nil {
+			return err
 		}
 		next := cp
 		for _, r := range pending {
@@ -418,4 +453,31 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		return err
 	}
 	return flush()
+}
+
+// accept hands a batch to the sink, then records its lineage. Both must succeed before the caller checkpoints.
+func (w *Worker) accept(ctx context.Context, j jobs.Job, fp string, valid, invalid []Item, first, last int) error {
+	if len(valid) == 0 && len(invalid) == 0 {
+		return nil
+	}
+	if err := w.Sink.Accept(ctx, j, valid, invalid); err != nil {
+		w.M.SinkErrors.Add(1)
+		return err
+	}
+	if w.Lineage == nil {
+		return nil
+	}
+	b := jobs.BatchLineage{TenantID: j.TenantID, JobID: j.ID, SourceFileID: j.FileObjectID, SourceChecksum: fp,
+		PipelineVersion: w.PipelineVersion, Destination: w.LineageDestination, FirstRow: int64(first), LastRow: int64(last),
+		Valid: len(valid), Invalid: len(invalid)}
+	if o, ok := w.Sink.(Outputter); ok {
+		if b.OutputKey = o.OutputKey(j, valid); b.OutputKey != "" {
+			b.Destination = jobs.ParquetS3
+		}
+	}
+	b.BatchID = jobs.NewBatchID(fp, w.PipelineVersion, b.FirstRow, b.LastRow)
+	if err := b.Validate(); err != nil {
+		return Permanent("lineage_invalid")
+	}
+	return w.Lineage.Record(ctx, b)
 }

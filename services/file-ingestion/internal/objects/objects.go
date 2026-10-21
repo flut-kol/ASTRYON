@@ -109,6 +109,60 @@ func (s Source) Open(ctx context.Context, j jobs.Job, offset int64) (io.ReadClos
 	return rc, strings.ToLower(f.SHA256), nil
 }
 
+// OpenAt implements worker.RandomSource: the same verification as Open, then a ReaderAt that issues one ranged
+// GET per read (the caller buffers; parquet reads in large chunks). The size is the verified size.
+func (s Source) OpenAt(ctx context.Context, j jobs.Job) (io.ReaderAt, int64, string, error) {
+	f, err := s.Store.Get(ctx, j.TenantID, j.FileObjectID)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if !f.Committed || f.SHA256 == "" {
+		return nil, 0, "", ErrNotVerified
+	}
+	if f.Bucket != s.Bucket {
+		return nil, 0, "", fmt.Errorf("objects: row bucket %q is not the configured bucket", f.Bucket)
+	}
+	size := f.Size
+	if size < 0 {
+		if size, err = s.Objs.Head(ctx, f.Key); err != nil {
+			return nil, 0, "", err
+		}
+	}
+	return RangeReaderAt{Ctx: ctx, Objs: s.Objs, Key: f.Key, Size: size}, size, strings.ToLower(f.SHA256), nil
+}
+
+// RangeReaderAt adapts Objects.Get(offset) to io.ReaderAt. Each call opens a ranged read, reads len(p) bytes and
+// closes it, so it holds no connection between calls and is safe for concurrent use.
+type RangeReaderAt struct {
+	Ctx  context.Context
+	Objs Objects
+	Key  string
+	Size int64
+}
+
+func (r RangeReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("objects: negative offset")
+	}
+	if off >= r.Size {
+		return 0, io.EOF
+	}
+	want := p
+	if rem := r.Size - off; int64(len(want)) > rem {
+		want = p[:rem]
+	}
+	rc, err := r.Objs.Get(r.Ctx, r.Key, off)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	n, err := io.ReadFull(rc, want)
+	if err == nil && len(want) < len(p) {
+		err = io.EOF
+	}
+	return n, err
+}
+
 const (
 	sqlSetTenant = `SELECT set_config('astryon.tenant_id', $1, true)`
 	sqlRegister  = `INSERT INTO file_objects (tenant_id, source_id, bucket, object_key, size_bytes, content_type, checksum_sha256, source_type, sensitivity, tags)

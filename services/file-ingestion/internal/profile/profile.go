@@ -91,9 +91,9 @@ type Profile struct {
 
 var (
 	ndjson   = []string{"application/x-ndjson"}
-	both     = []string{"application/x-ndjson", "text/csv"}
+	both     = []string{"application/x-ndjson", "text/csv", "application/vnd.apache.parquet"}
 	extND    = []string{".ndjson", ".jsonl", ".json"}
-	extBoth  = []string{".ndjson", ".jsonl", ".json", ".csv"}
+	extBoth  = []string{".ndjson", ".jsonl", ".json", ".csv", ".parquet"}
 	credPII  = []classify.Label{classify.Credentials, classify.PII}
 	credGeo  = []classify.Label{classify.Credentials, classify.Geo}
 	credOnly = []classify.Label{classify.Credentials}

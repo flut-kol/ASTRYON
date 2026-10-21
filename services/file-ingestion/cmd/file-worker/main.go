@@ -24,6 +24,8 @@ import (
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/parquetout"
+	"github.com/astryon/file-ingestion/internal/parse"
 	"github.com/astryon/file-ingestion/internal/retrybridge"
 	"github.com/astryon/file-ingestion/internal/s3"
 	"github.com/astryon/file-ingestion/internal/worker"
@@ -85,8 +87,21 @@ func main() {
 	} else if m != "" && m != "local" {
 		log.Fatalf("FILE_RETRY_MODE must be local or controller, got %q", m)
 	}
-	w := worker.New(worker.Config{Store: jobStore, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
-		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4, Policies: policies()})
+	pipeline := os.Getenv("FILE_PIPELINE_VERSION")
+	if pipeline == "" {
+		pipeline = "file-ingestion/1"
+	}
+	var rowSink worker.Sink = sink
+	if prefix := os.Getenv("FILE_PARQUET_OUT_PREFIX"); prefix != "" {
+		rowSink = &parquetout.Sink{Put: c, Prefix: prefix, Pipeline: pipeline, Inner: sink}
+	}
+	var lineage jobs.LineageRecorder
+	if os.Getenv("FILE_LINEAGE_LOG") == "1" {
+		lineage = &jobs.LogLineage{W: os.Stdout}
+	}
+	w := worker.New(worker.Config{Store: jobStore, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: rowSink,
+		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4, Policies: policies(),
+		Lineage: lineage, PipelineVersion: pipeline, Parquet: parse.ParquetLimits{MaxRowGroupSize: int64(num("FILE_PARQUET_MAX_ROWGROUP_BYTES", 256<<20))}})
 	serveMetrics(w.M.WritePrometheus)
 	go func() { // recovery of vanished workers and promotion of due retries; safe on every replica
 		t := time.NewTicker(10 * time.Second)
