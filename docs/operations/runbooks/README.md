@@ -10,6 +10,7 @@ actions in the platform audit trail.
 | Component | Runbook | Use when |
 | --- | --- | --- |
 | Retry controller | [retry-controller.md](retry-controller.md) | Due retries are not released, retry jobs remain stuck, or the controller health endpoint is unavailable. |
+| clickhouse-sink | [stuck-consumer.md](stuck-consumer.md) | Sink insert/commit failures, stalled consumption or growing consumer lag on `processed.events.v1`. |
 
 ## Required runbooks before production operation
 
