@@ -57,3 +57,9 @@ DPoP-bound tokens (`typ=DPoP`, unsupported by the verifier, rejected by design; 
 token exchange and `X-AAS-Subject`, the AAS proxy (`/oauth2/*` addresses), production deployment
 behind a reverse proxy path (`/sso`), browser/user tokens, other adapters (gateway, export-worker,
 replay-controller) end to end, RS256 realm keys, ClickHouse itself (stubbed).
+
+## DPoP (L2), `dpop_test.go`
+
+`TestLiveDPoP` (written 2026-10-21, **not yet run against a real AAS**): throw-away client with `dpop.bound.access.tokens=true`, token request with a
+proof (`htu` = token endpoint), expects `typ=DPoP` + `cnf.jkt`; then `Verifier` with `PublicBaseURL`/`MemoryReplayStore` must accept the token with a matching proof
+and reject replay, other key, wrong htu/htm/ath, Bearer downgrade, missing proof and `RequireDPoP` with Bearer. Same env as above.
