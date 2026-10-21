@@ -13,19 +13,22 @@ import (
 
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
 	ErrChecksumMismatch = errors.New("objects: uploaded content does not match the declared SHA-256 or size")
 	ErrNotVerified      = errors.New("objects: file object is not committed")
 	ErrNotFound         = errors.New("objects: file object not found")
+	ErrUnknownSource    = errors.New("objects: source does not exist for this tenant")
+	ErrAlreadyExists    = errors.New("objects: file object already registered")
 )
 
 // File is the file_objects row the workers and the verifier need.
 type File struct {
-	ID, Bucket, Key, SHA256 string
-	Size                    int64 // declared size, -1 if unknown
-	Committed               bool
+	ID, SourceID, Bucket, Key, SHA256 string
+	Size                              int64 // declared size, -1 if unknown
+	Committed                         bool
 }
 
 // Store is the file_objects repository (tenant always comes from a trusted caller, never from a request).
@@ -105,7 +108,7 @@ const (
 	sqlSetTenant = `SELECT set_config('astryon.tenant_id', $1, true)`
 	sqlRegister  = `INSERT INTO file_objects (tenant_id, source_id, bucket, object_key, size_bytes, content_type, checksum_sha256)
 		VALUES ($1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), $7) RETURNING id::text`
-	sqlGet = `SELECT id::text, bucket, object_key, COALESCE(checksum_sha256,''), COALESCE(size_bytes,-1), committed_at IS NOT NULL
+	sqlGet = `SELECT id::text, source_id::text, bucket, object_key, COALESCE(checksum_sha256,''), COALESCE(size_bytes,-1), committed_at IS NOT NULL
 		FROM file_objects WHERE id = $1::uuid AND tenant_id = $2::uuid AND deleted_at IS NULL`
 	sqlCommit = `UPDATE file_objects SET size_bytes = $3, committed_at = now()
 		WHERE id = $1::uuid AND tenant_id = $2::uuid AND committed_at IS NULL AND deleted_at IS NULL`
@@ -135,13 +138,22 @@ func (p PGStore) Register(ctx context.Context, tenant, source string, f File) (s
 	err := p.tx(ctx, tenant, func(tx jobs.Tx) error {
 		return tx.QueryRow(ctx, sqlRegister, tenant, source, f.Bucket, f.Key, f.Size, "", f.SHA256).Scan(&id)
 	})
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case "23503":
+			return "", ErrUnknownSource
+		case "23505":
+			return "", ErrAlreadyExists
+		}
+	}
 	return id, err
 }
 
 func (p PGStore) Get(ctx context.Context, tenant, id string) (File, error) {
 	var f File
 	err := p.tx(ctx, tenant, func(tx jobs.Tx) error {
-		return tx.QueryRow(ctx, sqlGet, id, tenant).Scan(&f.ID, &f.Bucket, &f.Key, &f.SHA256, &f.Size, &f.Committed)
+		return tx.QueryRow(ctx, sqlGet, id, tenant).Scan(&f.ID, &f.SourceID, &f.Bucket, &f.Key, &f.SHA256, &f.Size, &f.Committed)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return File{}, ErrNotFound

@@ -78,6 +78,10 @@ const (
 		locked_until = now() + make_interval(secs => $4), started_at = COALESCE(started_at, now())
 		WHERE id = $1::uuid AND tenant_id = $2::uuid
 		RETURNING attempt_count, max_attempts, COALESCE(file_object_id::text,''), COALESCE(payload->'checkpoint','null')::text`
+	sqlEnqueue = `INSERT INTO jobs (tenant_id, kind, status, source_id, file_object_id, idempotency_key)
+		VALUES ($1::uuid, '` + Kind + `', 'QUEUED', $2::uuid, $3::uuid, $3)
+		ON CONFLICT (tenant_id, kind, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+		RETURNING id::text`
 	sqlAttempt = `INSERT INTO job_attempts (tenant_id, job_id, attempt_no, status, worker_id) VALUES ($1::uuid, $2::uuid, $3, 'RUNNING', $4)`
 
 	fenced = ` WHERE id = $1::uuid AND tenant_id = $2::uuid AND locked_by = $3 AND attempt_count = $4 AND status = 'RUNNING' AND locked_until > now()`
@@ -237,4 +241,14 @@ func (s *Store) Sweep(ctx context.Context) (promoted, retried, failed int64, err
 		return err
 	})
 	return
+}
+
+// Enqueue creates the process_file job for a verified file object. The file object id is the idempotency key, so
+// completing an upload twice yields the same job.
+func (s *Store) Enqueue(ctx context.Context, tenant, source, fileObject string) (string, error) {
+	var id string
+	err := s.inTx(ctx, false, tenant, func(tx Tx) error {
+		return tx.QueryRow(ctx, sqlEnqueue, tenant, source, fileObject).Scan(&id)
+	})
+	return id, err
 }

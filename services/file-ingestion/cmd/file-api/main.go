@@ -1,0 +1,107 @@
+// Command file-api serves POST /v1/files/uploads and /v1/files/uploads/{id}/complete.
+//
+// Required: FILE_API_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY.
+// Optional: FILE_S3_REGION, LISTEN_ADDR (:8085), FILE_MAX_BYTES (default 5 GiB), FILE_MAX_PARTS (default 1000),
+// FILE_CONTENT_TYPES (comma list, default application/x-ndjson,text/csv).
+// AAS: see aas.go. DEV ONLY: FILE_API_DEV_TOKEN + FILE_API_DEV_TENANT. Without AAS or the dev token every request is rejected.
+package main
+
+import (
+	"context"
+	"crypto/subtle"
+	"log"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/astryon/file-ingestion/internal/api"
+	"github.com/astryon/file-ingestion/internal/jobs"
+	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/s3"
+	"github.com/astryon/file-ingestion/internal/upload"
+	goauth "github.com/astryon/go-common/auth"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
+func must(k string) string {
+	v := os.Getenv(k)
+	if v == "" {
+		log.Fatalf("%s is required", k)
+	}
+	return v
+}
+
+func num(k string, d int64) int64 {
+	v := os.Getenv(k)
+	if v == "" {
+		return d
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		log.Fatalf("%s must be a positive integer", k)
+	}
+	return n
+}
+
+type denyAll struct{}
+
+func (denyAll) Authenticate(*http.Request) (api.Principal, error) {
+	return api.Principal{}, api.ErrUnauthenticated
+}
+
+type devAuth struct{ token, tenant string }
+
+func (d devAuth) Authenticate(r *http.Request) (api.Principal, error) {
+	h := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if d.token == "" || d.tenant == "" || subtle.ConstantTimeCompare([]byte(h), []byte(d.token)) != 1 {
+		return api.Principal{}, api.ErrUnauthenticated
+	}
+	return api.Principal{TenantID: d.tenant, Scopes: []string{api.ScopeUploadsWrite}}, nil
+}
+
+func main() {
+	var auth api.Authenticator = denyAll{}
+	if os.Getenv("AAS_BASE_URL") != "" {
+		cfg, err := aasConfig()
+		if err != nil {
+			log.Fatalf("aas: %v", err)
+		}
+		v, err := goauth.NewVerifier(context.Background(), cfg)
+		if err != nil {
+			log.Fatalf("aas: %v", err)
+		}
+		auth = aasAuthenticator{v}
+	}
+	if t := os.Getenv("FILE_API_DEV_TOKEN"); t != "" {
+		auth = devAuth{t, os.Getenv("FILE_API_DEV_TENANT")}
+		log.Print("WARNING: dev static authenticator enabled")
+	}
+	pool, err := pgxpool.New(context.Background(), must("FILE_API_PG_URL"))
+	if err != nil {
+		log.Fatalf("FILE_API_PG_URL: %v", err)
+	}
+	bucket := must("FILE_S3_BUCKET")
+	c := &s3.Client{Endpoint: must("FILE_S3_ENDPOINT"), Bucket: bucket, Region: os.Getenv("FILE_S3_REGION"),
+		Creds: s3.Creds{AccessKey: must("FILE_S3_ACCESS_KEY"), SecretKey: must("FILE_S3_SECRET_KEY")}}
+	types := map[string]bool{}
+	for _, t := range strings.Split(env("FILE_CONTENT_TYPES", "application/x-ndjson,text/csv"), ",") {
+		types[strings.TrimSpace(t)] = true
+	}
+	db := jobs.PoolDB{Pool: pool}
+	s := &api.Server{Auth: auth, Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c,
+		Jobs: &jobs.Store{DB: db, WorkerID: "file-api"},
+		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
+			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
+	srv := &http.Server{Addr: env("LISTEN_ADDR", ":8085"), Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	log.Printf("file-api listening on %s", srv.Addr)
+	log.Fatal(srv.ListenAndServe())
+}

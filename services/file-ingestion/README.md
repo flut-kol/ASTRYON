@@ -51,9 +51,20 @@ values, then sets `committed_at`; on mismatch deletes the object and soft-delete
 objects of the job's tenant from the configured bucket; the verified SHA-256 is the checkpoint fingerprint). Live-proven on MinIO + PostgreSQL 16:
 multipart round trip with a 5 MiB part, ranged read, abort, tampered upload rejected and deleted, unverified object refused.
 
+## HTTP API (`cmd/file-api`, `internal/api`)
+
+Scope `astryon:uploads:write`; tenant only from the Principal (bodies with `tenant_id` or any unknown field are rejected, 256 KiB cap).
+- `POST /v1/files/uploads` `{source_id, filename, content_type, sha256, size_bytes, parts}` -> 201 `{file_object_id, upload_id, part_urls[], expires_at}`
+  (pre-signed part URLs, clients upload straight to S3). 400 invalid, 409 `already_registered` (same tenant+filename+sha256), 422 `unknown_source`.
+- `POST /v1/files/uploads/{id}/complete` `{upload_id, parts:[{number, etag}]}` -> completes the multipart upload, verifies SHA-256/size, commits the
+  row and enqueues the `process_file` job (idempotent: repeating returns the same job). 422 `checksum_mismatch` (object deleted) / `upload_incomplete`.
+Env: see `cmd/file-api/main.go` (`FILE_API_PG_URL`, `FILE_S3_*`, AAS + optional DPoP like query-api, dev token for local use only).
+Proven end to end with the built binary against MinIO + PostgreSQL 16: create, part PUT, complete, job QUEUED, repeat idempotent, 401 without token.
+Not yet: OpenAPI file in `docs/api/`, rate limits/quotas, malware scan.
+
 ## Remaining work
 
-- malware/content scanning, object lifecycle rules, the HTTP endpoint tying `upload.Service`, `Register` and `Verify` together;
+- malware/content scanning, object lifecycle rules, an OpenAPI document for the endpoints;
 - Parquet streaming and resumable CSV/Parquet checkpoints;
 - `Sink` (quarantine + normalized path, idempotent on `DedupKey`) and `cmd/file-worker`;
 - actual Parquet normalization, ClickHouse bulk ingest and durable lineage.

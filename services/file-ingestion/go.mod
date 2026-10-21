@@ -2,7 +2,10 @@ module github.com/astryon/file-ingestion
 
 go 1.25.0
 
-require github.com/jackc/pgx/v5 v5.9.2
+require (
+	github.com/astryon/go-common v0.0.0-00010101000000-000000000000
+	github.com/jackc/pgx/v5 v5.9.2
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
@@ -11,3 +14,5 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
+
+replace github.com/astryon/go-common => ../../libs/go-common
