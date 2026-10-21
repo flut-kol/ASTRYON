@@ -1,5 +1,5 @@
 # Build context: repository root.  docker build -f services/query-api/Dockerfile -t astryon/query-api .
-FROM golang:1.25 AS build
+FROM golang:1.26 AS build
 WORKDIR /src
 ENV CGO_ENABLED=0 GOWORK=off
 COPY libs/go-common libs/go-common
