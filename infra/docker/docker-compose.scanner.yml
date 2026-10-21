@@ -3,6 +3,7 @@ services:
   apps:
     environment:
       FILE_SCANNER_MODE: "required"
+      FILE_ARCHIVE_MODE: "inspect"
       FILE_SCANNER_DEFENDER_URL: "http://defender:3993"
       FILE_SCANNER_STAGE_DIR: "/var/lib/astryon/scanner"
       FILE_SCANNER_MAX_STAGE_BYTES: "1073741824"
