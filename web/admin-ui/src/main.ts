@@ -34,20 +34,23 @@ const ROUTES: [string, string, (el: HTMLElement) => void | Promise<void>][] = [
 function na(what: string) { return h('div', { class: 'na' }, `${what}: API not available in this build.`); }
 function errBox(e: unknown): HTMLElement {
   if (e instanceof ApiError) {
-    if (e.status === 401 || e.status === 403) return h('div', { class: 'err' }, `${e.code}: ${e.message} (check the token in the box above)`);
-    return h('div', { class: 'err' }, `${e.code}: ${e.message}`, e.traceId ? ` [trace ${e.traceId}]` : '');
+    if (e.status === 401 || e.status === 403) return h('div', { class: 'err', role: 'alert' }, `${e.code}: ${e.message} (${BFF ? 'sign in again' : 'check the token in the box above'})`);
+    return h('div', { class: 'err', role: 'alert' }, `${e.code}: ${e.message}`, e.traceId ? ` [trace ${e.traceId}]` : '');
   }
-  return h('div', { class: 'err' }, e instanceof Error ? e.message : String(e));
+  return h('div', { class: 'err', role: 'alert' }, e instanceof Error ? e.message : String(e));
 }
+// Async result areas announce their content politely (loading, results, errors) to screen readers.
+const live = (cls = '') => h('div', { role: 'status', 'aria-live': 'polite', ...(cls ? { class: cls } : {}) });
 const field = (label: string, input: HTMLElement) => h('label', {}, label, input);
-function table(head: string[], rows: (string | number | Node)[][]) {
-  return h('table', {}, h('thead', {}, h('tr', {}, head.map((x) => h('th', {}, x)))),
+function table(head: string[], rows: (string | number | Node)[][], caption = '') {
+  return h('table', {}, caption ? h('caption', { class: 'sr-only' }, caption) : null,
+    h('thead', {}, h('tr', {}, head.map((x) => h('th', { scope: 'col' }, x || h('span', { class: 'sr-only' }, 'actions'))))),
     h('tbody', {}, rows.map((r) => h('tr', {}, r.map((c) => h('td', {}, c))))));
 }
 function sourceInput() { return h('input', { size: '38', placeholder: 'source uuid', value: getSource() }); }
 
 async function overview(el: HTMLElement) {
-  const out = h('div', {}, 'Loading...');
+  const out = live(); out.append('Loading...');
   el.append(h('h2', {}, 'Overview'), out);
   const kp = (l: string, v: string, cls = '') => h('div', { class: 'card kpi' }, h('span', { class: 'mut' }, l), h('b', { class: cls }, v));
   const kpis: Node[] = [];
@@ -61,7 +64,7 @@ async function overview(el: HTMLElement) {
     const r = await fetch(`${B.gateway}/metrics`);
     if (r.ok) {
       const s = parseProm(await r.text()).filter((x) => x.name.startsWith('astryon_') && x.name.endsWith('_total'));
-      counters = s.length ? table(['metric', 'labels', 'value'], s.map((x) => [x.name, Object.entries(x.labels).map(([k, v]) => `${k}=${v}`).join(' '), fmtNum(x.value)])) : h('span', { class: 'mut' }, 'no counters yet');
+      counters = s.length ? table(['metric', 'labels', 'value'], s.map((x) => [x.name, Object.entries(x.labels).map(([k, v]) => `${k}=${v}`).join(' '), fmtNum(x.value)]), 'Gateway counters') : h('span', { class: 'mut' }, 'no counters yet');
     }
   } catch { /* leave default */ }
   clear(out);
@@ -74,9 +77,9 @@ function uploadForm(onDone: () => void) {
   const st = h('select', {}, SOURCE_TYPES.map((x) => h('option', { value: x }, x)));
   const sens = h('select', {}, h('option', { value: '' }, '(profile default)'), SENSITIVITIES.map((x) => h('option', { value: x }, x)));
   const tags = h('input', { size: '30', placeholder: 'purpose=demo,team=ops' });
-  const log = h('div', { class: 'mut' });
-  const fileIn = h('input', { type: 'file', accept: '.csv,.ndjson,.jsonl,text/csv,application/x-ndjson', multiple: true });
-  const drop = h('div', { class: 'drop' }, 'Drop CSV / NDJSON files here or ', fileIn);
+  const log = live('mut');
+  const fileIn = h('input', { type: 'file', 'aria-label': 'Choose CSV or NDJSON files to upload', accept: '.csv,.ndjson,.jsonl,text/csv,application/x-ndjson', multiple: true });
+  const drop = h('div', { class: 'drop', role: 'group', 'aria-label': 'File drop zone (or use the file chooser)' }, 'Drop CSV / NDJSON files here or ', fileIn);
   const run = async (files: File[]) => {
     clear(log);
     let tg: Record<string, string>;
@@ -101,7 +104,7 @@ function uploadForm(onDone: () => void) {
 
 async function uploads(el: HTMLElement) {
   el.append(h('h2', {}, 'Uploads'));
-  const list = h('div', {}); const detail = h('div', {});
+  const list = live(); const detail = live();
   const f = {
     source_type: h('select', {}, h('option', { value: '' }, 'any'), SOURCE_TYPES.map((x) => h('option', { value: x }, x))),
     sensitivity: h('select', {}, h('option', { value: '' }, 'any'), SENSITIVITIES.map((x) => h('option', { value: x }, x))),
@@ -119,11 +122,11 @@ async function uploads(el: HTMLElement) {
       const p = await listUploads(ctx, B.files, q);
       clear(list);
       const rows = p.items.map((u) => [
-        h('a', { href: '#', onclick: (e: Event) => { e.preventDefault(); void showDetail(u.file_object_id); } }, u.file_object_id.slice(0, 8)),
+        h('button', { class: 'lnk', 'aria-label': `Show upload ${u.file_object_id}`, onclick: () => void showDetail(u.file_object_id) }, u.file_object_id.slice(0, 8)),
         u.source_type, u.sensitivity, u.committed ? 'yes' : 'no', u.job?.status ?? '-', u.job?.error ?? '', labelSummary(u.job?.labels), fmtNum(u.size_bytes),
         Object.entries(u.tags).map(([k, v]) => `${k}=${v}`).join(' '), u.created_at,
       ]);
-      list.append(rows.length ? table(['id', 'type', 'sensitivity', 'committed', 'status', 'error', 'labels', 'bytes', 'tags', 'created'], rows) : h('div', { class: 'mut' }, 'No uploads match.'));
+      list.append(rows.length ? table(['id', 'type', 'sensitivity', 'committed', 'status', 'error', 'labels', 'bytes', 'tags', 'created'], rows, 'Uploads') : h('div', { class: 'mut' }, 'No uploads match.'));
       const nav = h('div', { class: 'row' });
       if (cursors.length) nav.append(h('button', { onclick: () => { cursors.pop(); void load(cursors.at(-1)); } }, 'Newer'));
       if (p.next_cursor) nav.append(h('button', { onclick: () => { cursors.push(p.next_cursor!); void load(p.next_cursor); } }, 'Older'));
@@ -154,7 +157,7 @@ function detailCard(u: UploadItem) {
       ['error code', j?.error ?? '-'],
       ['content labels (counts only)', Object.entries(j?.labels ?? {}).map(([k, v]) => `${k}: ${v.count} (${v.fields.length} fields)`).join('; ') || '-'],
       ['profile', u.profile ? `retention=${u.profile.retention_class ?? '-'} export=${u.profile.export_allowed ?? '-'}` : '-'],
-    ]), quarantined ? h('p', { class: 'warn' }, 'Held back by content policy: nothing reached the sink.') : null);
+    ], 'Upload details'), quarantined ? h('p', { class: 'warn' }, 'Held back by content policy: nothing reached the sink.') : null);
 }
 
 function rangeControls() {
@@ -171,7 +174,7 @@ async function events(el: HTMLElement) {
   el.append(h('h2', {}, 'Events'));
   const c = rangeControls();
   const et = h('input', { size: '16' }); const en = h('input', { size: '16' });
-  const out = h('div', {}); let stack: string[] = [];
+  const out = live(); let stack: string[] = [];
   const load = async (cursor?: string) => {
     clear(out); out.append('Loading...');
     const from = localToRfc3339(c.from.value), to = localToRfc3339(c.to.value);
@@ -180,7 +183,7 @@ async function events(el: HTMLElement) {
     try {
       const p = await queryEvents(ctx, B.query, { from, to, source_id: c.source.value.trim() || undefined, processing_version: c.pv.value ? Number(c.pv.value) : undefined, event_type: et.value.trim(), entity_id: en.value.trim(), cursor });
       clear(out);
-      out.append(p.items.length ? table(['time', 'type', 'entity', 'flags', 'event id', 'payload'], p.items.map((e) => [e.event_time, e.event_type, e.entity_id ?? '', (e.quality_flags ?? []).join(','), e.event_id, (e.payload ?? '').slice(0, 120)])) : h('div', { class: 'mut' }, 'No events.'));
+      out.append(p.items.length ? table(['time', 'type', 'entity', 'flags', 'event id', 'payload'], p.items.map((e) => [e.event_time, e.event_type, e.entity_id ?? '', (e.quality_flags ?? []).join(','), e.event_id, (e.payload ?? '').slice(0, 120)]), 'Events') : h('div', { class: 'mut' }, 'No events.'));
       const nav = h('div', { class: 'row' });
       if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, 'Previous'));
       if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, 'Next'));
@@ -194,7 +197,7 @@ async function events(el: HTMLElement) {
 
 async function quality(el: HTMLElement) {
   el.append(h('h2', {}, 'Quality and metrics'));
-  const c = rangeControls(); const out = h('div', {});
+  const c = rangeControls(); const out = live();
   const load = async () => {
     clear(out); out.append('Loading...');
     const from = localToRfc3339(c.from.value), to = localToRfc3339(c.to.value);
@@ -205,7 +208,7 @@ async function quality(el: HTMLElement) {
     clear(out);
     const grid = (title: string, rows: Record<string, unknown>[] | undefined) => {
       const cols = [...new Set((rows ?? []).flatMap((x) => Object.keys(x)))];
-      return h('div', { class: 'card' }, h('h3', {}, title), rows?.length ? table(cols, rows.map((x) => cols.map((k) => (typeof x[k] === 'object' ? JSON.stringify(x[k]) : fmtNum(x[k]))))) : h('span', { class: 'mut' }, 'no data'));
+      return h('div', { class: 'card' }, h('h3', {}, title), rows?.length ? table(cols, rows.map((x) => cols.map((k) => (typeof x[k] === 'object' ? JSON.stringify(x[k]) : fmtNum(x[k])))), title) : h('span', { class: 'mut' }, 'no data'));
     };
     if (m.status === 'fulfilled') out.append(grid('Per-source metrics', m.value.sources)); else out.append(errBox(m.reason));
     if (q.status === 'fulfilled') out.append(grid('Per-source quality', q.value.sources), grid('Quality flags', q.value.flags)); else out.append(errBox(q.reason));
@@ -215,17 +218,18 @@ async function quality(el: HTMLElement) {
 
 async function connectors(el: HTMLElement) {
   el.append(h('h2', {}, 'Connectors'));
-  const out = h('div', {}); el.append(out);
+  const out = live(); el.append(out);
   const load = async () => {
     clear(out);
     try {
       const p = await listConnectors(ctx, B.connectors);
-      const toggle = (x: { id: string; enabled: boolean }) => h('button', {
+      const toggle = (x: { id: string; enabled: boolean; name?: string }) => h('button', {
+        'aria-label': `${x.enabled ? 'Pause' : 'Resume'} connector ${x.name ?? x.id}`,
         onclick: async () => {
           try { await setConnectorEnabled(ctx, B.connectors, x.id, !x.enabled); await load(); } catch (e) { out.prepend(errBox(e)); }
         },
       }, x.enabled ? 'Pause' : 'Resume');
-      out.append(p.items.length ? table(['name', 'kind', 'enabled', 'source', 'secret ref', 'created', ''], p.items.map((x) => [x.name, x.kind, h('span', { class: x.enabled ? 'ok' : 'warn' }, String(x.enabled)), x.source_id, x.secret_ref ?? '', x.created_at, toggle(x)])) : h('div', { class: 'mut' }, 'No connectors.'));
+      out.append(p.items.length ? table(['name', 'kind', 'enabled', 'source', 'secret ref', 'created', ''], p.items.map((x) => [x.name, x.kind, h('span', { class: x.enabled ? 'ok' : 'warn' }, String(x.enabled)), x.source_id, x.secret_ref ?? '', x.created_at, toggle(x)]), 'Connectors') : h('div', { class: 'mut' }, 'No connectors.'));
     } catch (e) {
       if (e instanceof ApiError && e.unavailable) out.append(na('Connector manager is not running or not reachable'));
       else out.append(errBox(e));
@@ -239,7 +243,7 @@ async function exportsPage(el: HTMLElement) {
   const c = rangeControls();
   const fmt = h('select', {}, h('option', { value: 'ndjson' }, 'ndjson'), h('option', { value: 'csv' }, 'csv'));
   const et = h('input', { size: '16' }); const en = h('input', { size: '16' }); const mr = h('input', { size: '9', placeholder: '1000000' });
-  const msg = h('div', {}); const list = h('div', {});
+  const msg = live(); const list = live();
   const jobs = new Map<string, ExportJob | Error>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const draw = () => {
@@ -252,7 +256,7 @@ async function exportsPage(el: HTMLElement) {
       if (j instanceof Error) return [id, h('span', { class: 'err' }, j.message), '', '', '', '', ''];
       return [id, h('span', { class: j.status === 'FAILED' ? 'err' : j.status === 'SUCCEEDED' ? 'ok' : '' }, j.status), fmtNum(j.rows), fmtNum(j.bytes), j.format, j.error_code ?? '',
         j.download_url ? h('a', { href: j.download_url, rel: 'noopener' }, `download (until ${j.download_expires_at ?? '?'})`) : ''];
-    })));
+    }), 'Exports'));
   };
   const refresh = async () => {
     await Promise.all(knownExports().map(async (id) => {
@@ -287,7 +291,7 @@ async function exportsPage(el: HTMLElement) {
 
 async function replaysPage(el: HTMLElement) {
   el.append(h('h2', {}, 'Replays'));
-  const list = h('div', {}); let stack: string[] = [];
+  const list = live(); let stack: string[] = [];
   const src = sourceInput();
   const st = h('select', {}, h('option', { value: '' }, 'any'), REPLAY_STATUSES.map((x) => h('option', { value: x }, x)));
   const load = async (cursor?: string) => {
@@ -297,7 +301,7 @@ async function replaysPage(el: HTMLElement) {
       clear(list);
       list.append(p.items.length ? table(['created', 'source', 'target version', 'status', 'range', 'job', 'completed'],
         p.items.map((r) => [r.created_at, r.source_id, r.processing_version, h('span', { class: r.status === 'FAILED' ? 'err' : r.status === 'COMPLETED' ? 'ok' : '' }, r.status),
-          r.time_from ? `${r.time_from} .. ${r.time_to ?? ''}` : '', r.job_id ?? '', r.completed_at ?? ''])) : h('div', { class: 'mut' }, 'No replays.'));
+          r.time_from ? `${r.time_from} .. ${r.time_to ?? ''}` : '', r.job_id ?? '', r.completed_at ?? '']), 'Replays') : h('div', { class: 'mut' }, 'No replays.'));
       const nav = h('div', { class: 'row' });
       if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, 'Newer'));
       if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, 'Older'));
@@ -314,14 +318,14 @@ async function replaysPage(el: HTMLElement) {
 
 async function quarantinePage(el: HTMLElement) {
   el.append(h('h2', {}, 'Quarantine'));
-  const list = h('div', {}); let stack: string[] = [];
+  const list = live(); let stack: string[] = [];
   const load = async (cursor?: string) => {
     clear(list); list.append('Loading...');
     try {
       const p = await listQuarantine(ctx, B.quarantine, cursor);
       clear(list);
       list.append(p.items.length ? table(['quarantined at', 'stage', 'reason code', 'reason', 'source', 'event', 'batch/job', 'pipeline v'],
-        p.items.map((r) => [r.quarantined_at, r.stage, r.reason_code, r.reason ?? '', r.source_id ?? '', r.event_id ?? '', r.batch_id ?? r.job_id ?? '', r.pipeline_version ?? ''])) : h('div', { class: 'mut' }, 'Quarantine is empty.'));
+        p.items.map((r) => [r.quarantined_at, r.stage, r.reason_code, r.reason ?? '', r.source_id ?? '', r.event_id ?? '', r.batch_id ?? r.job_id ?? '', r.pipeline_version ?? '']), 'Quarantine') : h('div', { class: 'mut' }, 'Quarantine is empty.'));
       const nav = h('div', { class: 'row' });
       if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, 'Newer'));
       if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, 'Older'));
@@ -334,7 +338,7 @@ async function quarantinePage(el: HTMLElement) {
   const d = lastHours(24 * 7);
   const loc = (iso: string) => { const x = new Date(iso); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
   const src = sourceInput(); const from = h('input', { type: 'datetime-local', value: loc(d.from) }); const to = h('input', { type: 'datetime-local', value: loc(d.to) });
-  const pv = h('input', { size: '6', placeholder: '1' }); const plan = h('div', {});
+  const pv = h('input', { size: '6', placeholder: '1' }); const plan = live();
   const dry = async () => {
     clear(plan);
     const a = localToRfc3339(from.value), b = localToRfc3339(to.value), v = Number(pv.value);
@@ -350,32 +354,44 @@ async function quarantinePage(el: HTMLElement) {
   await load();
 }
 
-function render() {
-  const root = document.getElementById('app')!;
-  clear(root);
-  const page = location.hash.replace(/^#\/?/, '') || 'overview';
-  if (BFF) { renderBff(root, page); return; }
-  const tok = h('input', { type: 'password', size: '28', placeholder: 'bearer token (dev static or AAS)', autocomplete: 'off' });
-  const status = h('span', { class: 'mut' }, getToken() ? 'token set (session only)' : 'no token');
-  const nav = h('nav', {}, ROUTES.map(([k, l]) => h('a', { href: `#/${k}`, class: k === page ? 'on' : '' }, l)));
-  const settings = h('div', { class: 'row', style: 'margin:0;margin-left:auto' },
-    tok, h('button', { onclick: () => { setToken(tok.value); render(); } }, 'Set'),
-    h('button', { onclick: () => { setToken(null); render(); } }, 'Clear'),
-    loginUrl ? h('a', { href: loginUrl }, 'Sign in') : null, status);
-  const main = h('main', {});
-  root.append(h('header', {}, h('strong', {}, 'ASTRYON Admin'), nav, settings), main);
+let firstRender = true;
+// Shared page shell: skip link, banner, labelled navigation with aria-current, focusable main landmark.
+function shell(root: HTMLElement, page: string, settings: HTMLElement): HTMLElement {
+  const nav = h('nav', { 'aria-label': 'Main' }, ROUTES.map(([k, l]) => h('a', { href: `#/${k}`, class: k === page ? 'on' : '', ...(k === page ? { 'aria-current': 'page' } : {}) }, l)));
+  const main = h('main', { id: 'main', tabindex: '-1' });
+  root.append(h('a', { class: 'skip', href: '#main', onclick: (e: Event) => { e.preventDefault(); main.focus(); } }, 'Skip to main content'),
+    h('header', {}, h('h1', {}, 'ASTRYON Admin'), nav, settings), main);
+  const label = ROUTES.find(([k]) => k === page)?.[1] ?? 'Not found';
+  document.title = `${label} - ASTRYON Admin`;
+  // Route changes move focus to the new content (not on first load, so the page title is read first).
+  if (!firstRender) main.focus({ preventScroll: true });
+  firstRender = false;
+  return main;
+}
+function renderPage(main: HTMLElement, page: string) {
   const route = ROUTES.find(([k]) => k === page);
   if (!route) { main.append(na('Unknown page')); return; }
   if (page === 'jobs') main.append(h('h2', {}, 'Jobs'), na('/v1/jobs'));
   else if (page === 'sources') main.append(h('h2', {}, 'Sources'), na('/v1/sources'));
   else void Promise.resolve(route[2](main)).catch((e) => main.append(errBox(e)));
 }
+function render() {
+  const root = document.getElementById('app')!;
+  clear(root);
+  const page = location.hash.replace(/^#\/?/, '') || 'overview';
+  if (BFF) { renderBff(root, page); return; }
+  const tok = h('input', { type: 'password', size: '28', placeholder: 'bearer token (dev static or AAS)', 'aria-label': 'Bearer token', autocomplete: 'off' });
+  const status = h('span', { class: 'mut', role: 'status' }, getToken() ? 'token set (session only)' : 'no token');
+  const settings = h('div', { class: 'row', style: 'margin:0;margin-left:auto' },
+    tok, h('button', { onclick: () => { setToken(tok.value); render(); } }, 'Set'),
+    h('button', { onclick: () => { setToken(null); render(); } }, 'Clear'),
+    loginUrl ? h('a', { href: loginUrl }, 'Sign in') : null, status);
+  renderPage(shell(root, page, settings), page);
+}
 function renderBff(root: HTMLElement, page: string) {
-  const nav = h('nav', {}, ROUTES.map(([k, l]) => h('a', { href: `#/${k}`, class: k === page ? 'on' : '' }, l)));
-  const who = h('span', { class: 'mut' }, 'checking session...');
+  const who = h('span', { class: 'mut', role: 'status' }, 'checking session...');
   const settings = h('div', { class: 'row', style: 'margin:0;margin-left:auto' }, who);
-  const main = h('main', {});
-  root.append(h('header', {}, h('strong', {}, 'ASTRYON Admin'), nav, settings), main);
+  const main = shell(root, page, settings);
   void fetch('/auth/me', { credentials: 'same-origin' }).then((r) => r.json() as Promise<{ authenticated?: boolean; subject?: string }>).then((m) => {
     clear(who);
     if (!m.authenticated) { who.append(h('a', { href: '/auth/login' }, 'Sign in')); return; }
@@ -387,11 +403,7 @@ function renderBff(root: HTMLElement, page: string) {
       },
     }, 'Sign out'));
   }).catch(() => { who.textContent = 'session service unreachable'; });
-  const route = ROUTES.find(([k]) => k === page);
-  if (!route) { main.append(na('Unknown page')); return; }
-  if (page === 'jobs') main.append(h('h2', {}, 'Jobs'), na('/v1/jobs'));
-  else if (page === 'sources') main.append(h('h2', {}, 'Sources'), na('/v1/sources'));
-  else void Promise.resolve(route[2](main)).catch((e) => main.append(errBox(e)));
+  renderPage(main, page);
 }
 window.addEventListener('hashchange', render);
 render();

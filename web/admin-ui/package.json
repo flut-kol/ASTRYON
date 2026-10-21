@@ -7,9 +7,13 @@
     "dev": "vite --host 127.0.0.1 --port 15173 --strictPort",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "axe-core": "4.10.2",
+    "jsdom": "25.0.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.0",
     "vitest": "^2.0.5"

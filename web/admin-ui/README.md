@@ -25,4 +25,15 @@ All server strings are rendered via `textContent` (`src/dom.ts`); no `innerHTML`
 Production: serve `dist/` behind a gateway/reverse proxy exposing the same `/api/*` prefixes (or set `VITE_*_BASE`); S3 needs CORS exposing `ETag` if parts are PUT directly (`VITE_S3_PROXY` unset).
 
 
-BFF mode: build/run with `VITE_AUTH_MODE=bff` behind `services/admin-bff` (same origin; `/api/<service>` is proxied there). The browser then holds no token: requests use the session cookie, unsafe ones add `X-Requested-With: astryon-admin`, and the header shows Sign in/Sign out via `/auth/me`, `/auth/login`, `/auth/logout`.
+BFF mode: build/run with `VITE_AUTH_MODE=bff` behind `services/admin-bff` (dev: `npm run dev` proxies `/auth` and `/api` to `PROXY_BFF`, default http://127.0.0.1:18090; run the BFF with `BFF_AFTER_LOGIN_URL=http://127.0.0.1:15173/`; same origin; `/api/<service>` is proxied there). The browser then holds no token: requests use the session cookie, unsafe ones add `X-Requested-With: astryon-admin`, and the header shows Sign in/Sign out via `/auth/me`, `/auth/login`, `/auth/logout`.
+
+## Accessibility and UI tests (DPP-055)
+- Semantics: skip link, `banner`/`nav[aria-label=Main]`/`main#main` landmarks (focused on route change), `aria-current` on the active route, one `h1`, document title per page,
+  `th scope=col` and a hidden `caption` on every table, all inputs labelled, upload detail opened from a real `button`, async areas are `role=status`/`aria-live=polite`, errors `role=alert`,
+  the drop zone always has the file chooser as keyboard fallback, visible `:focus-visible`, `prefers-reduced-motion` honoured.
+- Contrast (WCAG 2.x, computed from the CSS tokens; text needs 4.5:1, control borders 3:1): light text pairs 4.54-16.6, dark 6.5-14.7; fixed in this pass:
+  dark `button.pri` was white on `#7aa2ff` (2.49:1) and now uses `--onac:#0b1220` (7.52:1); control borders `--bd` were 1.38/1.41:1 and controls now use `--ctl` (3.67/4.27:1).
+  The lowest remaining text pair is `--warn` on the page background in light mode (4.54:1).
+- `npm test`: vitest, including `src/a11y.test.ts` (axe-core 4.10.2 under jsdom over all 10 routes, token and BFF mode, error state; fails on serious/critical; jsdom cannot compute colour contrast).
+- `npm run e2e`: Playwright 1.49.1 against its own Vite server (port 15174, BFF mode) with a mocked backend (`src/mockApi.ts`, `page.route`); no AAS, services or tokens. One-time: `npx playwright install chromium`.
+  `e2e/smoke.spec.ts` (sign-in states, overview, events query, quarantine + dry-run, uploads, 403 and 503 states, focus on route change) and `e2e/contrast.spec.ts` (axe with colour contrast in the real browser, light and dark, all pages).
