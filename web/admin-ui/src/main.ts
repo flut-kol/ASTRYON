@@ -4,7 +4,9 @@ import { ApiError, type Ctx } from './http';
 import { parseProm } from './prom';
 import { getUpload, labelSummary, listUploads, parseTags, SENSITIVITIES, SOURCE_TYPES, STATUSES, uploadFile, type UploadItem } from './upload';
 import { fmtNum, lastHours, localToRfc3339, metricsSummary, qualitySummary, queryEvents } from './query';
-import { listConnectors } from './connectors';
+import { listConnectors, setConnectorEnabled } from './connectors';
+import { createExport, getExport, isTerminal, knownExports, rememberExport, validateSpec, type ExportJob } from './exports';
+import { listQuarantine, planReplay } from './quarantine';
 
 const env = import.meta.env;
 const B = {
@@ -12,6 +14,8 @@ const B = {
   files: env.VITE_FILES_BASE ?? '/api/files',
   query: env.VITE_QUERY_BASE ?? '/api/query',
   connectors: env.VITE_CONNECTORS_BASE ?? '/api/connectors',
+  exports: env.VITE_EXPORTS_BASE ?? '/api/exports',
+  quarantine: env.VITE_QUARANTINE_BASE ?? '/api/quarantine',
   s3Proxy: env.VITE_S3_PROXY ?? (env.DEV ? '/api/s3' : undefined),
 };
 const ctx: Ctx = { getToken };
@@ -21,7 +25,7 @@ if (frag) { setToken(frag); history.replaceState(null, '', location.pathname + l
 
 const ROUTES: [string, string, (el: HTMLElement) => void | Promise<void>][] = [
   ['overview', 'Overview', overview], ['uploads', 'Uploads', uploads], ['events', 'Events', events],
-  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['jobs', 'Jobs', () => {}], ['sources', 'Sources', () => {}],
+  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['jobs', 'Jobs', () => {}], ['sources', 'Sources', () => {}],
 ];
 
 function na(what: string) { return h('div', { class: 'na' }, `${what}: API not available in this build.`); }
@@ -208,13 +212,112 @@ async function quality(el: HTMLElement) {
 
 async function connectors(el: HTMLElement) {
   el.append(h('h2', {}, 'Connectors'));
-  try {
-    const p = await listConnectors(ctx, B.connectors);
-    el.append(p.items.length ? table(['name', 'kind', 'enabled', 'source', 'secret ref', 'created'], p.items.map((x) => [x.name, x.kind, String(x.enabled), x.source_id, x.secret_ref ?? '', x.created_at])) : h('div', { class: 'mut' }, 'No connectors.'));
-  } catch (e) {
-    if (e instanceof ApiError && e.unavailable) el.append(na('Connector manager is not running or not reachable'));
-    else el.append(errBox(e));
-  }
+  const out = h('div', {}); el.append(out);
+  const load = async () => {
+    clear(out);
+    try {
+      const p = await listConnectors(ctx, B.connectors);
+      const toggle = (x: { id: string; enabled: boolean }) => h('button', {
+        onclick: async () => {
+          try { await setConnectorEnabled(ctx, B.connectors, x.id, !x.enabled); await load(); } catch (e) { out.prepend(errBox(e)); }
+        },
+      }, x.enabled ? 'Pause' : 'Resume');
+      out.append(p.items.length ? table(['name', 'kind', 'enabled', 'source', 'secret ref', 'created', ''], p.items.map((x) => [x.name, x.kind, h('span', { class: x.enabled ? 'ok' : 'warn' }, String(x.enabled)), x.source_id, x.secret_ref ?? '', x.created_at, toggle(x)])) : h('div', { class: 'mut' }, 'No connectors.'));
+    } catch (e) {
+      if (e instanceof ApiError && e.unavailable) out.append(na('Connector manager is not running or not reachable'));
+      else out.append(errBox(e));
+    }
+  };
+  await load();
+}
+
+async function exportsPage(el: HTMLElement) {
+  el.append(h('h2', {}, 'Exports'));
+  const c = rangeControls();
+  const fmt = h('select', {}, h('option', { value: 'ndjson' }, 'ndjson'), h('option', { value: 'csv' }, 'csv'));
+  const et = h('input', { size: '16' }); const en = h('input', { size: '16' }); const mr = h('input', { size: '9', placeholder: '1000000' });
+  const msg = h('div', {}); const list = h('div', {});
+  const jobs = new Map<string, ExportJob | Error>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const draw = () => {
+    clear(list);
+    const ids = knownExports();
+    if (!ids.length) { list.append(h('div', { class: 'mut' }, 'No exports started from this browser session. The API has no list endpoint; jobs are tracked by id.')); return; }
+    list.append(table(['id', 'status', 'rows', 'bytes', 'format', 'error', 'download'], ids.map((id) => {
+      const j = jobs.get(id);
+      if (!j) return [id, 'loading', '', '', '', '', ''];
+      if (j instanceof Error) return [id, h('span', { class: 'err' }, j.message), '', '', '', '', ''];
+      return [id, h('span', { class: j.status === 'FAILED' ? 'err' : j.status === 'SUCCEEDED' ? 'ok' : '' }, j.status), fmtNum(j.rows), fmtNum(j.bytes), j.format, j.error_code ?? '',
+        j.download_url ? h('a', { href: j.download_url, rel: 'noopener' }, `download (until ${j.download_expires_at ?? '?'})`) : ''];
+    })));
+  };
+  const refresh = async () => {
+    await Promise.all(knownExports().map(async (id) => {
+      const cur = jobs.get(id);
+      if (cur && !(cur instanceof Error) && isTerminal(cur) && !cur.download_url) return;
+      try { jobs.set(id, await getExport(ctx, B.exports, id)); } catch (e) { jobs.set(id, e instanceof Error ? e : new Error(String(e))); }
+    }));
+    if (!list.isConnected) return;
+    draw();
+    const open = [...jobs.values()].some((j) => !(j instanceof Error) && !isTerminal(j));
+    if (open) timer = setTimeout(() => void refresh(), 3000);
+  };
+  const start = async () => {
+    clear(msg);
+    const from = localToRfc3339(c.from.value), to = localToRfc3339(c.to.value);
+    const spec = { from: from ?? '', to: to ?? '', processing_version: Number(c.pv.value), format: fmt.value as 'csv' | 'ndjson', source_id: c.source.value.trim(), event_type: et.value.trim(), entity_id: en.value.trim(), max_rows: mr.value ? Number(mr.value) : undefined };
+    const bad = c.pv.value === '' ? 'processing version is required' : validateSpec(spec);
+    if (bad) { msg.append(h('div', { class: 'err' }, bad)); return; }
+    setSource(c.source.value);
+    try {
+      const r = await createExport(ctx, B.exports, spec);
+      rememberExport(r.id); msg.append(h('div', { class: 'ok' }, `queued ${r.id}`));
+      clearTimeout(timer); void refresh();
+    } catch (e) { msg.append(errBox(e)); }
+  };
+  el.append(h('div', { class: 'card' }, h('p', { class: 'mut' }, 'Range up to 31 days; processing version is required. The tenant comes from your token. Download links are short-lived and fetched again on refresh.'),
+    h('div', { class: 'row' }, field('From', c.from), field('To', c.to), field('Source ID (optional)', c.source), field('Proc. version', c.pv), field('Format', fmt), field('Event type', et), field('Entity', en), field('Max rows', mr),
+      h('button', { class: 'pri', onclick: () => void start() }, 'Start export')), msg),
+    h('div', { class: 'card' }, h('div', { class: 'row' }, h('button', { onclick: () => { clearTimeout(timer); void refresh(); } }, 'Refresh')), list));
+  draw(); await refresh();
+}
+
+async function quarantinePage(el: HTMLElement) {
+  el.append(h('h2', {}, 'Quarantine'));
+  const list = h('div', {}); let stack: string[] = [];
+  const load = async (cursor?: string) => {
+    clear(list); list.append('Loading...');
+    try {
+      const p = await listQuarantine(ctx, B.quarantine, cursor);
+      clear(list);
+      list.append(p.items.length ? table(['quarantined at', 'stage', 'reason code', 'reason', 'source', 'event', 'batch/job', 'pipeline v'],
+        p.items.map((r) => [r.quarantined_at, r.stage, r.reason_code, r.reason ?? '', r.source_id ?? '', r.event_id ?? '', r.batch_id ?? r.job_id ?? '', r.pipeline_version ?? ''])) : h('div', { class: 'mut' }, 'Quarantine is empty.'));
+      const nav = h('div', { class: 'row' });
+      if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, 'Newer'));
+      if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, 'Older'));
+      list.append(nav);
+    } catch (e) {
+      clear(list);
+      list.append(e instanceof ApiError && e.unavailable ? na('Quarantine service is not running or not reachable') : errBox(e));
+    }
+  };
+  const d = lastHours(24 * 7);
+  const loc = (iso: string) => { const x = new Date(iso); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
+  const src = sourceInput(); const from = h('input', { type: 'datetime-local', value: loc(d.from) }); const to = h('input', { type: 'datetime-local', value: loc(d.to) });
+  const pv = h('input', { size: '6', placeholder: '1' }); const plan = h('div', {});
+  const dry = async () => {
+    clear(plan);
+    const a = localToRfc3339(from.value), b = localToRfc3339(to.value), v = Number(pv.value);
+    if (!a || !b || !src.value.trim() || !Number.isInteger(v) || v < 1) { plan.append(h('div', { class: 'err' }, 'source id, time range and pipeline version are required')); return; }
+    setSource(src.value);
+    try {
+      const r = await planReplay(ctx, B.quarantine, { source_id: src.value.trim(), occurred_from: a, occurred_to: b, pipeline_version: v });
+      plan.append(h('div', { class: r.executable ? 'ok' : 'warn' }, `${r.candidate_count_is_lower_bound ? '>= ' : ''}${fmtNum(r.candidate_count)} candidate record(s); ${r.executable ? 'within the replay limit' : 'not executable (too large)'}. Dry run only: nothing was published.`));
+    } catch (e) { plan.append(errBox(e)); }
+  };
+  el.append(h('div', { class: 'card' }, h('h3', {}, 'Replay dry run'), h('div', { class: 'row' }, field('Source ID', src), field('Occurred from', from), field('Occurred to', to), field('Pipeline version', pv),
+    h('button', { onclick: () => void dry() }, 'Count candidates')), plan), h('div', { class: 'card' }, list));
+  await load();
 }
 
 function render() {

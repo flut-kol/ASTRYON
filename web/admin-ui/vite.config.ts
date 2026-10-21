@@ -20,6 +20,8 @@ export default defineConfig({
       '/api/files': px('/api/files', t('PROXY_FILES', 'http://127.0.0.1:18085')),
       '/api/query': px('/api/query', t('PROXY_QUERY', 'http://127.0.0.1:18082')),
       '/api/connectors': px('/api/connectors', t('PROXY_CONNECTORS', 'http://127.0.0.1:8089')),
+      '/api/exports': px('/api/exports', t('PROXY_EXPORTS', 'http://127.0.0.1:8083')),
+      '/api/quarantine': px('/api/quarantine', t('PROXY_QUARANTINE', 'http://127.0.0.1:8085')),
       // Pre-signed part URLs point at S3 directly; the page rewrites them to /api/s3 (dev only, avoids S3 CORS).
       '/api/s3': px('/api/s3', t('PROXY_S3', 'http://127.0.0.1:19200'), false),
     },

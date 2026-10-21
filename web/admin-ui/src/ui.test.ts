@@ -75,3 +75,27 @@ describe('upload flow', () => {
     expect(JSON.parse((f.mock.calls[2][1] as RequestInit).body as string).parts).toEqual([{ number: 1, etag: '"e1"' }]);
   });
 });
+
+describe('exports and connectors', () => {
+  it('validates the spec and sends only whitelisted fields', async () => {
+    const { buildSpec, createExport, validateSpec } = await import('./exports');
+    const base = { from: '2026-10-01T00:00:00Z', to: '2026-10-02T00:00:00Z', processing_version: 1 };
+    expect(validateSpec(base)).toBeUndefined();
+    expect(validateSpec({ ...base, to: '2026-12-01T00:00:00Z' })).toMatch(/31 days/);
+    expect(validateSpec({ ...base, to: base.from })).toMatch(/after/);
+    expect(validateSpec({ ...base, processing_version: -1 })).toMatch(/version/);
+    expect(validateSpec({ ...base, max_rows: 0 })).toMatch(/max rows/);
+    expect(buildSpec({ ...base, source_id: '', event_type: 'x', format: 'csv' })).toEqual({ ...base, event_type: 'x', format: 'csv' });
+    const f = vi.fn().mockResolvedValue(json({ id: 'e1', status: 'QUEUED' }, 202));
+    await createExport({ getToken: () => 't', fetchFn: f }, '/x', base);
+    expect(f.mock.calls[0][0]).toBe('/x/v1/exports');
+    expect(JSON.parse(f.mock.calls[0][1].body).tenant_id).toBeUndefined();
+  });
+  it('pause/resume hit the right endpoints', async () => {
+    const { setConnectorEnabled } = await import('./connectors');
+    const f = vi.fn(async (_u: string, _i: RequestInit) => json({ id: 'a', enabled: false }));
+    await setConnectorEnabled({ getToken: () => 't', fetchFn: f as unknown as typeof fetch }, '/c', 'a/b', false);
+    await setConnectorEnabled({ getToken: () => 't', fetchFn: f as unknown as typeof fetch }, '/c', 'a', true);
+    expect(f.mock.calls.map((c) => `${c[1].method} ${c[0]}`)).toEqual(['POST /c/v1/connectors/a%2Fb/pause', 'POST /c/v1/connectors/a/resume']);
+  });
+});

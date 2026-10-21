@@ -4,7 +4,7 @@ Vanilla TypeScript + Vite, no runtime dependencies. Hash routes: Overview, Uploa
 ## Run (against the demo stack, `scripts/dev/demo-up.sh`)
 `npm install && npm run dev` -> http://127.0.0.1:15173. The Vite dev server proxies same-origin paths, so Go services need no CORS:
 `/api/gateway` :18080, `/api/files` :18085, `/api/query` :18082, `/api/connectors` :8089, `/api/s3` :19200 (pre-signed part PUTs).
-Override with env `PROXY_GATEWAY|PROXY_FILES|PROXY_QUERY|PROXY_CONNECTORS|PROXY_S3`. `npm run typecheck`, `npm test`, `npm run build`.
+Override with env `PROXY_GATEWAY|PROXY_FILES|PROXY_QUERY|PROXY_CONNECTORS|PROXY_EXPORTS|PROXY_QUARANTINE|PROXY_S3`. `npm run typecheck`, `npm test`, `npm run build`.
 
 ## Auth
 Dev: `scripts/dev/demo-up.sh` generates a random token once (`openssl rand -hex 24`, file `$DEMO_DIR/dev-token`, mode 0600, reused on restart), configures the services with it and starts this Vite server with env `ADMIN_UI_DEV_TOKEN`; the dev proxy then adds `Authorization: Bearer <token>` server-side to `/api/*` (not `/api/s3`) when the request has none, so no pasting is needed. The token is not bundled into client JS; the server binds 127.0.0.1 only. Running `npm run dev` by hand without that env var behaves as before.
