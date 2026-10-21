@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -128,6 +129,7 @@ func (h BrowserHandler) list(w http.ResponseWriter, r *http.Request) {
 			writeBrowserError(w, http.StatusBadRequest, "INVALID_CURSOR", "cursor is malformed", traceID)
 			return
 		}
+		log.Printf("quarantine list failed (trace %s): %v", traceID, err) // cause stays server-side
 		writeBrowserError(w, http.StatusServiceUnavailable, "QUARANTINE_UNAVAILABLE", "quarantine records unavailable", traceID)
 		return
 	}
