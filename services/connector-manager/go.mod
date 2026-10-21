@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/astryon/event-contracts v0.0.0
+	github.com/astryon/go-common v0.0.0
 	github.com/jackc/pgx/v5 v5.5.5
 	github.com/twmb/franz-go v1.18.1
 )
@@ -21,3 +22,4 @@ require (
 )
 
 replace github.com/astryon/event-contracts => ../../libs/event-contracts
+replace github.com/astryon/go-common => ../../libs/go-common

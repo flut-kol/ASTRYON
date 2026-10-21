@@ -1,6 +1,8 @@
 // Command connector-manager runs the REST pull runner: pullstore -> restpull -> Kafka raw topic.
 // Config (env only): ASTRYON_DATABASE_URL, ASTRYON_KAFKA_*, ASTRYON_WORKER_ID (optional),
 // ASTRYON_CONNECTOR_SYNC_INTERVAL (default 30s), ASTRYON_CONNECTOR_METRICS_ADDR (optional, e.g. :9102).
+// Admin API (off unless ASTRYON_CONNECTOR_ADMIN_ADDR is set, e.g. :8089): auth via ASTRYON_AAS_BASE_URL/_ISSUER/_AUDIENCE/_ENV/_ALLOWED_AZP/_TOKEN_TYPE
+// (AAS, scope astryon:connectors:manage) or dev-only ASTRYON_CONNECTOR_DEV_TOKEN + ASTRYON_CONNECTOR_DEV_TENANT; neither -> all requests 401.
 package main
 
 import (
@@ -14,6 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/astryon/connector-manager/internal/adminapi"
+	"github.com/astryon/connector-manager/internal/connstore"
 	"github.com/astryon/connector-manager/internal/kafkaemit"
 	"github.com/astryon/connector-manager/internal/pullstore"
 	"github.com/astryon/connector-manager/internal/runner"
@@ -76,6 +80,21 @@ func run(ctx context.Context, getenv func(string) string) error {
 			}
 		}()
 	}
+	var admin *http.Server
+	if addr := getenv("ASTRYON_CONNECTOR_ADMIN_ADDR"); addr != "" {
+		auth, err := newAuthenticator(ctx, getenv)
+		if err != nil {
+			return fmt.Errorf("admin auth: %w", err)
+		}
+		api := &adminapi.Server{Auth: auth, Store: &connstore.Store{Pool: pool}}
+		admin = &http.Server{Addr: addr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+		go func() {
+			if err := admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("admin server: %v", err)
+			}
+		}()
+	}
 	go func() { // keep state rows in step with enabled connectors
 		t := time.NewTicker(syncEvery)
 		defer t.Stop()
@@ -91,10 +110,13 @@ func run(ctx context.Context, getenv func(string) string) error {
 		}
 	}()
 	err = r.Run(ctx) // returns ctx.Err() on SIGTERM; an in-flight page finishes or is retried (events are idempotent)
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if srv != nil {
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
 		_ = srv.Shutdown(sctx)
+	}
+	if admin != nil {
+		_ = admin.Shutdown(sctx)
 	}
 	return err
 }

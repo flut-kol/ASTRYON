@@ -1,0 +1,147 @@
+openapi: 3.1.0
+info:
+  title: ASTRYON connector admin API
+  version: 0.1.0
+  description: >
+    Minimal connector admin API served by services/connector-manager when ASTRYON_CONNECTOR_ADMIN_ADDR is set.
+    Tenant is taken only from the validated token (AAS) and never from headers or bodies. Every operation needs
+    scope astryon:connectors:manage. Responses carry SecretRef names only, never secret values.
+servers:
+  - url: http://localhost:8089
+security:
+  - bearerAuth: []
+paths:
+  /v1/connectors:
+    get:
+      operationId: listConnectors
+      summary: List connectors of the caller's tenant (cursor pagination)
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Page of connectors
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Connector'}}
+                  next_cursor: {type: string, description: Empty when no more pages}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createConnector
+      summary: Create an enabled connector; secret_ref is stored as a credential reference
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateConnector'}
+      responses:
+        '201':
+          description: Created
+          headers:
+            Location: {schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connector'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/connectors/{id}:
+    get:
+      operationId: getConnector
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses:
+        '200':
+          description: Connector
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connector'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/connectors/{id}/pause:
+    post:
+      operationId: pauseConnector
+      summary: Disable the connector (idempotent); pulls stop at the next lease
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses:
+        '200':
+          description: Updated connector
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connector'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/connectors/{id}/resume:
+    post:
+      operationId: resumeConnector
+      summary: Enable the connector (idempotent)
+      parameters: [{$ref: '#/components/parameters/Id'}]
+      responses:
+        '200':
+          description: Updated connector
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connector'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, description: "AAS access token with scope astryon:connectors:manage and a tenant claim"}
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+  schemas:
+    Kind: {type: string, enum: [POSTGRES_CDC, MYSQL_CDC, REST_PULL]}
+    Connector:
+      type: object
+      required: [id, source_id, name, kind, enabled, config, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        source_id: {type: string, format: uuid}
+        name: {type: string}
+        kind: {$ref: '#/components/schemas/Kind'}
+        enabled: {type: boolean}
+        secret_ref: {type: string, description: "Reference such as env://NAME; never a secret value"}
+        config: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+    CreateConnector:
+      type: object
+      additionalProperties: false
+      description: Body is limited to 64 KiB. tenant_id is not accepted (unknown fields are rejected).
+      required: [source_id, name, kind, secret_ref]
+      properties:
+        source_id: {type: string, format: uuid}
+        name: {type: string, maxLength: 128}
+        kind: {$ref: '#/components/schemas/Kind'}
+        secret_ref: {type: string, maxLength: 512, pattern: '^[a-z0-9+.-]+://', description: SecretRef name only}
+        config:
+          type: object
+          maxProperties: 32
+          additionalProperties: {type: string, maxLength: 1024}
+          description: Keys containing secret, password, token, api_key, credential or private are rejected.
+    Error:
+      type: object
+      required: [code, message, trace_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        details: {type: object}
+        trace_id: {type: string, description: Echo of X-Request-ID or generated}
