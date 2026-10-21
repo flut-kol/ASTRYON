@@ -6,6 +6,7 @@ ARG CMD=file-worker
 WORKDIR /src
 ENV CGO_ENABLED=0 GOWORK=off
 COPY libs/go-common libs/go-common
+COPY services/retry-controller services/retry-controller
 COPY services/file-ingestion services/file-ingestion
 WORKDIR /src/services/file-ingestion
 RUN go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/${CMD}

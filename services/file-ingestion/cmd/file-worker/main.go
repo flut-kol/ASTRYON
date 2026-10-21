@@ -4,7 +4,8 @@
 // Required: FILE_WORKER_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY, CH_URL,
 // FILE_EVENT_TYPE. Optional: FILE_S3_REGION, CH_DATABASE, CH_USER, CH_PASSWORD, FILE_EVENTS_TABLE, FILE_ERRORS_TABLE,
 // FILE_EVENT_TIME_FIELD, FILE_ENTITY_ID_FIELD, FILE_PROCESSING_VERSION (default 1), FILE_BATCH_SIZE (500),
-// FILE_MAX_RECORD_BYTES (1 MiB), FILE_LEASE_SECONDS (60), FILE_WORKER_ID (default hostname-pid), FILE_METRICS_ADDR (/metrics, off when unset).
+// FILE_MAX_RECORD_BYTES (1 MiB), FILE_RETRY_MODE (local = built-in retry, default; controller = failures go through the
+// retry-controller client, with FILE_RETRY_BASE_SECONDS 5, FILE_RETRY_MAX_SECONDS 900, FILE_RETRY_MAX_ATTEMPTS 10), FILE_LEASE_SECONDS (60), FILE_WORKER_ID (default hostname-pid), FILE_METRICS_ADDR (/metrics, off when unset).
 package main
 
 import (
@@ -23,9 +24,12 @@ import (
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/retrybridge"
 	"github.com/astryon/file-ingestion/internal/s3"
 	"github.com/astryon/file-ingestion/internal/worker"
+	"github.com/astryon/retry-controller/pkg/retryclient"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func must(k string) string {
@@ -75,7 +79,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	w := worker.New(worker.Config{Store: store, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
+	var jobStore worker.JobStore = store
+	if m := os.Getenv("FILE_RETRY_MODE"); m == "controller" {
+		jobStore = retryStore(pool, store, id)
+	} else if m != "" && m != "local" {
+		log.Fatalf("FILE_RETRY_MODE must be local or controller, got %q", m)
+	}
+	w := worker.New(worker.Config{Store: jobStore, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
 		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4, Policies: policies()})
 	serveMetrics(w.M.WritePrometheus)
 	go func() { // recovery of vanished workers and promotion of due retries; safe on every replica
@@ -127,4 +137,16 @@ func policies() classify.PolicySet {
 		log.Fatalf("FILE_CREDENTIALS_POLICY_OVERRIDES: %v", err)
 	}
 	return classify.PolicySet{Default: def, Overrides: ov}
+}
+
+// retryStore routes Fail through the retry-controller client (FILE_RETRY_MODE=controller). It shares the worker's
+// PostgreSQL role, so tenant RLS applies; the tenant of each client is the claimed job's tenant.
+func retryStore(pool *pgxpool.Pool, base *jobs.Store, workerID string) *retrybridge.Store {
+	sdb := stdlib.OpenDBFromPool(pool)
+	pol := retryclient.Policy{BaseDelay: time.Duration(num("FILE_RETRY_BASE_SECONDS", 5)) * time.Second,
+		MaxDelay: time.Duration(num("FILE_RETRY_MAX_SECONDS", 900)) * time.Second, Jitter: 0.2, MaxAttempts: num("FILE_RETRY_MAX_ATTEMPTS", 10)}
+	return &retrybridge.Store{Inner: base, Ledger: retrybridge.SQLLedger{DB: sdb, WorkerID: workerID},
+		NewClient: func(tenant string) (retrybridge.Failer, error) {
+			return retryclient.New(sdb, retryclient.Config{TenantID: tenant, WorkerID: workerID, Policy: pol})
+		}}
 }
