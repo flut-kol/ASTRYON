@@ -20,4 +20,21 @@ Run after control-plane migrations are applied:
 DATABASE_URL='<platform-provided-postgres-url>' go run ./cmd/retry-controller
 ```
 
+## Worker integration (`pkg/retryclient`)
+
+- `retryclient.New(db, Config{TenantID, WorkerID, Policy})`: TenantID comes only from validated claims/trusted config.
+  `Client.Fail(ctx, jobID, err)` classifies (`Transientf(err)` = retryable; anything else is permanent), then in one
+  transaction either schedules a bounded jittered retry (`RUNNING -> RETRYING`, attempt_count+1) or dead-letters the
+  job (`FAILED`, `last_error` prefixed `dead-letter:`; optional `DeadLetterSink`) when permanent or attempts are
+  exhausted. Idempotent per job id (`ActionAlready` / `ActionDeadAlready`); fenced by `jobs.locked_by == WorkerID`
+  (`ErrLeaseLost` otherwise). Use a non-superuser DB role so tenant RLS applies.
+- Dispatch: `Dispatcher` claims due retries under a per-claim fenced lease (`locked_by` token + `locked_until`),
+  publishes a `Message{tenant_id, job_id, kind, attempt}` via `Publisher` (`KafkaPublisher` on franz-go, or
+  `PublisherFunc` callback), then `Complete` (job -> `QUEUED`, retry `fired_at`). Delivery is at-least-once; consumers
+  dedupe on (tenant_id, job_id, attempt) and still claim the job themselves.
+- Set `ASTRYON_RETRY_DISPATCH_TOPIC` (+ `ASTRYON_KAFKA_*`) to run the controller in dispatch mode instead of the direct
+  `QUEUED` flip. Never run both modes against one database.
+- Hooks for file-ingestion/connector-manager workers (not yet wired there): call `Client.Fail` on job failure and consume the topic.
+- Tests: `go test -race ./...`; live PG: `RETRYCLIENT_LIVE=1 go test ./pkg/retryclient` (needs docker).
+
 See `docs/operations/runbooks/retry-controller.md` for diagnosis and recovery.

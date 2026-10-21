@@ -14,6 +14,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/astryon/retry-controller/internal/retry"
+	"github.com/astryon/retry-controller/pkg/retryclient"
 )
 
 func main() {
@@ -60,6 +61,21 @@ func main() {
 			log.Printf("metrics shutdown: %v", err)
 		}
 	}()
+	if topic := os.Getenv("ASTRYON_RETRY_DISPATCH_TOPIC"); topic != "" {
+		// Dispatch mode: fenced claim + Kafka wake-up instead of the direct QUEUED flip.
+		pub, err := retryclient.NewKafkaPublisher(os.Getenv, topic)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer pub.Close()
+		host, _ := os.Hostname()
+		d := retryclient.Dispatcher{Store: retryclient.PGDispatchStore{DB: db}, Publisher: pub, Owner: "retry-controller-" + host,
+			Batch: batch, Lease: 60 * time.Second, Interval: interval, OnError: func(err error) { log.Printf("retry dispatch: %v", err) }}
+		if err := d.Run(ctx); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	s := retry.Scheduler{Store: retry.PostgresStore{DB: db}, Interval: interval, Batch: batch, OnError: func(err error) { log.Printf("retry poll: %v", err) }, OnPoll: metrics.Observe}
 	if err := s.Run(ctx); err != nil {
 		log.Fatal(err)

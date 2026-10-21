@@ -48,3 +48,16 @@ Do not delete `scheduled_retries` rows or directly change job status during an
 incident. Those actions destroy audit evidence and can create unbounded repeat
 work. Escalate suspected stuck leases, database corruption or cross-tenant data
 to the platform on-call owner.
+
+## Dispatch mode (`ASTRYON_RETRY_DISPATCH_TOPIC`)
+
+Due retries are claimed with a fenced lease (`jobs.locked_by`/`locked_until`), published to Kafka, then marked fired
+and the job set to `QUEUED`. Symptoms and handling:
+
+- Job stays `RETRYING` past `run_after` with `locked_by` set: a dispatcher crashed between claim and publish. The
+  lease (60s) expires and any replica re-claims it; no manual action. A late zombie `Complete` is rejected (fenced).
+- Duplicate wake-ups on the topic are expected (crash after publish, before complete); consumers dedupe on
+  (tenant_id, job_id, attempt).
+- Kafka unavailable: publish errors appear as `retry dispatch:` log lines, claims are released and retried next poll.
+- `FAILED` jobs with `last_error` starting `dead-letter:` exhausted attempts or hit a permanent error. Do not reset
+  attempts in bulk; use the tenant-scoped, audited replay request after repair.
