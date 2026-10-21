@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Starts a local Flink cluster, submits the processing job detached, and keeps the container in the foreground.
 set -euo pipefail
+# Idempotent across `docker stop`/`start`: always rebuild config.yaml from the pristine copy, never append twice.
+[ -f /opt/flink/conf/config.yaml.orig ] || cp /opt/flink/conf/config.yaml /opt/flink/conf/config.yaml.orig
+cp /opt/flink/conf/config.yaml.orig /opt/flink/conf/config.yaml
 cat >>/opt/flink/conf/config.yaml <<CONF
 s3.endpoint: ${S3_ENDPOINT:-http://s3mock:9090}
 s3.path.style.access: true

@@ -23,7 +23,7 @@
 | `services/admin-bff` | OIDC Authorization Code + PKCE, серверні сесії, CSRF, проксі з bearer | fake AAS (`go test -race`); редірект на реальну сторінку входу AAS; вхід користувача не виконувався |
 | `web/admin-ui` | огляд, uploads, events, quality, connectors, exports, quarantine, replays; режим BFF | vitest (11) і build; проксі до сервісів перевірений на кодах відповідей |
 | `libs/event-contracts`, `libs/go-common`, `libs/sdk-*` | контракт конверта, спільна перевірка AAS JWT, introspection, DPoP-ядро, generated Go-клієнти | unit/contract; реальний AAS у `tests/aas-live` |
-| `services/processing` (Java, Flink) | нормалізація `raw` → `validated/processed/quarantine` | зібраний jar, 17 юніт-тестів; джоба у Flink 1.20.3 запускається, але падає на першому записі (Kryo/record); виправлення в процесі (див. обмеження) |
+| `services/processing` (Java, Flink) | нормалізація `raw` → `validated/processed/quarantine` | зібраний jar, 19 юніт-тестів; джоба у міні-кластері Flink 1.20.3 (dev) обробила 1351 подію `raw` → `processed`, невалідна версія схеми потрапила в quarantine; повідомлення без валідного `tenant_id` зациклює рестарти (див. обмеження) |
 | `db/`, `infra/` | PG 0001–0014, ClickHouse 0001–0006 (TTL: події 400 д, агрегати 800 д, значення за замовчуванням), dev-стек, Ansible, Kustomize/Helm | міграції застосовуються на PG 16 і CH 24.8; Kubernetes/Helm перевірені lint/kubeconform, у кластер не застосовувались; Ansible не запускався на хостах |
 | Dev-стек | `make apps-up` (11 сервісів в одному контейнері, dev-токен), `make extras-up` (Redis, Kafka Connect/Debezium, окремий CDC PostgreSQL), `make aggregator-run` | запущено і перевірено на одному хості (2026-10-21) |
 
@@ -37,7 +37,7 @@ AAS — єдине джерело identity. У realm `aas` визначено sc
 ## Відомі обмеження
 
 1. **Продуктивність:** 45,3k подій/с проти цілі 120k; p95 ACK 420 мс проти 250 мс; тест 10k подій/с також не вклався в 250 мс.
-2. **Нормалізація:** Flink-джоба не обробляє події; sink читає `raw.events.v1` напряму. Event-time агрегація і edge-випадки Flink не перевірені.
+2. **Нормалізація:** Flink-джоба перевірена лише на одному міні-кластері dev (без checkpoint-відновлення, HA, навантаження); повідомлення без валідного `tenant_id` валить її в нескінченні рестарти (потрібне рішення: `events.dlq.v1` чи карантин без тенанта); sink читає `raw.events.v1` напряму. Event-time агрегація і edge-випадки Flink не перевірені.
 3. **HA/DR:** немає доказів для кількох вузлів, chaos, restore і RPO/RTO.
 4. **Auth:** вхід користувача через BFF не пройдений; токени AAS для всіх сервісів, крім gateway, не проганялися наскрізно; DPoP без Redis-store; сесії BFF в пам'яті.
 5. **Query:** великий tenant (2,7–8 млн рядків) коштує 0,7–2,1 с на aggregate; 16 паралельних hot-tenant запитів вичерпують пам'ять вузла 6 GB (`docs/benchmarks/dpp-047-2026-10-21.md`).
