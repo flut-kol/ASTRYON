@@ -3,7 +3,7 @@ Vanilla TypeScript + Vite, no runtime dependencies. Hash routes: Overview, Uploa
 
 ## Run (against the demo stack, `scripts/dev/demo-up.sh`)
 `npm install && npm run dev` -> http://127.0.0.1:15173. The Vite dev server proxies same-origin paths, so Go services need no CORS:
-`/api/gateway` :18080, `/api/files` :18085, `/api/query` :18082, `/api/connectors` :8089, `/api/s3` :19200 (pre-signed part PUTs).
+`/api/gateway` :18080, `/api/files` :18085, `/api/query` :18082, `/api/connectors` :18088, `/api/exports` :18083, `/api/quarantine` :18086, `/api/replays` :18087, `/api/s3` :19200 (pre-signed part PUTs).
 Override with env `PROXY_GATEWAY|PROXY_FILES|PROXY_QUERY|PROXY_CONNECTORS|PROXY_EXPORTS|PROXY_QUARANTINE|PROXY_REPLAYS|PROXY_S3`. `npm run typecheck`, `npm test`, `npm run build`.
 
 ## Auth
