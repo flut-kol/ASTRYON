@@ -55,10 +55,17 @@ func (h BrowserHandler) replayDryRun(w http.ResponseWriter, r *http.Request) {
 	}
 	plan, err := h.ReplayPlanner.PlanReplay(r.Context(), p.TenantID, request)
 	if err != nil {
+		Metrics.incPlan("unavailable")
 		writeBrowserError(w, http.StatusServiceUnavailable, "REPLAY_UNAVAILABLE", "replay dry-run unavailable", traceID)
 		return
 	}
 	executable := !plan.CandidateCountIsLowerBound
+	Metrics.observeCandidates(int64(plan.CandidateCount))
+	if executable {
+		Metrics.incPlan("executable")
+	} else {
+		Metrics.incPlan("over_limit")
+	}
 	response := map[string]any{
 		"dry_run": true, "source_id": request.SourceID,
 		"occurred_from":                  request.OccurredFrom.Format(time.RFC3339Nano),
@@ -75,9 +82,12 @@ func (h BrowserHandler) replayDryRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h BrowserHandler) replayPublish(w http.ResponseWriter, r *http.Request) {
+	outcome := "rejected" // auth, content-type and validation failures
+	defer func() { Metrics.incPublish(outcome) }()
 	traceID := browserRequestID(r)
 	w.Header().Set("X-Request-ID", traceID)
 	if h.Auth == nil || h.ReplayPlanner == nil || h.ReplayJobs == nil || h.Audit == nil {
+		outcome = "unavailable"
 		writeBrowserError(w, http.StatusServiceUnavailable, "REPLAY_UNAVAILABLE", "replay publication is not configured", traceID)
 		return
 	}
@@ -96,15 +106,19 @@ func (h BrowserHandler) replayPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	plan, err := h.ReplayPlanner.PlanReplay(r.Context(), p.TenantID, request)
 	if err != nil {
+		outcome = "plan_unavailable"
 		writeBrowserError(w, http.StatusServiceUnavailable, "REPLAY_UNAVAILABLE", "replay plan unavailable", traceID)
 		return
 	}
+	Metrics.observeCandidates(int64(plan.CandidateCount))
 	if plan.CandidateCountIsLowerBound || plan.CandidateCount > maxReplayCandidates {
+		outcome = "scope_too_large"
 		writeBrowserError(w, http.StatusUnprocessableEntity, "REPLAY_SCOPE_TOO_LARGE", "replay candidate limit exceeded; narrow the selection", traceID)
 		return
 	}
 	jobID, err := newReplayID()
 	if err != nil {
+		outcome = "unavailable"
 		writeBrowserError(w, http.StatusServiceUnavailable, "REPLAY_UNAVAILABLE", "replay identifier unavailable", traceID)
 		return
 	}
@@ -119,10 +133,12 @@ func (h BrowserHandler) replayPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	prepared := replayAuditEvent(job, p.Subject, traceID, "prepared", "pending", now().UTC())
 	if err := h.Audit.RecordReplayAudit(r.Context(), prepared); err != nil {
+		outcome = "audit_unavailable"
 		writeBrowserError(w, http.StatusServiceUnavailable, "AUDIT_UNAVAILABLE", "audit trail unavailable; replay was not published", traceID)
 		return
 	}
 	if err := h.ReplayJobs.PublishReplayJob(r.Context(), job); err != nil {
+		outcome = "publish_failed"
 		h.recordReplayOutcome(r.Context(), prepared, "aborted", "failed", now().UTC())
 		writeBrowserError(w, http.StatusBadGateway, "REPLAY_PUBLISH_FAILED", "replay job was not acknowledged", traceID)
 		return
@@ -130,6 +146,7 @@ func (h BrowserHandler) replayPublish(w http.ResponseWriter, r *http.Request) {
 	// The prepared record is the fail-closed authorization audit. This outcome
 	// is best effort because the broker has already acknowledged the job.
 	h.recordReplayOutcome(r.Context(), prepared, "committed", "success", now().UTC())
+	outcome = "published"
 	writeBrowserJSON(w, http.StatusAccepted, map[string]any{
 		"job_id": job.JobID, "status": "queued", "candidate_count": job.CandidateCount,
 	})

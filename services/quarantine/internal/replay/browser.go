@@ -86,7 +86,11 @@ func (h BrowserHandler) Routes() http.Handler {
 		w.Header().Set("X-Request-ID", traceID)
 		writeBrowserJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /v1/quarantine", h.list)
+	mux.HandleFunc("GET /v1/quarantine", func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.list(rec, r)
+		Metrics.incBrowse(statusOutcome(rec.status))
+	})
 	mux.HandleFunc("POST /v1/quarantine/replays/dry-run", h.replayDryRun)
 	mux.HandleFunc("POST /v1/quarantine/replays", h.replayPublish)
 	return mux

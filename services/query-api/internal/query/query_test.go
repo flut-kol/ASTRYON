@@ -200,3 +200,28 @@ func TestSummaries(t *testing.T) {
 		}
 	}
 }
+
+func TestDurationAndAuthFailureMetrics(t *testing.T) {
+	api, _ := setup(t, `{"data":[]}`)
+	before := authFails[0].Load()
+	if code, _ := post(t, api, "/v1/query/events", "", `{}`); code != 401 {
+		t.Fatalf("code %d", code)
+	}
+	if authFails[0].Load() != before+1 {
+		t.Fatal("unauthenticated not counted")
+	}
+	if durations[0].count.Load() == 0 {
+		t.Fatal("events duration not observed")
+	}
+	var sb strings.Builder
+	Stats.WriteDurations(&sb)
+	out := sb.String()
+	for _, want := range []string{`request_duration_seconds_bucket{route="events",le="+Inf"}`, `auth_failures_total{reason="missing_scope"}`, `_count{route="quality_summary"}`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %s in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, tenant) {
+		t.Fatal("tenant in metrics")
+	}
+}

@@ -40,7 +40,7 @@ func main() {
 	if err := db.PingContext(ctx); err != nil {
 		log.Fatal(err)
 	}
-	metrics := &retry.Metrics{}
+	metrics := &retry.Metrics{Backlog: retry.PostgresStore{DB: db}}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })

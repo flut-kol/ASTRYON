@@ -66,6 +66,8 @@ type Server struct {
 	Lister interface {
 		List(ctx context.Context, tenant string, f listing.Filter) (listing.Page, error)
 	}
+	// JobReader serves GET /v1/jobs[/{id}] under scope astryon:jobs:read (nil = 503).
+	JobReader JobReader
 	// Quota enforces per-tenant upload quotas (nil = unlimited). Store errors fail closed with 503.
 	Quota interface {
 		Check(ctx context.Context, tenant string, size int64) error
@@ -84,6 +86,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/files/uploads", s.count("create", s.create))
 	mux.HandleFunc("GET /v1/files/uploads", s.count("list", s.list))
 	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
+	mux.HandleFunc("GET /v1/jobs", s.count("jobs_list", s.listJobs))
+	mux.HandleFunc("GET /v1/jobs/{id}", s.count("jobs_get", s.getJob))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
 	return mux
 }
@@ -151,7 +155,7 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 
 var messages = map[string]string{
 	"UNAUTHENTICATED":     "Valid access token required.",
-	"FORBIDDEN":           "Scope astryon:uploads:write required.",
+	"FORBIDDEN":           "Required scope missing (astryon:uploads:write; astryon:jobs:read for /v1/jobs).",
 	"BODY_INVALID":        "Request body or path is invalid.",
 	"NOT_FOUND":           "File object not found.",
 	"STORAGE_UNAVAILABLE": "Object storage is unavailable; retry later.",

@@ -49,8 +49,8 @@ type Server struct {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/query/events", s.wrap(s.events))
-	mux.HandleFunc("POST /v1/query/aggregate", s.wrap(s.aggregate))
+	mux.HandleFunc("POST /v1/query/events", s.wrap("events", s.events))
+	mux.HandleFunc("POST /v1/query/aggregate", s.wrap("aggregate", s.aggregate))
 	s.summaryHandlers(mux)
 	return mux
 }
@@ -68,11 +68,13 @@ func bad(code, msg string) *apiError { return &apiError{status: 400, Code: code,
 
 type handler func(ctx context.Context, p Principal, body []byte) (any, error)
 
-func (s *Server) wrap(h handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) { s.serve(w, r, h) }
+func (s *Server) wrap(group string, h handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { s.serve(group, w, r, h) }
 }
 
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, h handler) {
+func (s *Server) serve(group string, w http.ResponseWriter, r *http.Request, h handler) {
+	start := time.Now()
+	defer func() { Stats.observe(group, time.Since(start)) }()
 	rid := r.Header.Get("X-Request-ID")
 	if rid == "" || len(rid) > 64 {
 		rid = fmt.Sprintf("%d", time.Now().UnixNano())
@@ -87,14 +89,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, h handler) {
 	}
 	p, err := s.Auth.Authenticate(r)
 	if err != nil {
+		Stats.authFailure("unauthenticated")
 		fail(&apiError{status: 401, Code: "unauthenticated", Message: "invalid or missing credentials"})
 		return
 	}
 	if !p.HasScope(ScopeQueryRead) {
+		Stats.authFailure("missing_scope")
 		fail(&apiError{status: 403, Code: "forbidden", Message: "missing scope " + ScopeQueryRead})
 		return
 	}
 	if !uuidRe.MatchString(p.TenantID) {
+		Stats.authFailure("invalid_tenant")
 		fail(&apiError{status: 403, Code: "forbidden", Message: "principal has no valid tenant"})
 		return
 	}

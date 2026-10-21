@@ -13,6 +13,7 @@ final class ValidateNormalizeFunction extends ProcessFunction<RawRecord, Accepte
 
     private final ProcessingConfig config;
     private transient EnvelopeProcessor processor;
+    private transient ProcessingMetrics metrics;
 
     ValidateNormalizeFunction(ProcessingConfig config) {
         this.config = config;
@@ -21,14 +22,17 @@ final class ValidateNormalizeFunction extends ProcessFunction<RawRecord, Accepte
     @Override
     public void open(OpenContext openContext) {
         processor = new EnvelopeProcessor(config, Clock.systemUTC());
+        metrics = new ProcessingMetrics(getRuntimeContext().getMetricGroup());
     }
 
     @Override
     public void processElement(RawRecord raw, Context context, Collector<AcceptedRecord> out) {
         ProcessingResult result = processor.process(raw);
         if (result.isAccepted()) {
+            metrics.validated();
             out.collect(result.accepted());
         } else {
+            metrics.quarantined(result.reasonCode());
             context.output(QUARANTINE, result.quarantined());
         }
     }

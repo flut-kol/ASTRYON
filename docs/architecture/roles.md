@@ -15,6 +15,8 @@ object-level/tenant authorization: `tenant_id` береться лише з clai
 | `astryon:uploads:write` | file-ingestion | upload planning, complete, list, get |
 | `astryon:export:write` / `astryon:export:read` | export-worker | create / inspect export |
 | `astryon:connectors:write` | connector-manager | list/get/create/pause/resume |
+| `astryon:sources:read` | connector-manager | `GET /v1/sources[/{id}]` (read-only, no config/credentials) |
+| `astryon:jobs:read` | file-ingestion | `GET /v1/jobs[/{id}]` (read-only, label counts only) |
 | `astryon:replay:write` / `astryon:replay:read` | replay-controller | create, activate / list, get |
 | `astryon:quarantine:read` | quarantine | metadata browser |
 | `astryon:quarantine-payload:read` | quarantine | masked original sample (grant separately) |
@@ -38,6 +40,8 @@ object-level/tenant authorization: `tenant_id` береться лише з clai
 | export:read | x | x | x | x | x | |
 | export:write | x | x | | x | | |
 | connectors:write | x | x | x | | | |
+| sources:read | x | x | x | | x | |
+| jobs:read | x | x | x | | x | |
 | replay:read | x | x | x | | x | |
 | replay:write | x | x | x | | | |
 | quarantine:read | x | x | x | | x | |

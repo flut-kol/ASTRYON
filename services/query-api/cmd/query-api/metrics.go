@@ -63,6 +63,7 @@ func serveMetrics(d *dpopRejects) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		d.WritePrometheus(w)
 		query.Stats.WritePrometheus(w)
+		query.Stats.WriteDurations(w)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { log.Printf("query-api metrics: %v", srv.ListenAndServe()) }()

@@ -3,6 +3,7 @@
 // ClickHouse: CH_URL, CH_DATABASE, CH_USER, CH_PASSWORD, QUARANTINE_CH_TABLE.
 // AAS: AAS_BASE_URL, AAS_ISSUER, AAS_AUDIENCE, AAS_ENV, AAS_ALLOWED_AZP.
 // Kafka replay/audit: ASTRYON_KAFKA_* and optional QUARANTINE_REPLAY_TOPIC.
+// QUARANTINE_METRICS_ADDR serves /metrics (off when unset; a bare ":port" binds loopback only).
 // DEV ONLY: QUARANTINE_DEV_TOKEN and QUARANTINE_DEV_TENANT.
 // With neither AAS nor the dev token configured, authentication fails closed.
 package main
@@ -80,6 +81,7 @@ func main() {
 		}
 		defer kafka.Close()
 	}
+	serveMetrics(os.Getenv("QUARANTINE_METRICS_ADDR"))
 	handler := (replay.BrowserHandler{
 		Auth: authenticator, Store: store, ReplayPlanner: store, ReplayJobs: kafka, Audit: kafka,
 	}).Routes()

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/api"
+	"github.com/astryon/file-ingestion/internal/joblist"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/listing"
 	"github.com/astryon/file-ingestion/internal/objects"
@@ -70,7 +71,7 @@ func (d devAuth) Authenticate(r *http.Request) (api.Principal, error) {
 	if d.token == "" || d.tenant == "" || subtle.ConstantTimeCompare([]byte(h), []byte(d.token)) != 1 {
 		return api.Principal{}, api.ErrUnauthenticated
 	}
-	return api.Principal{TenantID: d.tenant, Scopes: []string{api.ScopeUploadsWrite}}, nil
+	return api.Principal{TenantID: d.tenant, Scopes: []string{api.ScopeUploadsWrite, api.ScopeJobsRead}}, nil
 }
 
 func main() {
@@ -106,7 +107,7 @@ func main() {
 	s := &api.Server{Auth: auth, Quota: quota.Checker{Store: quota.PGStore{DB: db}, Defaults: quota.Limits{
 		MaxFileBytes: num("FILE_MAX_BYTES", 5<<30), MaxOpen: num("FILE_QUOTA_OPEN", 20), BytesPerDay: num("FILE_QUOTA_BYTES_PER_DAY", 100<<30)}},
 		Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c,
-		Jobs: apiJobs, Insights: apiJobs, Lister: listing.PGStore{Pool: pool},
+		Jobs: apiJobs, Insights: apiJobs, Lister: listing.PGStore{Pool: pool}, JobReader: joblist.PGStore{Pool: pool},
 		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
 			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
 	serveMetrics(s.WritePrometheus)

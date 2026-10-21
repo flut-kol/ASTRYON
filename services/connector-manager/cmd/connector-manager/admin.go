@@ -60,7 +60,7 @@ func newAuthenticator(ctx context.Context, getenv func(string) string) (adminapi
 		if getenv("ASTRYON_CONNECTOR_DEV_TENANT") == "" {
 			return nil, errors.New("ASTRYON_CONNECTOR_DEV_TOKEN needs ASTRYON_CONNECTOR_DEV_TENANT")
 		}
-		return devAuth{token: t, p: toPrincipal(getenv("ASTRYON_CONNECTOR_DEV_TENANT"), []string{registry.ManageScope})}, nil
+		return devAuth{token: t, p: toPrincipal(getenv("ASTRYON_CONNECTOR_DEV_TENANT"), []string{registry.ManageScope, adminapi.SourcesReadScope})}, nil
 	}
 	if base := getenv("ASTRYON_AAS_BASE_URL"); base != "" {
 		var azp []string

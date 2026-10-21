@@ -272,7 +272,15 @@ func (s *Server) run(p Principal, job Job, release func()) {
 func (r *Runner) runNoPresign(ctx context.Context, p Principal, id string, spec ExportSpec) (Result, error) {
 	c := *r
 	c.Presign = nil
-	return c.Run(ctx, p, id, spec)
+	Metrics.started.Add(1)
+	t0 := time.Now()
+	res, err := c.Run(ctx, p, id, spec)
+	code := ""
+	if err != nil {
+		code = errCode(err, ctx)
+	}
+	Metrics.exportDone(code, res.Rows, res.Bytes, time.Since(t0).Seconds())
+	return res, err
 }
 
 func errCode(err error, ctx context.Context) string {

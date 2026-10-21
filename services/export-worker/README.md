@@ -19,7 +19,7 @@ It has an HTTP layer and either an in-memory or a durable PostgreSQL job store/q
   `EXPORT_MAX_PER_DAY` `EXPORT_MAX_CONCURRENT_PER_TENANT` `EXPORT_URL_TTL_SECONDS` `AAS_*`
   `EXPORT_PG_URL` (enables durable jobs + quota + the dispatcher; unset = in-memory with a warning log) `EXPORT_WORKER_ID` (default hostname-pid, unique per replica) `EXPORT_LEASE_SECONDS` (60)
   `EXPORT_CH_IDLE_TIMEOUT` (30s) / `EXPORT_CH_MAX_DURATION` (15m): ClickHouse stream timeouts, `0` = off, value as Go duration or bare seconds (see 'Timeouts, zombie runs, outages').
-  `EXPORT_CH_HEADER_TIMEOUT` (5m): wait for ClickHouse response headers. `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters).
+  `EXPORT_CH_HEADER_TIMEOUT` (5m): wait for ClickHouse response headers. `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters). `EXPORT_METRICS_ADDR` (unset = off): loopback-only Prometheus `/metrics` (`astryon_export_{started,succeeded,rows,bytes}_total`, `astryon_export_failed_total{code}`, `astryon_export_queue_errors_total{op}`, `astryon_export_duration_seconds` histogram; no tenant/export labels).
   `EXPORT_SWEEP_SECONDS` (300, 0 = off) / `EXPORT_SWEEP_GRACE_SECONDS` (60): orphan multipart-upload sweeper (dispatcher mode, see 'Failure modes').
 - Docker: `docker build -f services/export-worker/Dockerfile -t astryon/export-worker .` (repo root context).
 - Verified: httptest suite with fakes under `-race` (401/403, tenant in body 400, cross-tenant 404, quota 429, lifecycle,

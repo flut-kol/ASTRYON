@@ -102,11 +102,14 @@ func main() {
 		log.Print("WARN: ASTRYON_KAFKA_BROKERS unset: audit goes to stdout only (not durable)")
 	}
 	log.Printf("audit mode: required=%v", auditRequired) // #nosec G706 -- logged value is operator config or sanitized, reviewed 2026-10-21
-	pl := &replay.Planner{Alloc: alloc, Counter: ch, Publisher: pub}
+	// REPLAY_METRICS_ADDR (off when unset): GET /metrics; a bare ":9107" binds 127.0.0.1 only, set a host to expose it.
+	m := &replay.Metrics{}
+	replay.ServeMetrics(os.Getenv("REPLAY_METRICS_ADDR"), m.WritePrometheus, log.Printf)
+	pl := &replay.Planner{Alloc: alloc, Counter: ch, Publisher: replay.MeteredPublisher{Next: pub, M: m}}
 	addr := os.Getenv("REPLAY_ADDR")
 	if addr == "" {
 		addr = ":8087"
 	}
-	srv := &http.Server{Addr: addr, Handler: (&replay.Handler{Auth: auth, Planner: pl, Activator: activator, Reader: reader, Audit: audit, AuditRequired: auditRequired}).Routes(), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: (&replay.Handler{Auth: auth, Planner: pl, Activator: activator, Reader: reader, Audit: audit, AuditRequired: auditRequired, Metrics: m}).Routes(), ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }

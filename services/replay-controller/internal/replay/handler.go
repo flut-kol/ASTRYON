@@ -23,6 +23,7 @@ type Handler struct {
 	Reader        Reader
 	Audit         AuditSink
 	AuditRequired bool
+	Metrics       *Metrics // optional; nil = no metrics
 
 	denyOnce sync.Once
 	denyLim  *denyLimiter
@@ -34,11 +35,13 @@ type Handler struct {
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (Principal, bool) {
 	p, err := h.Auth.Authenticate(r)
 	if err != nil {
+		h.Metrics.IncRejected("unauthenticated")
 		h.auditDenied(r, ReasonUnauthenticated, "")
 		writeErr(w, 401, "unauthenticated", "authentication required")
 		return Principal{}, false
 	}
 	if !p.HasScope(ScopeReplayWrite) {
+		h.Metrics.IncRejected("forbidden")
 		h.auditDenied(r, ReasonMissingScope, p.Subject)
 		writeErr(w, 403, "forbidden", "missing scope "+ScopeReplayWrite)
 		return Principal{}, false
@@ -89,6 +92,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid_request", "malformed body")
 		return
 	}
+	h.Metrics.IncRequested(req.DryRun)
 	rid := requestID(r.Header.Get("X-Request-Id"))
 	startEv := func(pl Plan, phase, outcome string) AuditEvent {
 		return AuditEvent{Time: time.Now().UTC(), TenantID: p.TenantID, Subject: p.Subject, Action: ActionStart, ReplayID: pl.JobID,
@@ -114,15 +118,19 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	plan, err := h.Planner.PlanWith(r.Context(), p.TenantID, req, before)
 	switch {
 	case errors.Is(err, ErrInvalid):
+		h.Metrics.IncRejected("invalid_request")
 		writeErr(w, 400, "invalid_request", err.Error())
 		return
 	case errors.Is(err, ErrAuditUnavailable):
+		h.Metrics.IncRejected("audit_unavailable")
 		writeErr(w, 503, "audit_unavailable", "audit trail unavailable; replay was not started, retry later")
 		return
 	case errors.Is(err, ErrConflict):
+		h.Metrics.IncRejected("replay_conflict")
 		writeErr(w, 409, "replay_conflict", "this processing version was reserved concurrently; retry the request")
 		return
 	case err != nil:
+		h.Metrics.IncRejected("upstream_error")
 		if prepared != nil { // job publication failed after the prepared event: say so
 			ev := *prepared
 			ev.Phase, ev.Outcome, ev.Time, ev.EventID = PhaseAborted, OutcomeAborted, time.Now().UTC(), ""
@@ -143,6 +151,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if plan.DryRun {
 		w.WriteHeader(200)
 	} else {
+		h.Metrics.IncApproved()
 		w.WriteHeader(202)
 	}
 	_ = json.NewEncoder(w).Encode(plan)
@@ -241,6 +250,7 @@ func (h *Handler) activate(w http.ResponseWriter, r *http.Request) {
 		ev.Phase = PhaseCommitted
 		h.record(context.WithoutCancel(r.Context()), ev)
 	}
+	h.Metrics.IncActivation(act.Action)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(act)
 }

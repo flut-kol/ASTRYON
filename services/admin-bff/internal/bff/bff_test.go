@@ -34,14 +34,19 @@ type fakeAAS struct {
 	lastBasic  string
 	badNonce   bool
 	tokenType  string
+	key        *ecdsa.PrivateKey
+	sub, sid   string
 }
 
 func newFakeAAS(t *testing.T) *fakeAAS {
-	f := &fakeAAS{codes: map[string]struct{ challenge, nonce string }{}, expiresIn: 300, tokenType: "Bearer"}
+	f := &fakeAAS{codes: map[string]struct{ challenge, nonce string }{}, expiresIn: 300, tokenType: "Bearer", sub: "user-1", sid: "sid-1"}
+	f.key, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/realm/.well-known/openid-configuration":
-			json.NewEncoder(w).Encode(map[string]string{"issuer": f.URL + "/realm", "authorization_endpoint": f.URL + "/realm/auth", "token_endpoint": f.URL + "/realm/token", "end_session_endpoint": f.URL + "/realm/logout"})
+			json.NewEncoder(w).Encode(map[string]string{"issuer": f.URL + "/realm", "authorization_endpoint": f.URL + "/realm/auth", "token_endpoint": f.URL + "/realm/token", "end_session_endpoint": f.URL + "/realm/logout", "jwks_uri": f.URL + "/realm/jwks"})
+		case "/realm/jwks":
+			json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{"kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "x": b64u(f.key.X.FillBytes(make([]byte, 32))), "y": b64u(f.key.Y.FillBytes(make([]byte, 32)))}}})
 		case "/realm/auth":
 			q := r.URL.Query()
 			if q.Get("code_challenge_method") != "S256" || q.Get("response_type") != "code" || q.Get("client_id") != "astryon-portal" {
@@ -95,7 +100,7 @@ func newFakeAAS(t *testing.T) *fakeAAS {
 }
 
 func (f *fakeAAS) idToken(nonce string) string {
-	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": "user-1", "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce})
+	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": f.sub, "sid": f.sid, "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce})
 	return b64u([]byte(`{"alg":"ES256"}`)) + "." + b64u(cl) + "." + b64u([]byte("sig"))
 }
 
@@ -109,7 +114,11 @@ type env struct {
 
 func setup(t *testing.T, mut func(*Options)) *env {
 	t.Helper()
-	aas := newFakeAAS(t)
+	return setupOn(t, newFakeAAS(t), mut)
+}
+
+func setupOn(t *testing.T, aas *fakeAAS, mut func(*Options)) *env {
+	t.Helper()
 	got := make(chan http.Header, 8)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Clone()

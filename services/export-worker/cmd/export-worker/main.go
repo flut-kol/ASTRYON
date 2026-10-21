@@ -11,6 +11,7 @@
 // whole ClickHouse stream; EXPORT_CH_HEADER_TIMEOUT (5m) bounds the wait for response headers (0 = off for all three; duration like 30s or bare seconds). EXPORT_FINISH_RETRY (2m) is how long a terminal
 // write is retried while PostgreSQL is down before the job is abandoned (log "ALERT export_job_abandoned").
 // EXPORT_PPROF_ADDR (off) = loopback-only debug listener with pprof and /debug/vars counters.
+// EXPORT_METRICS_ADDR (off) = loopback-only Prometheus /metrics (astryon_export_*).
 // Without EXPORT_PG_URL jobs and quota are in memory (lost on restart, per process); see README.
 package main
 
@@ -84,6 +85,7 @@ func main() {
 		TTL:     time.Duration(envInt("EXPORT_URL_TTL_SECONDS", 900)) * time.Second,
 	}
 	startDebug(os.Getenv("EXPORT_PPROF_ADDR"))
+	startMetrics(os.Getenv("EXPORT_METRICS_ADDR"))
 	maxDay, maxConc := envInt("EXPORT_MAX_PER_DAY", 0), envInt("EXPORT_MAX_CONCURRENT_PER_TENANT", 2)
 	s := &export.Server{Auth: auth, Runner: runner, Audit: runner.Audit, Workers: envInt("EXPORT_WORKERS", 2)}
 	stopDisp := func(context.Context) {}

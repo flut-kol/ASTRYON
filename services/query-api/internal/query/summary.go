@@ -14,14 +14,14 @@ import (
 // never FINAL or merge-time dedup, so recomputes and replays do not double metrics (§5.3).
 
 func (s *Server) summaryHandlers(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/metrics/summary", s.wrapGET(s.metricsSummary))
-	mux.HandleFunc("GET /v1/quality/summary", s.wrapGET(s.qualitySummary))
+	mux.HandleFunc("GET /v1/metrics/summary", s.wrapGET("metrics_summary", s.metricsSummary))
+	mux.HandleFunc("GET /v1/quality/summary", s.wrapGET("quality_summary", s.qualitySummary))
 }
 
 // wrapGET adapts query-string parameters (from, to, processing_version, source_id) to the common pipeline.
-func (s *Server) wrapGET(h func(context.Context, Principal, Filter) (any, error)) http.HandlerFunc {
+func (s *Server) wrapGET(group string, h func(context.Context, Principal, Filter) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		s.serve(w, r, func(ctx context.Context, p Principal, _ []byte) (any, error) {
+		s.serve(group, w, r, func(ctx context.Context, p Principal, _ []byte) (any, error) {
 			f, err := parseFilterQuery(r.URL.Query())
 			if err != nil {
 				return nil, err

@@ -19,6 +19,9 @@ import (
 	"github.com/astryon/connector-manager/internal/registry"
 )
 
+// SourcesReadScope gates the read-only source endpoints.
+const SourcesReadScope = "astryon:sources:read"
+
 const (
 	MaxBodyBytes = 64 << 10
 	maxConfig    = 32
@@ -64,6 +67,23 @@ type Store interface {
 	SetEnabled(ctx context.Context, tenant, id string, enabled bool) (Connector, error)
 }
 
+// Source is the read-only API view of a source. Config and credential references are deliberately not exposed.
+type Source struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Kind           string    `json:"kind"`
+	Enabled        bool      `json:"enabled"`
+	ConnectorCount int       `json:"connector_count"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// SourceStore is the read-only source view; every call is scoped to the trusted tenant. ErrNotFound for unknown ids.
+type SourceStore interface {
+	ListSources(ctx context.Context, tenant, after string, limit int) ([]Source, error)
+	GetSource(ctx context.Context, tenant, id string) (Source, error)
+}
+
 type Authenticator interface {
 	Authenticate(*http.Request) (registry.Principal, error)
 }
@@ -71,21 +91,25 @@ type Authenticator interface {
 type Server struct {
 	Auth  Authenticator
 	Store Store
+	// Sources serves GET /v1/sources[/{id}] (nil = 503); needs SourcesReadScope.
+	Sources SourceStore
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/connectors", s.guard(s.list))
-	mux.HandleFunc("POST /v1/connectors", s.guard(s.create))
-	mux.HandleFunc("GET /v1/connectors/{id}", s.guard(s.get))
-	mux.HandleFunc("POST /v1/connectors/{id}/pause", s.guard(s.toggle(false)))
-	mux.HandleFunc("POST /v1/connectors/{id}/resume", s.guard(s.toggle(true)))
+	mux.HandleFunc("GET /v1/connectors", s.guard(registry.ManageScope, s.list))
+	mux.HandleFunc("POST /v1/connectors", s.guard(registry.ManageScope, s.create))
+	mux.HandleFunc("GET /v1/connectors/{id}", s.guard(registry.ManageScope, s.get))
+	mux.HandleFunc("POST /v1/connectors/{id}/pause", s.guard(registry.ManageScope, s.toggle(false)))
+	mux.HandleFunc("POST /v1/connectors/{id}/resume", s.guard(registry.ManageScope, s.toggle(true)))
+	mux.HandleFunc("GET /v1/sources", s.guard(SourcesReadScope, s.listSources))
+	mux.HandleFunc("GET /v1/sources/{id}", s.guard(SourcesReadScope, s.getSource))
 	return mux
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, tenant string)
 
-func (s *Server) guard(h handler) http.HandlerFunc {
+func (s *Server) guard(scope string, h handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		p, err := s.Auth.Authenticate(r)
@@ -93,8 +117,8 @@ func (s *Server) guard(h handler) http.HandlerFunc {
 			writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "authentication required")
 			return
 		}
-		if !p.Scopes[registry.ManageScope] {
-			writeErr(w, r, http.StatusForbidden, "forbidden", "missing scope "+registry.ManageScope)
+		if !p.Scopes[scope] {
+			writeErr(w, r, http.StatusForbidden, "forbidden", "missing scope "+scope)
 			return
 		}
 		h(w, r, p.TenantID)

@@ -207,7 +207,7 @@ final class EnvelopeProcessor {
         originalNode.put("truncated", truncated);
         try {
             byte[] key = (normalizedTenantId + '\u001f' + deviationId).getBytes(StandardCharsets.UTF_8);
-            return ProcessingResult.quarantined(new OutputRecord(ProcessingConfig.QUARANTINE_TOPIC, key, mapper.writeValueAsBytes(quarantine)));
+            return ProcessingResult.quarantined(new OutputRecord(ProcessingConfig.QUARANTINE_TOPIC, key, mapper.writeValueAsBytes(quarantine)), code);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("cannot serialize quarantine record", exception);
         }

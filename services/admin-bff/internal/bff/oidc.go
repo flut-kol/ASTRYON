@@ -41,15 +41,17 @@ type endpoints struct {
 	Auth       string `json:"authorization_endpoint"`
 	Token      string `json:"token_endpoint"`
 	EndSession string `json:"end_session_endpoint"`
+	JWKS       string `json:"jwks_uri"`
 }
 
 type oidcClient struct {
-	cfg Config
-	ep  endpoints
-	key *ecdsa.PrivateKey
-	kid string
-	hc  *http.Client
-	now func() time.Time
+	cfg  Config
+	ep   endpoints
+	key  *ecdsa.PrivateKey
+	kid  string
+	hc   *http.Client
+	now  func() time.Time
+	jwks *jwks
 }
 
 // Tokens is the parsed token endpoint response.
@@ -90,13 +92,19 @@ func newOIDC(ctx context.Context, cfg Config) (*oidcClient, error) {
 		return nil, fmt.Errorf("bff: discovery: %w", err)
 	}
 	base, _ := url.Parse(cfg.BaseURL)
-	for name, v := range map[string]string{"authorization_endpoint": ep.Auth, "token_endpoint": ep.Token} {
+	for name, v := range map[string]string{"authorization_endpoint": ep.Auth, "token_endpoint": ep.Token, "jwks_uri": ep.JWKS} {
+		if v == "" && name == "jwks_uri" {
+			continue // back-channel logout is then unavailable (501)
+		}
 		u, err := url.Parse(v)
 		if err != nil || u.Host != base.Host || u.Scheme != base.Scheme {
 			return nil, fmt.Errorf("bff: discovery %s %q is not same-origin as %s", name, v, cfg.BaseURL) // assertions must not go elsewhere
 		}
 	}
 	c.ep = ep
+	if ep.JWKS != "" {
+		c.jwks = &jwks{url: ep.JWKS, hc: c.hc, now: func() time.Time { return c.now() }}
+	}
 	return c, nil
 }
 
@@ -201,14 +209,14 @@ func (c *oidcClient) assertion() (string, error) {
 
 // idClaims checks the ID token received directly from the token endpoint over TLS (OIDC Core 3.1.3.7 allows
 // TLS server validation in place of a signature): issuer, audience, expiry and nonce. It returns sub.
-func (c *oidcClient) idClaims(idToken, nonce string) (string, error) {
+func (c *oidcClient) idClaims(idToken, nonce string) (sub, sid string, err error) {
 	parts := strings.Split(idToken, ".")
 	if len(parts) != 3 {
-		return "", errors.New("id_token malformed")
+		return "", "", errors.New("id_token malformed")
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", errors.New("id_token malformed")
+	raw, err2 := base64.RawURLEncoding.DecodeString(parts[1])
+	if err2 != nil {
+		return "", "", errors.New("id_token malformed")
 	}
 	var cl struct {
 		Iss   string `json:"iss"`
@@ -216,9 +224,10 @@ func (c *oidcClient) idClaims(idToken, nonce string) (string, error) {
 		Aud   any    `json:"aud"`
 		Exp   int64  `json:"exp"`
 		Nonce string `json:"nonce"`
+		SID   string `json:"sid"`
 	}
 	if json.Unmarshal(raw, &cl) != nil {
-		return "", errors.New("id_token malformed")
+		return "", "", errors.New("id_token malformed")
 	}
 	issuer := c.ep.Issuer
 	if issuer == "" {
@@ -235,17 +244,17 @@ func (c *oidcClient) idClaims(idToken, nonce string) (string, error) {
 	}
 	switch {
 	case cl.Iss != issuer:
-		return "", errors.New("id_token issuer mismatch")
+		return "", "", errors.New("id_token issuer mismatch")
 	case !aud:
-		return "", errors.New("id_token audience mismatch")
+		return "", "", errors.New("id_token audience mismatch")
 	case cl.Exp <= c.now().Unix():
-		return "", errors.New("id_token expired")
+		return "", "", errors.New("id_token expired")
 	case cl.Nonce != nonce:
-		return "", errors.New("id_token nonce mismatch")
+		return "", "", errors.New("id_token nonce mismatch")
 	case cl.Sub == "":
-		return "", errors.New("id_token has no sub")
+		return "", "", errors.New("id_token has no sub")
 	}
-	return cl.Sub, nil
+	return cl.Sub, cl.SID, nil
 }
 
 func loadKey(path string) (*ecdsa.PrivateKey, error) {

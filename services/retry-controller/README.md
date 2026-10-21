@@ -13,6 +13,9 @@ Optional variables:
 
 Endpoints: `GET /healthz`, `GET /metrics`. The controller never accepts a
 tenant ID from HTTP input and exposes only aggregate, tenant-free metrics.
+Backlog gauges (read from `scheduled_retries` at scrape time): `astryon_retry_backlog_pending`
+(unfired, uncancelled retries), `astryon_retry_oldest_due_age_seconds` (0 when none due),
+plus `astryon_retry_backlog_read_errors_total`.
 
 Run after control-plane migrations are applied:
 

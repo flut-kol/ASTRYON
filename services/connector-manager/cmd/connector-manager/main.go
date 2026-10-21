@@ -100,7 +100,8 @@ func run(ctx context.Context, getenv func(string) string) error {
 		if err != nil {
 			return fmt.Errorf("admin auth: %w", err)
 		}
-		api := &adminapi.Server{Auth: auth, Store: &connstore.Store{Pool: pool}}
+		cs := &connstore.Store{Pool: pool}
+		api := &adminapi.Server{Auth: auth, Store: cs, Sources: cs}
 		admin = &http.Server{Addr: addr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 		go func() {

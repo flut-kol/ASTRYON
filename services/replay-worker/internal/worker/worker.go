@@ -115,7 +115,16 @@ type Worker struct {
 	OutTopic string        // default processed.events.v1
 	PageSize int           // default 200
 	Now      func() time.Time
+	Metrics  *Metrics // optional; nil = no metrics
 	Logf     func(format string, a ...any)
+}
+
+// m returns the worker's metrics, or a discarded instance when none are configured.
+func (w *Worker) m() *Metrics {
+	if w.Metrics != nil {
+		return w.Metrics
+	}
+	return &discard
 }
 
 func (w *Worker) logf(f string, a ...any) {
@@ -168,14 +177,17 @@ func (w *Worker) handle(ctx context.Context, d Delivery) error {
 	}
 	if err := job.Validate(); err != nil {
 		w.logf("skip job %q at %s/%d@%d: %v", job.JobID, d.Topic, d.Partition, d.Offset, err)
+		w.m().Fail(FailInvalidJob)
 		if ec.IsUUID(job.TenantID) && ec.IsUUID(job.SourceID) && job.ProcessingVersion > 0 {
 			w.setStatus(ctx, job, StatusFailed)
 		}
 		return nil
 	}
+	w.m().add(&w.m().Requested, 1)
 	if w.Status != nil {
 		if err := w.Status.SetStatus(ctx, job.TenantID, job.SourceID, job.ProcessingVersion, StatusRunning); err != nil {
 			if errors.Is(err, ErrRunningRecently) {
+				w.m().Fail(FailLease)
 				w.logf("job %s v%d not started: %v (offset not committed; redelivered after a restart once the lease expires)", job.JobID, job.ProcessingVersion, err)
 				return err
 			}
@@ -183,11 +195,20 @@ func (w *Worker) handle(ctx context.Context, d Delivery) error {
 				w.logf("skip job %s v%d: %v", job.JobID, job.ProcessingVersion, err)
 				return nil
 			}
+			w.m().Fail(FailStatus)
 			return fmt.Errorf("set RUNNING: %w", err)
 		}
 	}
+	w.m().add(&w.m().Approved, 1)
+	w.m().add(&w.m().Started, 1)
+	w.m().add(&w.m().Active, 1)
+	began := w.now()
 	n, err := w.Execute(ctx, job)
+	w.m().add(&w.m().Active, -1)
+	w.m().ObserveDuration(w.now().Sub(began))
+	w.m().add(&w.m().EventsReplayed, int64(n))
 	if err != nil {
+		w.m().Fail(FailureCode(err))
 		if errors.Is(err, ErrPermanent) {
 			w.logf("job %s v%d FAILED permanently after %d events: %v", job.JobID, job.ProcessingVersion, n, err)
 			w.setStatus(ctx, job, StatusFailed)
@@ -199,9 +220,11 @@ func (w *Worker) handle(ctx context.Context, d Delivery) error {
 	}
 	if w.Status != nil {
 		if err := w.Status.SetStatus(ctx, job.TenantID, job.SourceID, job.ProcessingVersion, StatusCompleted); err != nil && !errors.Is(err, ErrNotRunnable) {
+			w.m().Fail(FailStatus)
 			return fmt.Errorf("set COMPLETED: %w", err) // not committed: redelivery re-runs idempotently
 		}
 	}
+	w.m().add(&w.m().Completed, 1)
 	w.logf("job %s v%d completed: %d events published", job.JobID, job.ProcessingVersion, n)
 	return nil
 }
@@ -234,7 +257,7 @@ func (w *Worker) Execute(ctx context.Context, job Job) (int, error) {
 	}
 	base, err := w.Reader.BaseVersion(ctx, job.TenantID, job.SourceID, job.ProcessingVersion)
 	if err != nil {
-		return 0, fmt.Errorf("base version: %w", err)
+		return 0, fmt.Errorf("base version: %w", stage(FailBaseRead, err))
 	}
 	if base == 0 {
 		return 0, nil // nothing to copy forward
@@ -246,7 +269,7 @@ func (w *Worker) Execute(ctx context.Context, job Job) (int, error) {
 			rows, err := w.Reader.Page(ctx, PageQuery{TenantID: job.TenantID, SourceID: job.SourceID, Version: base,
 				From: r.From, To: r.To, After: after, Limit: limit})
 			if err != nil {
-				return published, fmt.Errorf("read page: %w", err)
+				return published, fmt.Errorf("read page: %w", stage(FailBaseRead, err))
 			}
 			if len(rows) == 0 {
 				break
@@ -258,7 +281,7 @@ func (w *Worker) Execute(ctx context.Context, job Job) (int, error) {
 			have, err := w.Reader.Existing(ctx, job.TenantID, job.SourceID, job.ProcessingVersion,
 				rows[0].EventTime, rows[len(rows)-1].EventTime, ids)
 			if err != nil {
-				return published, fmt.Errorf("existing check: %w", err)
+				return published, fmt.Errorf("existing check: %w", stage(FailBaseRead, err))
 			}
 			recs := make([]Record, 0, len(rows))
 			for _, row := range rows {
@@ -273,7 +296,8 @@ func (w *Worker) Execute(ctx context.Context, job Job) (int, error) {
 			}
 			if len(recs) > 0 {
 				if err := w.Sink.Publish(ctx, recs); err != nil {
-					return published, fmt.Errorf("publish: %w", err)
+					w.m().add(&w.m().PublishErrors, 1)
+					return published, fmt.Errorf("publish: %w", stage(FailPublish, err))
 				}
 				published += len(recs)
 			}

@@ -130,6 +130,49 @@ paths:
             `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         default: { $ref: '#/components/responses/Error' }
+  /v1/jobs:
+    get:
+      operationId: listJobs
+      summary: List the tenant's processing jobs (newest first, keyset pagination)
+      description: |
+        Read-only. Requires scope `astryon:jobs:read` (not `uploads:write`). The tenant comes only from the token (plus
+        row-level security); another tenant's job is never listed. Order is `created_at DESC, id DESC`; pass `next_cursor`
+        back as `cursor` (opaque). `next_cursor` is an empty string on the last page. Unknown or repeated query
+        parameters and bad values return 400 `BODY_INVALID`. Job rows hold run-level state and aggregate counters only
+        (no per-event status); `labels` are per-label match counts, never matched values or field names.
+      security: [ { bearer: [] } ]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/JobStatus' } }
+        - { name: source_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/Job' } }
+                  next_cursor: { type: string, description: Empty string on the last page. }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/jobs/{id}:
+    get:
+      operationId: getJob
+      summary: Get one job
+      description: Requires scope `astryon:jobs:read`. Another tenant's job id and unknown ids are both 404 `NOT_FOUND`.
+      security: [ { bearer: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearer:
@@ -140,7 +183,7 @@ components:
     Error:
       description: |
         400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type or extension for the source type, bad tags/sensitivity, missing required tag); 401 UNAUTHENTICATED;
-        403 FORBIDDEN; 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
+        403 FORBIDDEN (missing `astryon:uploads:write`, or `astryon:jobs:read` on /v1/jobs); 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -260,6 +303,29 @@ components:
         file_object_id: { type: string, format: uuid }
         status: { const: committed }
         job_id: { type: string, format: uuid }
+    JobStatus: { type: string, enum: [NEW, QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED, QUARANTINED] }
+    Job:
+      type: object
+      required: [id, kind, status, source_id, file_object_id, attempt_count, max_attempts, events_processed, events_failed, labels, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, description: 'e.g. process_file', example: process_file }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        source_id: { type: [string, 'null'], format: uuid }
+        file_object_id: { type: [string, 'null'], format: uuid }
+        attempt_count: { type: integer }
+        max_attempts: { type: integer }
+        events_processed: { type: integer, format: int64, description: Aggregate counter. }
+        events_failed: { type: integer, format: int64, description: Aggregate counter. }
+        error: { type: string, description: 'Catalog/error code of the last failure (e.g. CREDENTIALS_DETECTED); omitted when none or not a plain code.' }
+        labels:
+          type: object
+          description: Content label -> match count (counts only).
+          additionalProperties: { type: integer, format: int64 }
+          example: { contains_pii: 3 }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, 'null'], format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
     Error:
       type: object
       required: [code, message]

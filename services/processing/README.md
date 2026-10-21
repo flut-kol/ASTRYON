@@ -40,6 +40,12 @@ The shaded job JAR is `target/processing-0.1.0-SNAPSHOT.jar`. Flink runtime libr
 
 Kafka TLS/SASL and S3 credentials belong in the Flink cluster configuration/secret injection, never in the repository.
 
+## Metrics
+
+Custom Flink counters: `records_validated_total`, `records_processed_total` (after dedup) and
+`records_quarantined_total{reason}` (`reason` from a fixed `ERR_*` allow-list, otherwise `OTHER`). With the dev image they are
+scraped via the Prometheus reporter; see `infra/docker/extras/metrics/README.md`.
+
 ## State-growth measurement
 
 The `bounded-dedup` operator exports `dedup_unique_total`, `dedup_dropped_total`, and `dedup_expirations_total`. For a real DPP-027 measurement, feed successive unique-key plateaus (for example 100k, 1m, 10m), wait for a completed checkpoint at each plateau, and record the checkpoint `state_size` from Flink's `/jobs/:jobid/checkpoints` response together with the three counters. Then wait one full dedup window and confirm both expirations and checkpoint-size contraction. State TTL is a cleanup fallback; explicit processing-time timers define the fixed window and duplicates do not extend it.

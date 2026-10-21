@@ -145,3 +145,39 @@ func mapErr(err error) error {
 	}
 	return err
 }
+
+const sourceCols = `s.id::text, s.name, s.kind::text, s.is_enabled,
+	(SELECT count(*) FROM connectors c WHERE c.tenant_id = s.tenant_id AND c.source_id = s.id AND c.deleted_at IS NULL)::int,
+	s.created_at, s.updated_at`
+
+// ListSources implements adminapi.SourceStore (read-only; config and credentials are never selected).
+func (s *Store) ListSources(ctx context.Context, tenant, after string, limit int) ([]adminapi.Source, error) {
+	var out []adminapi.Source
+	err := s.tx(ctx, tenant, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT `+sourceCols+` FROM sources s WHERE s.tenant_id = $1::uuid AND s.deleted_at IS NULL
+			AND ($2 = '' OR s.id > NULLIF($2, '')::uuid) ORDER BY s.id LIMIT $3`, tenant, after, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var x adminapi.Source
+			if err := rows.Scan(&x.ID, &x.Name, &x.Kind, &x.Enabled, &x.ConnectorCount, &x.CreatedAt, &x.UpdatedAt); err != nil {
+				return err
+			}
+			out = append(out, x)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// GetSource implements adminapi.SourceStore.
+func (s *Store) GetSource(ctx context.Context, tenant, id string) (adminapi.Source, error) {
+	var x adminapi.Source
+	err := s.tx(ctx, tenant, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT `+sourceCols+` FROM sources s WHERE s.tenant_id = $1::uuid AND s.id = $2::uuid AND s.deleted_at IS NULL`, tenant, id).
+			Scan(&x.ID, &x.Name, &x.Kind, &x.Enabled, &x.ConnectorCount, &x.CreatedAt, &x.UpdatedAt)
+	})
+	return x, mapErr(err)
+}

@@ -20,6 +20,7 @@ final class BoundedDeduplicateFunction extends KeyedProcessFunction<String, Acce
     private transient Counter unique;
     private transient Counter duplicates;
     private transient Counter expirations;
+    private transient ProcessingMetrics metrics;
 
     BoundedDeduplicateFunction(Duration window) {
         this.windowMillis = window.toMillis();
@@ -37,6 +38,7 @@ final class BoundedDeduplicateFunction extends KeyedProcessFunction<String, Acce
         unique = getRuntimeContext().getMetricGroup().counter("dedup_unique_total");
         duplicates = getRuntimeContext().getMetricGroup().counter("dedup_dropped_total");
         expirations = getRuntimeContext().getMetricGroup().counter("dedup_expirations_total");
+        metrics = new ProcessingMetrics(getRuntimeContext().getMetricGroup());
     }
 
     @Override
@@ -52,6 +54,7 @@ final class BoundedDeduplicateFunction extends KeyedProcessFunction<String, Acce
         expiresAt.update(newExpiry);
         context.timerService().registerProcessingTimeTimer(newExpiry);
         unique.inc();
+        metrics.processed();
         out.collect(value);
     }
 
