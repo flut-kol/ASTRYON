@@ -7,6 +7,7 @@ import { fmtNum, lastHours, localToRfc3339, metricsSummary, qualitySummary, quer
 import { listConnectors, setConnectorEnabled } from './connectors';
 import { createExport, getExport, isTerminal, knownExports, rememberExport, validateSpec, type ExportJob } from './exports';
 import { listQuarantine, planReplay } from './quarantine';
+import { listReplays, REPLAY_STATUSES } from './replays';
 
 const env = import.meta.env;
 const B = {
@@ -16,6 +17,7 @@ const B = {
   connectors: env.VITE_CONNECTORS_BASE ?? '/api/connectors',
   exports: env.VITE_EXPORTS_BASE ?? '/api/exports',
   quarantine: env.VITE_QUARANTINE_BASE ?? '/api/quarantine',
+  replays: env.VITE_REPLAYS_BASE ?? '/api/replays',
   s3Proxy: env.VITE_S3_PROXY ?? (env.DEV ? '/api/s3' : undefined),
 };
 const BFF = env.VITE_AUTH_MODE === 'bff';
@@ -26,7 +28,7 @@ if (frag) { setToken(frag); history.replaceState(null, '', location.pathname + l
 
 const ROUTES: [string, string, (el: HTMLElement) => void | Promise<void>][] = [
   ['overview', 'Overview', overview], ['uploads', 'Uploads', uploads], ['events', 'Events', events],
-  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['jobs', 'Jobs', () => {}], ['sources', 'Sources', () => {}],
+  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['replays', 'Replays', replaysPage], ['jobs', 'Jobs', () => {}], ['sources', 'Sources', () => {}],
 ];
 
 function na(what: string) { return h('div', { class: 'na' }, `${what}: API not available in this build.`); }
@@ -281,6 +283,33 @@ async function exportsPage(el: HTMLElement) {
       h('button', { class: 'pri', onclick: () => void start() }, 'Start export')), msg),
     h('div', { class: 'card' }, h('div', { class: 'row' }, h('button', { onclick: () => { clearTimeout(timer); void refresh(); } }, 'Refresh')), list));
   draw(); await refresh();
+}
+
+async function replaysPage(el: HTMLElement) {
+  el.append(h('h2', {}, 'Replays'));
+  const list = h('div', {}); let stack: string[] = [];
+  const src = sourceInput();
+  const st = h('select', {}, h('option', { value: '' }, 'any'), REPLAY_STATUSES.map((x) => h('option', { value: x }, x)));
+  const load = async (cursor?: string) => {
+    clear(list); list.append('Loading...');
+    try {
+      const p = await listReplays(ctx, B.replays, { source_id: src.value.trim() || undefined, status: st.value || undefined, cursor });
+      clear(list);
+      list.append(p.items.length ? table(['created', 'source', 'target version', 'status', 'range', 'job', 'completed'],
+        p.items.map((r) => [r.created_at, r.source_id, r.processing_version, h('span', { class: r.status === 'FAILED' ? 'err' : r.status === 'COMPLETED' ? 'ok' : '' }, r.status),
+          r.time_from ? `${r.time_from} .. ${r.time_to ?? ''}` : '', r.job_id ?? '', r.completed_at ?? ''])) : h('div', { class: 'mut' }, 'No replays.'));
+      const nav = h('div', { class: 'row' });
+      if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, 'Newer'));
+      if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, 'Older'));
+      list.append(nav);
+    } catch (e) {
+      clear(list);
+      list.append(e instanceof ApiError && e.unavailable ? na('Replay controller is not running, not reachable or has no PostgreSQL configured') : errBox(e));
+    }
+  };
+  el.append(h('div', { class: 'card' }, h('p', { class: 'mut' }, 'Read-only list. Starting and activating replays is not offered here.'),
+    h('div', { class: 'row' }, field('Source ID', src), field('Status', st), h('button', { class: 'pri', onclick: () => { stack = []; setSource(src.value); void load(); } }, 'Filter')), list));
+  await load();
 }
 
 async function quarantinePage(el: HTMLElement) {

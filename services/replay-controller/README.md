@@ -14,11 +14,15 @@
 - Non-dry-run (202): `VersionAllocator.Allocate` then `JobPublisher.Publish(ReplayJob)`. If publishing fails the version stays burned (gaps OK, reuse never).
 - ClickHouse access: HTTP interface, POST with `readonly=1`, bound `param_*` parameters, table `events_normalized_distributed`.
 
+## Read API
+`GET /v1/replays?limit=1..100&cursor=&source_id=&status=` (newest first, keyset on created_at,id) and `GET /v1/replays/{id}`; scope `astryon:replay:read` (the write scope does not read);
+tenant only from the principal and RLS, another tenant's id is 404; needs `REPLAY_PG_URL` (else 501 `not_configured`). Fields: id, source_id, processing_version, status, time_from/to, job_id, created/updated/completed_at (no actor ids). Live-tested on PostgreSQL 16 with a NOSUPERUSER NOBYPASSRLS role (`list_it_test.go`).
+
 ## Env (cmd/replay-controller)
 `CH_URL` (required), `REPLAY_PG_URL` (PostgreSQL; enables the multi-replica allocator, role must NOT bypass RLS; unset = single-replica in-process allocator), `CH_DATABASE`, `CH_USER`, `CH_PASSWORD`, `REPLAY_ADDR` (default `:8087`),
 Auth: `AAS_BASE_URL` (+ `AAS_ISSUER`, `AAS_AUDIENCE`, `AAS_ENV`, `AAS_ALLOWED_AZP`) enables the shared AAS verifier (`libs/go-common/auth`, adapter `cmd/replay-controller/aas.go`);
 tenant, `sub` (-> `Principal.Subject`, used as audit subject / `switched_by`) and scopes come only from the verified token. Neither AAS nor dev token set = deny-all (401).
-DEV-ONLY: `REPLAY_DEV_TOKEN`, `REPLAY_DEV_TENANT_ID`, `REPLAY_DEV_SCOPES` (explicit opt-in; overrides AAS and logs a WARNING).
+DEV-ONLY: `REPLAY_DEV_TOKEN`, `REPLAY_DEV_TENANT_ID`, `REPLAY_DEV_SCOPES` (add `astryon:replay:read` for the read API) (explicit opt-in; overrides AAS and logs a WARNING).
 Audit: `ASTRYON_KAFKA_BROKERS` (+ TLS/SASL as the job publisher) -> `audit.events.v1`; `REPLAY_AUDIT_MODE=required|best_effort` (default `required` with Kafka, `best_effort` without; `required` without Kafka refuses to start); `REPLAY_AUDIT_TIMEOUT` (default 5s per event).
 
 Kafka client (`internal/replay/kafka_tls.go`, shared by `KafkaJobPublisher` and `KafkaAuditSink`; same behaviour as the gateway): `ASTRYON_KAFKA_BROKERS`, `ASTRYON_KAFKA_CLIENT_ID`, `ASTRYON_KAFKA_DELIVERY_TIMEOUT`,

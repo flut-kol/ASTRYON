@@ -19,6 +19,8 @@ type Handler struct {
 	// Audit records plan/start/activate/rollback. nil = no audit. AuditRequired: an activation whose audit event cannot be
 	// published is refused with 503 audit_unavailable BEFORE the switch is committed (REPLAY_AUDIT_MODE=required).
 	// Plan/start auditing is always best effort (the job is already allocated/published by then; failures are logged).
+	// Reader enables GET /v1/replays and GET /v1/replays/{id} (scope astryon:replay:read). Nil = 501 not_configured.
+	Reader        Reader
 	Audit         AuditSink
 	AuditRequired bool
 
@@ -63,6 +65,8 @@ func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/replays", h.create)
 	mux.HandleFunc("POST /v1/replays/{id}/activate", h.activate)
+	mux.HandleFunc("GET /v1/replays", h.list)
+	mux.HandleFunc("GET /v1/replays/{id}", h.get)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	return mux
 }

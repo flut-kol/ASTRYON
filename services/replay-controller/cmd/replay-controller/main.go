@@ -43,6 +43,7 @@ func main() {
 	// ClickHouse allocator is used, which is only race-free inside ONE process: run a single replica.
 	var alloc replay.VersionAllocator = ch
 	var activator replay.Activator // cutover needs PostgreSQL
+	var reader replay.Reader       // listing needs PostgreSQL
 	if u := os.Getenv("REPLAY_PG_URL"); u != "" {
 		pool, err := pgxpool.New(context.Background(), u)
 		if err != nil {
@@ -51,6 +52,7 @@ func main() {
 		defer pool.Close()
 		alloc = &replay.PGAllocator{DB: replay.PoolDB{Pool: pool}, CH: ch}
 		activator = &replay.PGActivator{DB: replay.PoolDB{Pool: pool}}
+		reader = replay.PGReader{Pool: pool}
 	} else {
 		log.Print("WARN: REPLAY_PG_URL unset: in-process version allocator, single replica only")
 	}
@@ -105,6 +107,6 @@ func main() {
 	if addr == "" {
 		addr = ":8087"
 	}
-	srv := &http.Server{Addr: addr, Handler: (&replay.Handler{Auth: auth, Planner: pl, Activator: activator, Audit: audit, AuditRequired: auditRequired}).Routes(), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: (&replay.Handler{Auth: auth, Planner: pl, Activator: activator, Reader: reader, Audit: audit, AuditRequired: auditRequired}).Routes(), ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
