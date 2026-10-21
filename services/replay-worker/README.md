@@ -33,7 +33,7 @@ by selecting the new version (not implemented here). Old rows are never modified
 migration 0001) then `UPDATE replay_requests ... WHERE tenant_id AND source_id AND target_processing_version`. The role must NOT bypass RLS.
 
 ## Env
-`ASTRYON_KAFKA_BROKERS` (+ `_TLS`, `_TLS_CA_FILE`, `_SASL_MECHANISM/_USERNAME/_PASSWORD`, `_CLIENT_ID`, `_DELIVERY_TIMEOUT`), `REPLAYW_CH_URL` (required),
+`ASTRYON_KAFKA_BROKERS` (+ `_TLS`, `_TLS_CA_FILE`, mTLS `_TLS_CERT_FILE`/`_TLS_KEY_FILE` (both or neither, needs TLS; re-read when mtime/size change, with the CA file, every `_TLS_RELOAD_INTERVAL`, default 1m, 0 = off; a broken new file keeps the last good one, logged at most once a minute; used for new broker connections), `_SASL_MECHANISM/_USERNAME/_PASSWORD`, `_CLIENT_ID`, `_DELIVERY_TIMEOUT`), `REPLAYW_CH_URL` (required),
 `REPLAYW_CH_DATABASE` (astryon), `REPLAYW_CH_USER`, `REPLAYW_CH_PASSWORD`, `REPLAYW_CH_TABLE`, `REPLAYW_PG_URL` (unset = no status tracking, warning),
 `REPLAYW_GROUP_ID`, `REPLAYW_JOBS_TOPIC`, `REPLAYW_OUT_TOPIC`, `REPLAYW_PAGE_SIZE`.
 
@@ -49,4 +49,4 @@ migration 0001) then `UPDATE replay_requests ... WHERE tenant_id AND source_id A
   soft-deleted and other-tenant requests are refused (`ErrNotRunnable`, rows byte-identical afterwards); RLS blocks cross-tenant UPDATE independently of the WHERE clause;
   16 concurrent claimers over 2 pools -> exactly 1 winner; stale-lease takeover -> exactly 1 winner. Bug found: the old RUNNING rule accepted RUNNING -> RUNNING, so two workers could both claim a request; fixed with the lease rule.
   Re-completion of a COMPLETED request is a no-op reported as `ErrNotRunnable` (the worker already tolerates it).
-- Kafka SASL_SSL (SCRAM-SHA-512/256, PLAIN) verified live (`REPLAYW_KAFKA_IT_*`, `docs/operations/kafka-tls-sasl-test.md`); `ASTRYON_KAFKA_TLS` accepts only 1/true/0/false, a CA file or PLAIN without TLS is a config error. Not verified live: multi-worker rebalancing, ranges beyond one day-split.
+- Kafka SASL_SSL (SCRAM-SHA-512/256, PLAIN) verified live (`REPLAYW_KAFKA_IT_*`, `docs/operations/kafka-tls-sasl-test.md`); `ASTRYON_KAFKA_TLS` accepts only 1/true/0/false, a CA file or PLAIN without TLS is a config error. mTLS client certs and cert/CA rotation without restart verified live (`REPLAYW_KAFKA_MTLS_IT_*`, `kafka_mtls_it_test.go`). Not verified live: multi-worker rebalancing, ranges beyond one day-split.

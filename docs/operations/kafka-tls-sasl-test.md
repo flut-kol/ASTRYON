@@ -54,5 +54,42 @@ hostname mismatch via an in-process TLS server, password redaction).
 
 ## Not covered
 
-mTLS client certificates (not supported by the config), SASL OAUTHBEARER/GSSAPI, SCRAM credential rotation while running,
-multi-broker clusters, certificate expiry/rotation without restart (CA is read once at startup).
+SASL OAUTHBEARER/GSSAPI, SCRAM credential rotation while running, multi-broker clusters. mTLS and certificate/CA rotation: see the next section.
+
+## mTLS and certificate/CA rotation
+
+All four Kafka clients (gateway, clickhouse-sink, replay-worker, replay-controller; each has its own copy of `kafka_mtls.go`)
+support client certificates and hot reload:
+
+- `<P>_KAFKA_TLS_CERT_FILE` + `<P>_KAFKA_TLS_KEY_FILE` (PEM): both or neither, and TLS must be on, else a startup config error.
+  `<P>` is `ASTRYON` (gateway, replay-controller, replay-worker) or `CHSINK` (clickhouse-sink).
+- `<P>_KAFKA_TLS_RELOAD_INTERVAL` (Go duration, default `1m`, `0` = off, negative/garbage = config error).
+- Reload: on each new broker connection (at most once per interval) the cert/key and CA files are stat'ed; if mtime or size changed they are re-read.
+  Every dial builds a fresh `tls.Config` (current CA pool as `RootCAs`, `GetClientCertificate` returning the current pair), so there is no
+  `InsecureSkipVerify` and the server chain and hostname are verified against the current CA. A file that fails to load (partial write, bad PEM,
+  cert/key mismatch) keeps the last good material and is retried every interval; the failure is logged once per minute with the path/OS error only,
+  never key material. Established connections keep their handshake until the broker or the client closes them (franz-go idle timeout, broker restart).
+
+Harness (throwaway, nothing committed; certs in `/private/tmp/claude-501/chagg-mtls-certs`, generated with `openssl`): container `chagg-mtls-kafka`
+(`apache/kafka:3.9.0`, KRaft) on network `chagg-mtls-net`. Listeners: `SSL://:29094` with `ssl.client.auth=required`, PEM truststore `/trust/client-ca.pem`
+(bind-mounted, rewritten by the rotation test), `ssl.principal.mapping.rules` CN -> user `app` (ACLs as above); `EXTERNAL://:29093` = SASL_SSL as before;
+internal plaintext listener unpublished. Both published on `127.0.0.1` only.
+
+```
+GATEWAY_KAFKA_MTLS_IT_BROKER=127.0.0.1:29094 GATEWAY_KAFKA_MTLS_IT_CA=ca.pem GATEWAY_KAFKA_MTLS_IT_CERT=client.crt GATEWAY_KAFKA_MTLS_IT_KEY=client.key \
+GATEWAY_KAFKA_MTLS_IT_TRUST_FILE=<host path of /trust/client-ca.pem> GATEWAY_KAFKA_MTLS_IT_CONTAINER=chagg-mtls-kafka \
+  go test ./internal/gateway -run TestIT_MTLS -v
+```
+Prefixes: `CHSINK_` (`./internal/sink`), `REPLAYW_` (`./internal/worker`), `REPLAYC_` (`./internal/replay`). Topic `ksec.mtls` (override `_TOPIC`).
+The last test restarts the broker (makes it re-read the truststore): run it alone if other tests share the broker; it restores the original trust file.
+
+Live cases per service: round trip with a client cert (read back by an independent mTLS consumer); rejected without a cert; rejected with a cert from another CA
+(same CN); running client with a stale CA bundle fails with `x509: certificate signed by unknown authority`, then recovers after the CA file is replaced; running client
+recovers after BOTH its cert/key and the broker's trusted client CA were replaced (client not restarted; a half-written key/cert pair in between does not break it),
+while a control client without reload (old cert) is rejected. SASL_SSL round trips on `:29093` still pass on the same broker.
+Always-on unit tests (`kafka_mtls_test.go`): config matrix, renewed cert and renewed CA picked up, broken new files keep the old ones and log once a minute without
+leaking content, interval 0 never re-reads, in-process TLS server requiring client certs (valid / none / other CA).
+
+Limits: rejections by the broker after the handshake (TLS 1.3 client-cert alerts) surface as `context deadline exceeded` without a cause (the broker log says
+`SSL handshake failed`); a client-side CA/cert problem does name its cause. Reload applies to new connections only. Single broker; the broker truststore was
+re-read by restart, not by dynamic reconfiguration. Key files with a passphrase are not supported.

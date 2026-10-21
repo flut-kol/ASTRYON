@@ -23,6 +23,7 @@ Audit: `ASTRYON_KAFKA_BROKERS` (+ TLS/SASL as the job publisher) -> `audit.event
 
 Kafka client (`internal/replay/kafka_tls.go`, shared by `KafkaJobPublisher` and `KafkaAuditSink`; same behaviour as the gateway): `ASTRYON_KAFKA_BROKERS`, `ASTRYON_KAFKA_CLIENT_ID`, `ASTRYON_KAFKA_DELIVERY_TIMEOUT`,
 `ASTRYON_KAFKA_TLS` (1/true/0/false, case-insensitive; anything else is a startup error, never plaintext), `ASTRYON_KAFKA_TLS_CA_FILE` (PEM; needs TLS, else error; certificate chain and hostname always verified),
+`ASTRYON_KAFKA_TLS_CERT_FILE` + `_TLS_KEY_FILE` (mTLS client certificate; both or neither, needs TLS) and `ASTRYON_KAFKA_TLS_RELOAD_INTERVAL` (default 1m, 0 = off: renewed client cert/key and CA files are picked up by new broker connections without restart; a broken new file keeps the last good one and is logged at most once a minute),
 `ASTRYON_KAFKA_SASL_MECHANISM` (PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512; other value = error; PLAIN without TLS = error) + `_USERNAME`/`_PASSWORD`.
 Errors: a failed publish/record caused by a TLS or SASL failure reads `... context deadline exceeded (last broker connect error: sasl: ... SASL_AUTHENTICATION_FAILED ...)` or `(... x509: certificate signed by unknown authority)`;
 the password is redacted and the remembered cause expires after 30 s. Without a recorded cause the error is the bare timeout.
@@ -113,7 +114,7 @@ Verified LIVE (PostgreSQL 16 NOBYPASSRLS role + apache/kafka 3.9.0 KRaft, topic 
 start with failing audit -> 503, no job, row FAILED, next version = v+1; start with live Kafka -> `replay.started` prepared; live `auth.denied` keyed by /24 without the token.
 Verified LIVE over SASL_SSL (apache/kafka 3.9.0, SCRAM-SHA-512, throwaway CA, ACLs for the user; gated by `REPLAY_KAFKA_TLS_IT_BROKER/_CA/_OTHER_CA/_USER/_PASS`, `go test ./internal/replay -run TestIT_`):
 job publisher and audit sink round trip (records read back by an independent consumer); wrong password and untrusted CA both fail with the cause named, no password in the error, nothing lands on the topics. Always-on unit tests cover flag parsing,
-the validation matrix, untrusted CA and hostname mismatch (in-process TLS server) and cause surfacing/redaction/expiry. Not verified on the secured broker: SCRAM-SHA-256 and PLAIN (unit only), mTLS client certs (unsupported), broker restart/reconnect, user without ACLs, CA rotation without restart.
+the validation matrix, untrusted CA and hostname mismatch (in-process TLS server) and cause surfacing/redaction/expiry. Not verified on the secured broker: SCRAM-SHA-256 and PLAIN (unit only), broker restart/reconnect, user without ACLs. mTLS client certs + rotation without restart: unit tests (`kafka_mtls_test.go`) and live (`REPLAYC_KAFKA_MTLS_IT_*`, `kafka_mtls_it_test.go`, `docs/operations/kafka-tls-sasl-test.md`).
 Not verified: stdout fallback is not durable; the reconciler (below) is verified on PG + Kafka but has no scheduler (run it from cron/a Job); behaviour under a real broker outage mid-COMMIT (only simulated).
 
 ## Audit reconciler: `replay-controller reconcile-audit` (`internal/replay/auditreconcile.go`)
