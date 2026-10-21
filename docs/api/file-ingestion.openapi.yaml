@@ -160,6 +160,21 @@ paths:
           description: Unsupported preview format, including archives and Parquet.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/retry:
+    post:
+      operationId: retryUpload
+      summary: Retry a committed file processing job
+      description: |
+        Requires `astryon:uploads:write` and is tenant-scoped. Re-enqueues a committed non-archive file using the
+        idempotent file object key. When archive inspection is enabled, ZIP/TAR/GZIP files are inspected again as
+        metadata only and are never sent to the text worker.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '202': { description: Processing job queued, content: { application/json: { schema: { $ref: '#/components/schemas/Completed' } } } }
+        '200': { description: Archive inspected without creating a job, content: { application/json: { schema: { $ref: '#/components/schemas/Completed' } } } }
+        '422': { description: Archive failed bounded inspection, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        default: { $ref: '#/components/responses/Error' }
   /v1/jobs:
     get:
       operationId: listJobs

@@ -42,6 +42,7 @@ const UA: Record<string, string> = {
   'Quarantine': 'Карантин',
   'Replays': 'Повтори (replay)',
   'Jobs': 'Завдання',
+  'Retry': 'Повторити', 'Queued': 'У черзі', 'Inspected': 'Перевірено',
   'Sources': 'Джерела',
   'File API': 'File API', 'Text search': 'Пошук тексту', 'Access & roles': 'Доступ і ролі', 'Ingestion': 'Завантаження', 'ClickHouse explorer': 'Огляд ClickHouse', 'Administration': 'Адміністрування',
   'Upload intake, processing jobs and content-policy outcomes in one place.': 'Завантаження, завдання обробки та результати політик вмісту в одному місці.',

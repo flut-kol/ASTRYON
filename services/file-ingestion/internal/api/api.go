@@ -112,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/jobs", s.count("jobs_list", s.listJobs))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.count("jobs_get", s.getJob))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
+	mux.HandleFunc("POST /v1/files/uploads/{id}/retry", s.count("retry", s.retry))
 	return mux
 }
 
@@ -692,6 +693,57 @@ func (s *Server) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, p, audit.CategoryAudit, "upload.complete", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
 	writeJSON(w, 200, map[string]string{"file_object_id": id, "status": "committed", "job_id": job})
+}
+
+// retry re-queues a committed file after an exhausted or failed processing job.
+// Archives stay metadata-only when archive inspection is enabled; they are never
+// sent to the text worker by this endpoint.
+func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeErr(w, 404, "NOT_FOUND")
+		return
+	}
+	f, err := s.Files.Get(r.Context(), p.TenantID, id)
+	if errors.Is(err, objects.ErrNotFound) {
+		writeErr(w, 404, "NOT_FOUND")
+		return
+	}
+	if err != nil {
+		writeErr(w, 503, "UNAVAILABLE")
+		return
+	}
+	if !f.Committed {
+		writeErr(w, 409, "UPLOAD_INCOMPLETE")
+		return
+	}
+	if s.ArchiveMode == "inspect" && archiveMime(strings.ToLower(strings.TrimSpace(strings.SplitN(f.ContentType, ";", 2)[0]))) {
+		rc, ierr := s.Objs.Get(r.Context(), f.Key, 0)
+		if ierr != nil {
+			writeErr(w, 503, "STORAGE_UNAVAILABLE")
+			return
+		}
+		_, ierr = archivecheck.InspectContext(r.Context(), rc, archivecheck.SafeLimits())
+		_ = rc.Close()
+		if ierr != nil {
+			writeErr(w, 422, "ARCHIVE_REJECTED")
+			return
+		}
+		s.audit(r, p, audit.CategoryAudit, "upload.archive_retry_inspect", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
+		writeJSON(w, 200, map[string]string{"file_object_id": id, "status": "committed", "mode": "archive_inspect"})
+		return
+	}
+	job, err := s.Jobs.Enqueue(r.Context(), p.TenantID, f.SourceID, id)
+	if err != nil {
+		writeErr(w, 503, "UNAVAILABLE")
+		return
+	}
+	s.audit(r, p, audit.CategoryAudit, "upload.retry", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
+	writeJSON(w, 202, map[string]string{"file_object_id": id, "status": "queued", "job_id": job})
 }
 
 func validParts(w http.ResponseWriter, in completeReq) bool {

@@ -11,7 +11,7 @@ import { fmtNum, lastHours, localToRfc3339, metricsSummary, qualitySummary, quer
 import { CONNECTOR_KINDS, createConnector, listConnectors, parseConfig, setConnectorEnabled, validateConnector } from './connectors';
 import { createExport, getExport, isTerminal, knownExports, rememberExport, validateSpec, type ExportJob } from './exports';
 import { canPublish, listQuarantine, planReplay, publishReplay, type ReplayRequest } from './quarantine';
-import { listJobs } from './jobs';
+import { listJobs, retryUpload } from './jobs';
 import { listSources } from './sources';
 import { listReplays, REPLAY_STATUSES } from './replays';
 import { searchText } from './textSearch';
@@ -368,10 +368,15 @@ async function jobsPage(el: HTMLElement) {
     try {
       const p = await listJobs(ctx, B.files, { source_id: src.value.trim() || undefined, status: st.value || undefined, cursor });
       clear(list);
-      list.append(p.items.length ? table(['job', 'type', 'status', 'source', 'attempts', 'processed', 'failed', 'error', 'labels', 'created', 'finished'],
+      list.append(p.items.length ? table(['job', 'type', 'status', 'source', 'attempts', 'processed', 'failed', 'error', 'labels', 'created', 'finished', 'actions'],
         p.items.map((j) => [j.id, human('kind', j.kind), h('span', { class: j.status === 'FAILED' ? 'err' : j.status === 'SUCCEEDED' ? 'ok' : j.status === 'QUARANTINED' ? 'warn' : '' }, human('status', j.status)),
           j.source_id ?? '', `${j.attempt_count}/${j.max_attempts}`, fmtNum(j.events_processed), fmtNum(j.events_failed), j.error ? (errorText(j.error, 0) ?? human('reason', j.error)) : '',
-          Object.entries(j.labels ?? {}).map(([k, n]) => `${human('label', k)}: ${n}`).join(', ') || '-', timeEl(j.created_at), timeEl(j.finished_at)]), 'Jobs') : h('div', { class: 'mut' }, t('No jobs.')));
+          Object.entries(j.labels ?? {}).map(([k, n]) => `${human('label', k)}: ${n}`).join(', ') || '-', timeEl(j.created_at), timeEl(j.finished_at),
+          j.file_object_id && (j.status === 'FAILED' || j.status === 'QUARANTINED') ? (() => {
+            const b = h('button', {}, t('Retry'));
+            b.onclick = async () => { b.setAttribute('disabled', 'true'); try { const r = await retryUpload(ctx, B.files, j.file_object_id!); b.replaceWith(h('span', { class: 'ok' }, r.mode === 'archive_inspect' ? t('Inspected') : t('Queued'))); } catch (e) { b.removeAttribute('disabled'); list.append(errBox(e)); } };
+            return b;
+          })() : '-']), 'Jobs') : h('div', { class: 'mut' }, t('No jobs.')));
       const nav = h('div', { class: 'row' });
       if (stack.length) nav.append(h('button', { onclick: () => { stack.pop(); void load(stack.at(-1)); } }, t('Newer')));
       if (p.next_cursor) nav.append(h('button', { onclick: () => { stack.push(p.next_cursor); void load(p.next_cursor); } }, t('Older')));

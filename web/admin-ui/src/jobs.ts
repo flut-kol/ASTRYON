@@ -6,3 +6,6 @@ export interface Job {
 /** Read-only; served by the file API (scope astryon:jobs:read). */
 export const listJobs = (c: Ctx, base: string, q: { status?: string; source_id?: string; cursor?: string }) =>
   call<{ items: Job[]; next_cursor: string }>(c, base, '/v1/jobs', { query: { limit: '50', ...q } });
+
+export const retryUpload = (c: Ctx, base: string, fileObjectID: string) =>
+  call<{ file_object_id: string; status: string; job_id?: string; mode?: string }>(c, base, `/v1/files/uploads/${encodeURIComponent(fileObjectID)}/retry`, { method: 'POST', body: {} });
