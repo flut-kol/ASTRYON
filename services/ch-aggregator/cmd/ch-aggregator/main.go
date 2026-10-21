@@ -1,7 +1,8 @@
 // Command ch-aggregator recomputes ClickHouse aggregate tables for a trailing window (DPP-028).
 // Env: CH_URL (default http://localhost:8123) CH_DATABASE (astryon) CH_USER CH_PASSWORD
 //
-//	AGG_LOOKBACK (default 3h; covers late data) AGG_INTERVAL (0 = run once, else repeat).
+//	AGG_LOOKBACK (default 3h; covers late data) AGG_INTERVAL (0 = run once, else repeat),
+//	AGG_METRICS_FILE (optional Prometheus textfile-collector output, rewritten atomically after each run).
 //
 // `ch-aggregator reconcile [--snapshot file|-] [--compare file]` reports duplicate rows per batch, aggregate-vs-events
 // drift per hour, empty hours, ClickHouse-vs-registry batch counts (REGISTRY_PG_URL, optional; REGISTRY_GRACE default 15m)
@@ -47,11 +48,15 @@ func main() {
 	lookback, interval := dur("AGG_LOOKBACK", "3h"), dur("AGG_INTERVAL", "0s")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	stats := &agg.RunStats{Path: os.Getenv("AGG_METRICS_FILE")}
 	for {
 		now := time.Now().UTC()
 		w, err := agg.HourWindow(now.Add(-lookback), now)
 		if err == nil {
 			err = c.Recompute(ctx, w, uint64(now.UnixMilli()))
+		}
+		if merr := stats.Record(time.Now(), err); merr != nil {
+			log.Printf("metrics file: %v", merr)
 		}
 		if err != nil {
 			log.Printf("recompute: %v", err)
