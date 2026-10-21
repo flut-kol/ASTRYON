@@ -21,6 +21,7 @@ type Config struct {
 	KafkaSASLPass          string
 	Topic                  string
 	QuarantineTopic        string
+	QuarantineTimeout      time.Duration // CHSINK_QUARANTINE_TIMEOUT: max wait for a quarantine produce ack (default 15s)
 	GroupID                string
 	CHURL                  string
 	CHDatabase             string
@@ -99,6 +100,12 @@ func LoadConfig() (Config, error) {
 	}
 	if err = c.validateKafkaSecurity(); err != nil {
 		return c, err
+	}
+	if c.QuarantineTimeout, err = envDur("CHSINK_QUARANTINE_TIMEOUT", defaultQuarantineTimeout); err != nil {
+		return c, err
+	}
+	if c.QuarantineTimeout <= 0 {
+		return c, fmt.Errorf("CHSINK_QUARANTINE_TIMEOUT must be > 0")
 	}
 	if c.BatchSize, err = envInt("CHSINK_BATCH_SIZE", 5000); err != nil {
 		return c, err

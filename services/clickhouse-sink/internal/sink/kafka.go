@@ -109,6 +109,8 @@ type KafkaSource struct {
 	maxPoll  int
 	quarTopc string
 	conn     *connErrs
+	wait     time.Duration // bounds Quarantine's wait for a produce ack
+	tls      bool
 }
 
 func NewKafka(c Config) (*KafkaSource, error) {
@@ -116,6 +118,10 @@ func NewKafka(c Config) (*KafkaSource, error) {
 		return nil, err
 	}
 	ce := &connErrs{pass: c.KafkaSASLPass}
+	wait := c.QuarantineTimeout
+	if wait <= 0 {
+		wait = defaultQuarantineTimeout
+	}
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(c.Brokers...),
 		kgo.ConsumerGroup(c.GroupID),
@@ -123,6 +129,7 @@ func NewKafka(c Config) (*KafkaSource, error) {
 		kgo.DisableAutoCommit(),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
+		kgo.RecordDeliveryTimeout(max(wait, time.Second)), // franz-go minimum is 1s
 		kgo.WithHooks(ce), kgo.WithLogger(ce),
 	}
 	if c.KafkaTLS {
@@ -139,7 +146,7 @@ func NewKafka(c Config) (*KafkaSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &KafkaSource{cl: cl, maxPoll: c.BatchSize, quarTopc: c.QuarantineTopic, conn: ce}, nil
+	return &KafkaSource{cl: cl, maxPoll: c.BatchSize, quarTopc: c.QuarantineTopic, conn: ce, wait: wait, tls: c.KafkaTLS}, nil
 }
 
 func (k *KafkaSource) Poll(ctx context.Context) ([]Message, error) {
@@ -216,9 +223,43 @@ func (k *KafkaSource) Quarantine(ctx context.Context, q []Quarantined) error {
 		})
 		recs[i] = &kgo.Record{Topic: k.quarTopc, Key: x.Msg.Key, Value: b}
 	}
-	err := k.cl.ProduceSync(ctx, recs...).FirstErr()
-	if s := k.conn.lastErr(); err != nil && s != "" && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out")) {
-		return fmt.Errorf("%w (last broker connect error: %s)", err, s)
+	return k.produce(ctx, recs)
+}
+
+const defaultQuarantineTimeout = 15 * time.Second
+
+const tlsTimeoutHint = "a broker that rejects our TLS/mTLS certificate or ACLs often looks like a plain timeout; check the client certificate, CA and topic ACLs"
+
+// produce bounds the wait by ctx and k.wait: ProduceSync alone can block well past both while
+// franz-go retries a metadata fetch against an unreachable cluster. On failure nothing is
+// acked, so the caller must not commit source offsets; a late write is a duplicate that
+// replay tolerates (at-least-once).
+func (k *KafkaSource) produce(ctx context.Context, recs []*kgo.Record) error {
+	pctx, cancel := context.WithTimeout(ctx, k.wait)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- k.cl.ProduceSync(pctx, recs...).FirstErr() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-pctx.Done():
+		err = pctx.Err()
+	}
+	if err == nil {
+		return nil
+	}
+	timeout := errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out")
+	if timeout && ctx.Err() == nil {
+		err = fmt.Errorf("quarantine produce not acked within %s: %w", k.wait, err)
+	} else {
+		err = fmt.Errorf("quarantine produce failed: %w", err)
+	}
+	if timeout {
+		if s := k.conn.lastErr(); s != "" {
+			err = fmt.Errorf("%w (last broker connect error: %s)", err, s)
+		} else if k.tls {
+			err = fmt.Errorf("%w (%s)", err, tlsTimeoutHint)
+		}
 	}
 	return err
 }

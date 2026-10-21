@@ -22,12 +22,17 @@ type ClickHouse struct {
 	// Read, so a slow object store never trips it. MaxDuration bounds the whole request incl. the stream (default
 	// 15m, negative = off). Both fail the job with ErrCHTimeout (error code clickhouse_timeout).
 	IdleTimeout, MaxDuration time.Duration
+	// HeaderTimeout bounds the wait for the response headers (a ClickHouse that accepted the query but never answers,
+	// e.g. a hung node or a black-holed connection). Default 5m (ClickHouse may legitimately compute a long time before
+	// its first byte; keep it above the longest expected query start), negative = off. Fails with ErrCHTimeout.
+	HeaderTimeout time.Duration
 }
 
 // Defaults of the ClickHouse stream timeouts (env EXPORT_CH_IDLE_TIMEOUT / EXPORT_CH_MAX_DURATION in the binary).
 const (
-	DefaultCHIdleTimeout = 30 * time.Second
-	DefaultCHMaxDuration = 15 * time.Minute
+	DefaultCHIdleTimeout   = 30 * time.Second
+	DefaultCHMaxDuration   = 15 * time.Minute
+	DefaultCHHeaderTimeout = 5 * time.Minute
 )
 
 // ErrCHTimeout marks a ClickHouse stream that stalled (idle timeout) or ran past MaxDuration.
@@ -128,7 +133,16 @@ func (c ClickHouse) open(ctx context.Context, q string, params url.Values) (io.R
 		req.Header.Set("X-ClickHouse-User", c.User)
 		req.Header.Set("X-ClickHouse-Key", c.Password)
 	}
+	var hdrT *time.Timer
+	if ht := orDefault(c.HeaderTimeout, DefaultCHHeaderTimeout); ht > 0 {
+		hdrT = time.AfterFunc(ht, func() {
+			cancel(fmt.Errorf("%w: no response headers from ClickHouse within %s (header timeout)", ErrCHTimeout, ht))
+		})
+	}
 	resp, err := cl.Do(req)
+	if hdrT != nil {
+		hdrT.Stop()
+	}
 	if err != nil {
 		cause := context.Cause(ctx)
 		release()

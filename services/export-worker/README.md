@@ -19,7 +19,7 @@ It has an HTTP layer and either an in-memory or a durable PostgreSQL job store/q
   `EXPORT_MAX_PER_DAY` `EXPORT_MAX_CONCURRENT_PER_TENANT` `EXPORT_URL_TTL_SECONDS` `AAS_*`
   `EXPORT_PG_URL` (enables durable jobs + quota + the dispatcher; unset = in-memory with a warning log) `EXPORT_WORKER_ID` (default hostname-pid, unique per replica) `EXPORT_LEASE_SECONDS` (60)
   `EXPORT_CH_IDLE_TIMEOUT` (30s) / `EXPORT_CH_MAX_DURATION` (15m): ClickHouse stream timeouts, `0` = off, value as Go duration or bare seconds (see 'Timeouts, zombie runs, outages').
-  `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters).
+  `EXPORT_CH_HEADER_TIMEOUT` (5m): wait for ClickHouse response headers. `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters).
   `EXPORT_SWEEP_SECONDS` (300, 0 = off) / `EXPORT_SWEEP_GRACE_SECONDS` (60): orphan multipart-upload sweeper (dispatcher mode, see 'Failure modes').
 - Docker: `docker build -f services/export-worker/Dockerfile -t astryon/export-worker .` (repo root context).
 - Verified: httptest suite with fakes under `-race` (401/403, tenant in body 400, cross-tenant 404, quota 429, lifecycle,
@@ -184,12 +184,16 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
 ## Timeouts, zombie runs, outages (`robust_test.go`, `dispatcher.go`, `worker.go`, `cmd/export-worker/debug.go`)
 - ClickHouse stall: the response body has an idle watchdog (`EXPORT_CH_IDLE_TIMEOUT`, default 30 s; the clock runs only inside a ClickHouse `Read`, so a slow S3
   never trips it) and the whole request has `EXPORT_CH_MAX_DURATION` (default 15 m). Either fails the job with `error_code` `clickhouse_timeout` (audit text says idle / max duration),
-  the reader error makes the store abort the multipart upload, the partial object is deleted. A stall BEFORE the response headers is bounded only by the max duration
-  (ClickHouse may legitimately compute a long time before its first byte).
+  the reader error makes the store abort the multipart upload, the partial object is deleted. A stall BEFORE the response headers is bounded by `EXPORT_CH_HEADER_TIMEOUT` (default 5 m, `0` = off, then only the max duration applies;
+  keep it above the longest legitimate time-to-first-byte); it fails the job `clickhouse_timeout` like the others, the job follows the normal failed-job semantics (no automatic retry).
 - Zombie run: `PGJobStore.HeartbeatOwned` returns the ids whose lease was extended; the dispatcher cancels every running job missing from it (cause `ErrLeaseLost`, log
   `ALERT export_lease_lost`, `export_lease_lost_total`), the run aborts its upload and deletes its partial object, nothing is written for the job. If the run finished anyway and
-  `Finish` is rejected by the owner guard, the object is deleted (`ALERT export_finish_rejected`). A job whose heartbeat cannot reach PG is NOT cancelled locally (the lease is a
-  DB clock; only the DB can say it is gone): it keeps running and learns the truth at the first heartbeat or `Finish` after PG is back.
+  `Finish` is rejected by the owner guard, the object is deleted (`ALERT export_finish_rejected`). Fencing on PG outage/failover: while heartbeats fail the run continues (a short outage or failover < lease
+  changes nothing: the next heartbeat succeeds and the lease is intact). If no heartbeat succeeded for a full lease (`EXPORT_LEASE_SECONDS`, `Dispatcher.LeaseTTL`, measured from the
+  start of the last successful attempt so it never fires before the DB lease expiry), every running job is cancelled with `ErrLeaseLost` (`ALERT export_lease_lost`, upload aborted, partial object
+  deleted, nothing written): another replica may already have failed it `worker_lost`. A failover that leaves PG unreachable longer than the lease therefore fails the running jobs
+  (`worker_lost` via recovery once PG is back). Results are committed only through the owner-guarded `Finish`, so a zombie that finishes anyway is rejected and its object deleted.
+  Claim/Start errors during an outage are logged and retried with backoff; the terminal write is retried for `EXPORT_FINISH_RETRY` (see next point). Test: `TestHeartbeatOutageLongerThanLeaseCancelsRun`.
 - PG outage longer than `EXPORT_FINISH_RETRY`: defined behaviour = abandon. The result is not written, the job is no longer heartbeated, the runner is free, the log has
   `ALERT export_job_abandoned job=... tenant=... status=... key=...` and `export_jobs_abandoned_total` increments; after PG returns, recovery marks the job FAILED `worker_lost`.
   The object is NOT deleted on abandon (a commit whose reply was lost would otherwise point a SUCCEEDED job at a deleted object): it is left to the S3 lifecycle rule; the log line
@@ -197,7 +201,7 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
 - Alert on: log `ALERT export_job_abandoned` / `ALERT export_lease_lost` / `ALERT export_finish_rejected`, or (with `EXPORT_PPROF_ADDR=127.0.0.1:6060`) `curl 127.0.0.1:6060/debug/vars`:
   `export_jobs_abandoned_total`, `export_lease_lost_total`, `export_finish_rejected_total`, `export_clickhouse_timeouts_total`. `EXPORT_PPROF_ADDR` is refused at startup unless it is a loopback host.
 - Docker-free tests (`-race`): idle timeout, max duration, slow consumer does not trip idle, lease lost cancels the run and writes nothing, rejected finish deletes the object,
-  abandon -> recovery `worker_lost` + alert line, and `TestNoGoroutineLeakAcrossJobOutcomes` (8 rounds x success / ClickHouse 500 / idle timeout / max duration / lease lost / finish rejected / shutdown,
+  abandon -> recovery `worker_lost` + alert line, and `TestCHHeaderTimeoutFailsJobAndLeaksNothing`, `TestNoGoroutineLeakAcrossJobOutcomes` (8 rounds x success / ClickHouse 500 / idle timeout / max duration / lease lost / finish rejected / shutdown,
   `runtime.NumGoroutine` back to the baseline).
 - Verified LIVE (`TestE2ETimeoutsAndLeaseLoss`, `EXPORT_E2E=1`, ~60 s, lease 3 s, laptop Docker Desktop arm64):
   - `docker pause` ClickHouse mid-stream, idle timeout 3 s: FAILED `clickhouse_timeout` 3.1-3.2 s after the pause, upload aborted at once, no object, next job SUCCEEDED 160-280 ms after unpause.
@@ -208,8 +212,7 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
     A's Finish and the object was deleted.
   - `docker pause` PostgreSQL for the rest of a job with `EXPORT_FINISH_RETRY=8s`: job abandoned 17.5 s after the pause (alert line logged), 200 ms after the unpause recovery set `worker_lost`, worker alive, new job
     served in 160 ms; the finished object is left (lifecycle rule).
-- NOT verified: goroutine count in the real binary (only the in-process test; `EXPORT_PPROF_ADDR` starts but was not scraped during a long soak); PG failover/replicas; the lease-lost detection when the heartbeat cannot reach PG
-  (by design not cancelled); reconciliation/deletion of the object of an abandoned job; a CH stall before the response headers (only the max duration applies); the S3 lifecycle rule.
+- NOT verified: goroutine count in the real binary (only the in-process test; `EXPORT_PPROF_ADDR` starts but was not scraped during a long soak); PG failover/replicas; real PG failover with promotion (only simulated by fakes/pause); reconciliation/deletion of the object of an abandoned job; the S3 lifecycle rule.
 
 ## Remaining proposal (not implemented)
 ```sql

@@ -48,12 +48,11 @@ Verified live (PostgreSQL 16, non-superuser role): 50 concurrent allocations fro
 tenant B numbering independent and invisible under RLS (no-tenant session sees 0 rows, cross-tenant INSERT rejected); failed publish -> FAILED, next = v+1.
 Run: `REPLAY_PG_URL=postgres://app_role:...@host/db go test ./internal/replay -run PGLive` (migrations 0001-0005 applied; skipped when unset).
 
-Proposed forward migration (NOT added; numbering owned elsewhere). The advisory lock already makes allocation correct; the index is a
-defence-in-depth guard against any writer that bypasses the allocator:
-```sql
--- ROLLBACK: DROP INDEX replay_requests_version_uq;
-CREATE UNIQUE INDEX replay_requests_version_uq ON replay_requests (tenant_id, source_id, target_processing_version);
-```
+Unique index (migration `db/postgres/migrations/0014_replay_version_unique.up.sql`): `CREATE UNIQUE INDEX replay_requests_version_uq ON replay_requests (tenant_id, source_id, target_processing_version)`.
+Rollback: `DROP INDEX replay_requests_version_uq;`. Deliberately NOT partial: FAILED/CANCELLED/soft-deleted rows keep their version burned (the allocator takes MAX over all rows), so a version is never reused and the
+index can be total. It fails to apply if duplicates already exist. The advisory lock already makes allocation correct; the index is a guard against any writer that bypasses the allocator. If it fires
+(SQLSTATE 23505 on `replay_requests_version_uq`), `Reserve` returns `ErrConflict`, nothing is published, and `POST /v1/replays` answers `409 replay_conflict` (retry allocates the next version).
+Verified on PostgreSQL 16 (throwaway `postgres:16-alpine`, whole chain 0001-0014 applied, NOBYPASSRLS role): a duplicate insert is rejected and classified as a conflict (`TestPGLiveUniqueVersionIndex`).
 Caveats: the advisory-lock hash can collide across different (tenant, source) pairs (only causes extra serialization, not duplicates); the lock is
 per-database, so a PgBouncer in transaction mode is fine (xact lock) but statement mode is not.
 
@@ -68,6 +67,10 @@ Audit: see "Audit trail" below.
 Verified: unit tests with fakes (401/403, non-COMPLETED, regression, noop, rollback, cross-tenant 404, audit, concurrency in memory) and live PostgreSQL 16 (`REPLAY_PG_URL`, non-superuser NOBYPASSRLS role,
 migrations 0001-0010): same rules, RLS isolation (cross-tenant insert rejected), 36 concurrent activations over two pools -> exactly one row with the highest version.
 Not verified: who moves `replay_requests` to COMPLETED.
+
+## End-to-end test
+`e2e_test.go`: `POST /v1/replays` -> job on the jobs topic (real `KafkaJobPublisher` encoding, fake producer) -> table flips REQUESTED -> RUNNING -> COMPLETED as the worker does -> `POST .../activate` (409 before COMPLETED, 200 after, version 2 active).
+The worker half is in `services/replay-worker` (`TestE2EControllerJobToCompleted`); the two modules cannot import each other (`internal`), so both read `internal/replay/testdata/job.v1.json`, which `TestJobWireFormMatchesGolden` pins to the publisher's output.
 
 ## Authentication (AAS)
 `aasAuthenticator` wraps `auth.Verifier.Authenticate`; every failure is a 401 without detail. Scope `astryon:replay:write` is checked by the handler (403). A `tenant_id` in a body is never read
@@ -119,11 +122,12 @@ Not verified: stdout fallback is not durable; the reconciler (below) is verified
 
 ## Audit reconciler: `replay-controller reconcile-audit` (`internal/replay/auditreconcile.go`)
 Resolves `prepared` events that never got `committed`/`aborted` (crash, lost ack). Flags: `-since` (duration or RFC3339, default 24h), `-until`, `-from-offset`, `-dry-run`, `-grace`, `-tx-window`, `-group`, `-max-keys`, `-idle`.
-Env: `REPLAY_PG_URL` (required, role must NOT bypass RLS), `ASTRYON_KAFKA_*` (same TLS/SASL as above), `REPLAY_RECONCILE_GRACE` (default 2m), `REPLAY_RECONCILE_TX_WINDOW` (default 1m), `REPLAY_RECONCILE_GROUP` (default `replay-controller-audit-reconciler`).
+Env: `REPLAY_PG_URL` (required, role must NOT bypass RLS), `ASTRYON_KAFKA_*` (same TLS/SASL as above), `REPLAY_RECONCILE_GRACE` (default 2m), `REPLAY_RECONCILE_TX_WINDOW` (default 1m; same as `-tx-window`, the flag wins; must be a positive duration, an invalid env value logs a WARN and falls back to the default, an invalid flag exits 2), `REPLAY_RECONCILE_GROUP` (default `replay-controller-audit-reconciler`).
 - Reads `audit.events.v1` with its own consumer group; offsets are NEVER committed (a window is re-read each run), run one instance. Pairs by (tenant, replay_id, source, action, request_id); memory is bounded by `-max-keys` (200k distinct changes; more = error, narrow the window).
 - `prepared` older than the grace and without outcome: PostgreSQL lookup, tenant set per transaction from the EVENT's tenant_id (RLS). Activate/rollback: `source_active_versions` row has `active = to_version`, `switched_by = subject`, `switched_at >= prepared.ts - tx-window` => `committed`, else `aborted`.
-  NOTE `switched_at` is `now()` = the START of the activation transaction, which precedes the prepared stamp, so the literal `switched_at >= ts` rule of the audit section would never hold; the tolerance `tx-window` replaces it (a transaction held longer than that, e.g. by lock waits, would be judged aborted: raise it).
+  NOTE `switched_at` is `now()` = the START of the activation transaction, which precedes the prepared stamp, so the literal `switched_at >= ts` rule of the audit section would never hold; the tolerance `tx-window` replaces it (a transaction held longer than that, e.g. by lock waits, would be judged aborted: raise `REPLAY_RECONCILE_TX_WINDOW`/`-tx-window`, e.g. `5m`; too large a window can attribute an older switch by the same subject to this event. Covered by `TestJudgeActivationHonoursTxWindow`).
   A different version active with `switched_at` after the event: if `previous_processing_version = to_version` a later activation masked ours => committed; otherwise unresolvable. `replay.started`: `replay_requests` (tenant, source, target version) FAILED => aborted, RUNNING/COMPLETED => committed, REQUESTED/APPROVED/CANCELLED/missing => unresolved (cannot prove whether the job is on replay.jobs.v1).
+  A replay START that has NO audit record at all (best_effort mode, or audit publish failed after the job was sent) is invisible to the reconciler, which only starts from audit events: such starts stay unresolved by design; inspect `replay_requests` directly (REQUESTED for long = job maybe never published).
 - Resolution event: copy of the prepared event with `phase=committed|aborted`, `outcome=success|aborted`, `resolved_by=reconciler`, `ts=now`, `event_id = sha256(reconciler, prepared.event_id, phase)[:16]`, key = tenant_id. A re-run sees the resolution in the topic and emits nothing.
 - Other direction: `committed` whose switch is not in the database, `aborted` whose switch is (within the event's time), or both phases for one change => `ALERT audit contradiction` log line, `contradictions` count + event ids. Outcomes masked by a later change are only counted as `unverifiable`.
 - Output: JSON report on stdout (logs on stderr). Exit 0 clean; 1 when unresolved or contradicting events remain (dry run: also when something would be resolved); 2 usage/infrastructure error. Prepared events inside the grace period are counted as `young` and do not fail the run.

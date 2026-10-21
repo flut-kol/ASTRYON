@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -422,4 +423,104 @@ func TestPGHeartbeatOwnedReturnsExtendedIDs(t *testing.T) {
 		t.Fatalf("%v %v", ids, err)
 	}
 	var _ LeaseReporter = s
+}
+
+// hangHeaders accepts the request and never answers: the stall happens BEFORE the response headers.
+func hangHeaders() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+}
+
+func TestCHHeaderTimeoutFailsJobAndLeaksNothing(t *testing.T) {
+	srv := hangHeaders()
+	tr := &http.Transport{}
+	runtime.GC()
+	base := runtime.NumGoroutine()
+	r := &Runner{CH: ClickHouse{URL: srv.URL, HeaderTimeout: 100 * time.Millisecond, IdleTimeout: -1, MaxDuration: -1,
+		HTTP: &http.Client{Transport: tr}}, Store: newMemStore(), Audit: &MemoryAudit{}}
+	t0 := time.Now()
+	_, err := r.Run(context.Background(), Principal{TenantID: tenantA}, "exp-00000003", goodSpec())
+	if !errors.Is(err, ErrCHTimeout) || !strings.Contains(err.Error(), "header") {
+		t.Fatalf("want header timeout, got %v", err)
+	}
+	if errCode(err, context.Background()) != "clickhouse_timeout" {
+		t.Fatalf("code %q", errCode(err, context.Background()))
+	}
+	if el := time.Since(t0); el > 2*time.Second {
+		t.Fatalf("took %s", el)
+	}
+	srv.CloseClientConnections()
+	srv.Close()
+	tr.CloseIdleConnections()
+	if n := settledGoroutines(base, 5*time.Second); n > base {
+		t.Fatalf("goroutines %d > baseline %d", n, base)
+	}
+}
+
+// A parent cancellation during the header wait is the caller's cancellation, not a ClickHouse timeout.
+func TestCHHeaderWaitParentCancelIsNotTimeout(t *testing.T) {
+	srv := hangHeaders()
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	r := runnerFor(srv.URL, newMemStore(), -1, -1)
+	r.CH.HeaderTimeout = time.Minute
+	_, err := r.Run(ctx, Principal{TenantID: tenantA}, "exp-00000004", goodSpec())
+	if err == nil || errors.Is(err, ErrCHTimeout) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// failingHB: heartbeat cannot reach the queue at all (PostgreSQL down/failover) after the job started.
+type failingHB struct {
+	*fqView
+	down atomic.Bool
+}
+
+func (f *failingHB) Heartbeat(ctx context.Context) (int, error) {
+	if f.down.Load() {
+		return 0, errors.New("dial tcp: connection refused")
+	}
+	return f.fqView.Heartbeat(ctx)
+}
+
+// Queue unreachable for a full lease: the DB lease has expired, so the run is cancelled (no zombie) and nothing is
+// written; with LeaseTTL = 0 the run is left alone (it learns the truth at the first heartbeat/Finish after the outage).
+func TestHeartbeatOutageLongerThanLeaseCancelsRun(t *testing.T) {
+	log.SetOutput(io.Discard)
+	for _, ttl := range []time.Duration{150 * time.Millisecond, 0} {
+		ch := newFakeCH(ndjsonRows(3), 200)
+		q := newFakeQueue()
+		id := q.add(tenantA)
+		hb := &failingHB{fqView: q.view("w1")}
+		ps := &probeStore{memStore: newMemStore(), started: make(chan struct{}, 1), cancelled: make(chan struct{})}
+		d := testDispatcher(hb, ps, ch, 1)
+		d.LeaseTTL = ttl
+		before := Counters.LeaseLost.Load()
+		d.Start(context.Background())
+		<-ps.started
+		hb.down.Store(true)
+		if ttl > 0 {
+			select {
+			case <-ps.cancelled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("run not cancelled after a heartbeat outage longer than the lease")
+			}
+			waitFor(t, "counter", func() bool { return Counters.LeaseLost.Load() == before+1 })
+			if j := q.get(id); j.Status != StatusRunning {
+				t.Fatalf("nothing may be written by the zombie: %+v", j)
+			}
+		} else {
+			select {
+			case <-ps.cancelled:
+				t.Fatal("LeaseTTL=0 must not cancel on outage")
+			case <-time.After(400 * time.Millisecond):
+			}
+		}
+		d.jobCancel() // release the probe (ttl=0 case)
+		shutdown(t, d)
+		ch.Close()
+	}
 }

@@ -273,6 +273,8 @@ func (k *KafkaJobSource) Close() { k.cl.Close() }
 type KafkaSink struct {
 	cl   *kgo.Client
 	conn *connErrs
+	// produce is the blocking ProduceSync call; a field so tests can simulate a hung broker.
+	produce func(ctx context.Context, recs []*kgo.Record) error
 }
 
 func NewKafkaSink(c KafkaConfig) (*KafkaSink, error) {
@@ -288,15 +290,29 @@ func NewKafkaSink(c KafkaConfig) (*KafkaSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka producer: %w", err)
 	}
-	return &KafkaSink{cl: cl, conn: ce}, nil
+	return &KafkaSink{cl: cl, conn: ce, produce: func(ctx context.Context, recs []*kgo.Record) error {
+		return cl.ProduceSync(ctx, recs...).FirstErr()
+	}}, nil
 }
 
+// Publish blocks until every record is acked or ctx ends. ProduceSync itself can outlive ctx while the broker
+// is unreachable (it waits for the record's fate, bounded only by RecordDeliveryTimeout), so it runs aside and
+// Publish returns ctx.Err() at the deadline (as the gateway's franzProducer.produce does). Records may still land
+// later; the worker does not commit the offset on error, the redelivered job re-publishes idempotently
+// (existing events are skipped, ids/keys are deterministic).
 func (s *KafkaSink) Publish(ctx context.Context, recs []Record) error {
 	krs := make([]*kgo.Record, len(recs))
 	for i, r := range recs {
 		krs[i] = &kgo.Record{Topic: r.Topic, Key: r.Key, Value: r.Value}
 	}
-	return s.conn.annotate(s.cl.ProduceSync(ctx, krs...).FirstErr())
+	done := make(chan error, 1)
+	go func() { done <- s.produce(ctx, krs) }()
+	select {
+	case err := <-done:
+		return s.conn.annotate(err)
+	case <-ctx.Done():
+		return s.conn.annotate(ctx.Err())
+	}
 }
 
 func (s *KafkaSink) Close() { s.cl.Close() }

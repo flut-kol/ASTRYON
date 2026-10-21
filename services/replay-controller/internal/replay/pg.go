@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -185,6 +186,9 @@ func (a *PGAllocator) Reserve(ctx context.Context, tenantID, sourceID string, fr
 	}
 	var id string
 	if err := tx.QueryRow(ctx, sqlIns, tenantID, sourceID, int32(next), tf, tt).Scan(&id); err != nil {
+		if isVersionConflict(err) {
+			return ReplayRequest{}, fmt.Errorf("%w: version %d already reserved", ErrConflict, next)
+		}
 		return ReplayRequest{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -207,3 +211,9 @@ func (a *PGAllocator) SetStatus(ctx context.Context, tenantID, requestID, status
 }
 
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// isVersionConflict: unique violation (23505) of replay_requests_version_uq.
+func isVersionConflict(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23505" && pe.ConstraintName == "replay_requests_version_uq"
+}

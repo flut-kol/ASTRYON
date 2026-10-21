@@ -74,7 +74,7 @@ the limit, i.e. today's behaviour); `closed` keeps the global limit exact but th
 After a failure Redis is skipped for 2 s (no per-request timeout storm). The pause is per failure domain: in Cluster mode the
 domain is the master currently serving the tenant's slot, so only tenants on the failing node degrade (fall back or 503) and
 every other tenant keeps exact Redis limits; after the topology refresh the promoted master is a different domain and is used
-immediately. Single node and Sentinel have one domain (global pause, as before). Exception: with `cluster-require-full-coverage yes`
+immediately. Single node and Sentinel have no domains: the pause is kept per tenant (bounded map, at most `QUERY_MAX_TENANTS` entries, soonest-expiring evicted), so one tenant's Redis error pauses only that tenant; on a real outage each tenant pays one failed call per cooldown. Exception: with `cluster-require-full-coverage yes`
 (the Redis default) every node answers `CLUSTERDOWN The cluster is down` while any slot is uncovered, which is treated as
 cluster-wide (all domains pause for the cooldown); set `cluster-require-full-coverage no` on the nodes to get per-node degradation.
 Local-mode over-admission bound: when a tenant falls back, its local bucket is seeded from the last token count Redis reported

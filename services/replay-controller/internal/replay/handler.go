@@ -115,6 +115,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrAuditUnavailable):
 		writeErr(w, 503, "audit_unavailable", "audit trail unavailable; replay was not started, retry later")
 		return
+	case errors.Is(err, ErrConflict):
+		writeErr(w, 409, "replay_conflict", "this processing version was reserved concurrently; retry the request")
+		return
 	case err != nil:
 		if prepared != nil { // job publication failed after the prepared event: say so
 			ev := *prepared

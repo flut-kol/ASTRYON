@@ -84,6 +84,10 @@ type Planner struct {
 
 var ErrInvalid = errors.New("invalid replay request")
 
+// ErrConflict: the (tenant, source, processing_version) the request tried to reserve already exists
+// (unique index replay_requests_version_uq, migration 0014). The handler answers 409; retrying allocates the next version.
+var ErrConflict = errors.New("replay version conflict")
+
 // Validate checks the bounded explicit scope.
 func (r Request) Validate() error {
 	switch {

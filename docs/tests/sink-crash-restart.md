@@ -51,3 +51,18 @@ truncated between runs, two repetitions per mode:
 No measurable difference at this batch size (one extra tiny insert per ~1.6 k-row chunk). The small-batch worst case
 (batch 200 / 300 ms) was not measured. Numbers are from a laptop-class Docker host and a drain, not a steady-state
 latency test; do not compare with the DPP-010 gateway benchmark.
+
+## Intent-table overhead (2026-10-21)
+
+`CHSINK_INTENT_TABLE` adds one `Record` insert before each chunk insert. Measured by `TestIntegrationIntentOverhead`
+(`CHSINK_IT_BENCH=1` + `CHSINK_IT_URL`, migrations 0001+0004, throwaway single-node ClickHouse 24.8 in Docker on a
+laptop, 40 chunks per size, sequential): the extra insert costs about 2.7-3.9 ms p50 (p95 4.7-6.1 ms), independent of chunk size.
+
+| rows/chunk | insert p50 | record+insert p50 | added |
+|---|---|---|---|
+| 100 | 3.8 ms | 6.9 ms | +83% |
+| 1000 | 8.0 ms | 11.5 ms | +44% |
+| 5000 | 27.0 ms | 30.2 ms | +12% |
+
+Conclusion: negligible with chunks of 1000+ rows, noticeable only for tiny chunks; use large `CHSINK_BATCH_*` chunks when
+enabling it. Not measured: a real Kafka-fed run, a Replicated/Distributed cluster, concurrent partitions.

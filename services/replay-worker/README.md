@@ -50,3 +50,9 @@ migration 0001) then `UPDATE replay_requests ... WHERE tenant_id AND source_id A
   16 concurrent claimers over 2 pools -> exactly 1 winner; stale-lease takeover -> exactly 1 winner. Bug found: the old RUNNING rule accepted RUNNING -> RUNNING, so two workers could both claim a request; fixed with the lease rule.
   Re-completion of a COMPLETED request is a no-op reported as `ErrNotRunnable` (the worker already tolerates it).
 - Kafka SASL_SSL (SCRAM-SHA-512/256, PLAIN) verified live (`REPLAYW_KAFKA_IT_*`, `docs/operations/kafka-tls-sasl-test.md`); `ASTRYON_KAFKA_TLS` accepts only 1/true/0/false, a CA file or PLAIN without TLS is a config error. mTLS client certs and cert/CA rotation without restart verified live (`REPLAYW_KAFKA_MTLS_IT_*`, `kafka_mtls_it_test.go`). Not verified live: multi-worker rebalancing, ranges beyond one day-split.
+
+## Publish is bounded by ctx
+`KafkaSink.Publish` runs `ProduceSync` aside and returns `ctx.Err()` at the deadline (like the gateway's `franzProducer.produce`), so an unreachable broker cannot hold the worker beyond its context (previously bounded only by `ASTRYON_KAFKA_DELIVERY_TIMEOUT`, default 30s). Records may still land later; the offset is not committed on error and the redelivered job skips already-present events. Tests: `kafka_publish_ctx_test.go` (hung producer, real client against `127.0.0.1:1`).
+
+## End-to-end test
+`TestE2EControllerJobToCompleted` feeds the controller's golden job (`../replay-controller/internal/replay/testdata/job.v1.json`) through `Worker.Step` with fakes: events copied v1 -> v2, request RUNNING -> COMPLETED, offset committed. Activation is covered controller-side.

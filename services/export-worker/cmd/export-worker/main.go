@@ -8,7 +8,7 @@
 // durable and replica-safe (a per-replica dispatcher runs the queued jobs); EXPORT_WORKER_ID (default hostname-pid), EXPORT_LEASE_SECONDS (60).
 // EXPORT_SWEEP_SECONDS (300, 0 = off) and EXPORT_SWEEP_GRACE_SECONDS (60) drive the orphan multipart-upload sweeper (dispatcher mode).
 // EXPORT_CH_IDLE_TIMEOUT (30s) fails a job when ClickHouse sends nothing for that long; EXPORT_CH_MAX_DURATION (15m) bounds the
-// whole ClickHouse stream (0 = off for both; duration like 30s or bare seconds). EXPORT_FINISH_RETRY (2m) is how long a terminal
+// whole ClickHouse stream; EXPORT_CH_HEADER_TIMEOUT (5m) bounds the wait for response headers (0 = off for all three; duration like 30s or bare seconds). EXPORT_FINISH_RETRY (2m) is how long a terminal
 // write is retried while PostgreSQL is down before the job is abandoned (log "ALERT export_job_abandoned").
 // EXPORT_PPROF_ADDR (off) = loopback-only debug listener with pprof and /debug/vars counters.
 // Without EXPORT_PG_URL jobs and quota are in memory (lost on restart, per process); see README.
@@ -75,8 +75,9 @@ func main() {
 		Creds:  export.Creds{AccessKey: os.Getenv("S3_ACCESS_KEY"), SecretKey: os.Getenv("S3_SECRET_KEY")}}
 	runner := &export.Runner{
 		CH: export.ClickHouse{URL: env("CH_URL", "http://localhost:8123"), Database: env("CH_DATABASE", "astryon"), User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
-			IdleTimeout: offIfZero(envDuration("EXPORT_CH_IDLE_TIMEOUT", export.DefaultCHIdleTimeout)),
-			MaxDuration: offIfZero(envDuration("EXPORT_CH_MAX_DURATION", export.DefaultCHMaxDuration))},
+			IdleTimeout:   offIfZero(envDuration("EXPORT_CH_IDLE_TIMEOUT", export.DefaultCHIdleTimeout)),
+			MaxDuration:   offIfZero(envDuration("EXPORT_CH_MAX_DURATION", export.DefaultCHMaxDuration)),
+			HeaderTimeout: offIfZero(envDuration("EXPORT_CH_HEADER_TIMEOUT", export.DefaultCHHeaderTimeout))},
 		Store:   s3,
 		Presign: s3,
 		Audit:   &export.JSONLinesAudit{W: os.Stdout},
@@ -106,7 +107,7 @@ func main() {
 		}
 		// Dispatcher: every replica claims queued jobs (EXPORT_WORKERS concurrent), heartbeats and recovers leases.
 		disp := &export.Dispatcher{Queue: store, Runner: runner, Audit: runner.Audit, Workers: envInt("EXPORT_WORKERS", 2),
-			HeartbeatEvery: lease / 3, RecoverEvery: lease / 3, FinishRetry: envDuration("EXPORT_FINISH_RETRY", 2*time.Minute)}
+			LeaseTTL: lease, HeartbeatEvery: lease / 3, RecoverEvery: lease / 3, FinishRetry: envDuration("EXPORT_FINISH_RETRY", 2*time.Minute)}
 		disp.Start(bg)
 		// Orphan multipart uploads of dead workers (kill -9) are aborted by every replica; 0 disables.
 		if every := envInt("EXPORT_SWEEP_SECONDS", 300); every > 0 {

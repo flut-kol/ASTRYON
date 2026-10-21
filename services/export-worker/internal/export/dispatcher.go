@@ -52,7 +52,11 @@ type Dispatcher struct {
 	RecoverEvery   time.Duration // default 30s
 	OpTimeout      time.Duration // bound of one queue operation (claim, heartbeat, recover), default 15s
 	FinishRetry    time.Duration // how long a terminal write is retried while the queue is unreachable, default 2m
-	Now            func() time.Time
+	// LeaseTTL is the lease length of the Queue. When > 0 and no heartbeat succeeded for that long (queue unreachable),
+	// every running job is cancelled with ErrLeaseLost: the DB lease has expired by then, another replica may already
+	// have recovered the job (worker_lost), so continuing would only produce a zombie. 0 = never cancel on outage.
+	LeaseTTL time.Duration
+	Now      func() time.Time
 
 	once                sync.Once
 	base                context.Context
@@ -63,6 +67,7 @@ type Dispatcher struct {
 	wake                chan struct{}
 	wg, bgWG            sync.WaitGroup
 	hbDownSince         time.Time // maintain goroutine only: first failed heartbeat of the current outage
+	hbLastOK            time.Time // maintain goroutine only: start of the last successful heartbeat
 
 	runMu   sync.Mutex
 	running map[string]context.CancelCauseFunc // started jobs of this replica -> cancel (lease lost)
@@ -292,6 +297,10 @@ func (d *Dispatcher) untrack(id string) {
 
 // cancelLost cancels every running job whose lease is not in owned (the heartbeat just proved it is gone).
 func (d *Dispatcher) cancelLost(owned []string) {
+	d.cancelLostWhy(owned, "heartbeat shows the lease is gone (recovered by another replica)")
+}
+
+func (d *Dispatcher) cancelLostWhy(owned []string, why string) {
 	set := make(map[string]struct{}, len(owned))
 	for _, id := range owned {
 		set[id] = struct{}{}
@@ -302,7 +311,7 @@ func (d *Dispatcher) cancelLost(owned []string) {
 		if _, ok := set[id]; !ok {
 			// Logged and counted at once: the run's cleanup (abort upload, delete object) may take a while.
 			Counters.LeaseLost.Add(1)
-			log.Printf("ALERT export_lease_lost job=%s: heartbeat shows the lease is gone (recovered by another replica); cancelling the run", id)
+			log.Printf("ALERT export_lease_lost job=%s: %s; cancelling the run", id, why)
 			c(ErrLeaseLost)
 			delete(d.running, id)
 		}
@@ -394,6 +403,7 @@ func (d *Dispatcher) maintain() {
 // heartbeat extends our leases; logs only the first failure of an outage and the recovery with its duration.
 func (d *Dispatcher) heartbeat() {
 	hctx, hcancel := context.WithTimeout(d.bgCtx, d.OpTimeout)
+	attempt := time.Now()
 	var err error
 	if lr, ok := d.Queue.(LeaseReporter); ok {
 		var owned []string
@@ -404,6 +414,17 @@ func (d *Dispatcher) heartbeat() {
 		_, err = d.Queue.Heartbeat(hctx)
 	}
 	hcancel()
+	if err == nil {
+		d.hbLastOK = attempt
+	} else if d.LeaseTTL > 0 && d.bgCtx.Err() == nil {
+		if d.hbLastOK.IsZero() {
+			d.hbLastOK = attempt // first failure ever: count the outage from here
+		}
+		// hbLastOK precedes the DB-side extension, so this fires no earlier than the real lease expiry.
+		if time.Since(d.hbLastOK) >= d.LeaseTTL {
+			d.cancelLostWhy(nil, "no heartbeat reached the queue for a full lease ("+d.LeaseTTL.String()+"); the lease has expired")
+		}
+	}
 	switch {
 	case err != nil && d.bgCtx.Err() == nil:
 		if d.hbDownSince.IsZero() {

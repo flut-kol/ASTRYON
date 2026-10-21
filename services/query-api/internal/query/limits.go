@@ -167,8 +167,9 @@ type Limiter struct {
 }
 
 const (
-	sharedCooldown  = 2 * time.Second  // after a shared failure, skip that failure domain this long (no per-request timeout storm)
-	fallbackEpisode = 10 * time.Second // a tenant unseen by the fallback this long starts a new outage episode (reseed)
+	sharedCooldown     = 2 * time.Second  // after a shared failure, skip that failure domain this long (no per-request timeout storm)
+	tenantDomainPrefix = "\x00tenant:"    // downUntil key prefix for per-tenant pauses (cannot collide with domain names or "*")
+	fallbackEpisode    = 10 * time.Second // a tenant unseen by the fallback this long starts a new outage episode (reseed)
 )
 
 // UseShared attaches a cross-replica store. mode "" means FailLocal.
@@ -270,12 +271,38 @@ func (l *Limiter) seedFallback(tenant string) {
 	st.tokens, st.last, st.seen, st.lastFB = math.Min(seed, l.fbCapacity()), now, now, now
 }
 
+// markDown records the cooldown of a failure domain (or per-tenant key). Caller holds smu. The map is bounded by
+// MaxTenants: expired entries are dropped first, then the entry that expires soonest.
+func (l *Limiter) markDown(key string, now time.Time) {
+	if _, ok := l.downUntil[key]; !ok && len(l.downUntil) >= l.cfg.MaxTenants {
+		for k, t := range l.downUntil {
+			if !now.Before(t) {
+				delete(l.downUntil, k)
+			}
+		}
+		if len(l.downUntil) >= l.cfg.MaxTenants {
+			var oldest string
+			var ot time.Time
+			for k, t := range l.downUntil {
+				if oldest == "" || t.Before(ot) {
+					oldest, ot = k, t
+				}
+			}
+			delete(l.downUntil, oldest)
+		}
+	}
+	l.downUntil[key] = now.Add(sharedCooldown)
+}
+
 // acquireShared returns done=false when the caller should use the local limiter (fail-local policy).
 func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release func(), retryAfter int, aerr *apiError, done bool) {
 	dom := ""
 	dr, hasDom := l.shared.(DomainResolver)
 	if hasDom {
 		dom = dr.FailureDomain(tenant)
+	}
+	if dom == "" { // no failure domains (single node / Sentinel): the pause is per tenant, never shared between tenants
+		dom = tenantDomainPrefix + tenant
 	}
 	l.smu.Lock()
 	now := l.now()
@@ -288,15 +315,10 @@ func (l *Limiter) acquireShared(ctx context.Context, tenant string) (release fun
 		if err != nil {
 			l.smu.Lock()
 			now = l.now()
-			for k, t := range l.downUntil { // domains are few (cluster masters); drop expired ones
-				if !now.Before(t) {
-					delete(l.downUntil, k)
-				}
-			}
 			if hasDom && dr.GlobalFailure(err) {
 				dom = globalDomain
 			}
-			l.downUntil[dom] = now.Add(sharedCooldown)
+			l.markDown(dom, now)
 			l.smu.Unlock()
 		} else if d.TokensKnown {
 			l.noteTokens(tenant, d.Tokens)
