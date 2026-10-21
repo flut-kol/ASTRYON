@@ -32,6 +32,7 @@ type Server struct {
 	auth Authenticator
 	pub  Publisher
 	now  func() time.Time
+	m    metrics
 }
 
 func NewServer(cfg Config, a Authenticator, p Publisher) *Server {
@@ -44,8 +45,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /v1/events", s.handleSingle)
-	mux.HandleFunc("POST /v1/events/batch", s.handleBatch)
+	mux.HandleFunc("GET /metrics", s.m.handler)
+	mux.HandleFunc("POST /v1/events", s.m.count(s.handleSingle))
+	mux.HandleFunc("POST /v1/events/batch", s.m.count(s.handleBatch))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
 		if id == "" || len(id) > 128 || !utf8.ValidString(id) || hasCtl(id) {
