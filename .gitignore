@@ -12,3 +12,5 @@ go.work.sum
 .vscode/
 .DS_Store
 node_modules/
+
+.astryon-dev/

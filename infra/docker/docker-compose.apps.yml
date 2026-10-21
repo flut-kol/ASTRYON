@@ -1,0 +1,41 @@
+# DEV ONLY override: astryon_* container names + the single application container (11 Go services).
+# Use together with the base file: docker compose -f docker-compose.dev.yml -f docker-compose.apps.yml ...
+# Driven by scripts/dev/apps-up.sh (generates the dev token file and exports APPS_UID/APPS_GID).
+services:
+  kafka: {container_name: astryon_kafka}
+  postgres: {container_name: astryon_postgres}
+  clickhouse: {container_name: astryon_clickhouse}
+  s3mock: {container_name: astryon_s3mock}
+
+  apps:
+    container_name: astryon_apps
+    image: astryon_apps:dev
+    build:
+      context: ../..
+      dockerfile: infra/docker/apps/Dockerfile
+    # run as the host user so the 0600 token file stays readable without loosening its mode
+    user: "${APPS_UID:-1000}:${APPS_GID:-1000}"
+    restart: unless-stopped
+    depends_on:
+      kafka: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      s3mock: {condition: service_healthy}
+    environment:
+      TENANT: "00000000-0000-0000-0000-0000000000a1"
+      # opt-in AAS mode; empty = dev token mode. Live AAS tokens carry env=prod.
+      AAS_BASE_URL: "${AAS_BASE_URL:-}"
+      AAS_ISSUER: "${AAS_ISSUER:-}"
+      AAS_AUDIENCE: "${AAS_AUDIENCE:-}"
+      AAS_ALLOWED_AZP: "${AAS_ALLOWED_AZP:-}"
+      AAS_ENV: "${AAS_ENV:-prod}"
+    volumes:
+      - ${APPS_TOKEN_FILE:-../../.astryon-dev/dev-token}:/run/secrets/astryon-dev-token:ro
+    ports:
+      - "127.0.0.1:18080:18080"   # gateway
+      - "127.0.0.1:18082:18082"   # query-api
+      - "127.0.0.1:18083:18083"   # export-worker
+      - "127.0.0.1:18085:18085"   # file-api
+      - "127.0.0.1:18086:18086"   # quarantine
+      - "127.0.0.1:18087:18087"   # replay-controller
+      - "127.0.0.1:18088:18088"   # connector-manager admin

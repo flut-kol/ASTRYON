@@ -1,0 +1,18 @@
+{
+  "name": "astryon-demo-cdc",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "plugin.name": "pgoutput",
+    "publication.name": "astryon_cdc_pub",
+    "slot.name": "astryon_cdc_slot",
+    "database.hostname": "pg_cdc",
+    "database.port": "5432",
+    "database.user": "cdc",
+    "database.password": "cdc_dev_only",
+    "database.dbname": "cdcdemo",
+    "topic.prefix": "astryon_cdc",
+    "table.include.list": "public.demo_items",
+    "snapshot.mode": "initial",
+    "tombstones.on.delete": "true"
+  }
+}
