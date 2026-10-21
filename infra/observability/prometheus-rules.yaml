@@ -67,3 +67,17 @@ groups:
         annotations:
           summary: clickhouse-sink consumes nothing while lag exists
           runbook: docs/operations/runbooks/stuck-consumer.md
+      - alert: AstryonQueryDPoPReplay
+        expr: sum(increase(astryon_query_api_dpop_rejected_total{reason="replay"}[10m])) > 5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: query-api rejects repeated DPoP proofs (possible token/proof theft or a client retrying proofs)
+          runbook: docs/architecture/dpop-plan.md
+      - alert: AstryonQueryDPoPRejectsHigh
+        expr: sum(rate(astryon_query_api_dpop_rejected_total{reason!="replay"}[15m])) > 1
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: sustained DPoP proof rejections in query-api (htu/ath/jkt misconfiguration or abuse)
+          runbook: docs/architecture/dpop-plan.md
