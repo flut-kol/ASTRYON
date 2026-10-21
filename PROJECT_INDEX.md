@@ -46,7 +46,7 @@ Auth: external AAS (`/var/apps/astranex/aas-auth`), contract in `docs/architectu
 | `docs/tests/acceptance.md` | cross-component release acceptance matrix | DPP-011 | in progress; production/HA evidence pending |
 | `docs/errors/`, `docs/sdk/` | public error catalog and SDK generation contract | DPP-054 | in progress; generated clients pending |
 | `docs/onboarding/` | machine-source AAS and ingestion onboarding guide | DPP-054 | done; generated SDKs pending |
-| `libs/go-common/` | logging, shared AAS JWT verification, HTTP auth middleware | DPP-014 | in progress; `auth.Introspector`/`RequireActive` (opt-in L3, live-verified, wired into query-api via `AAS_INTROSPECTION_KEY_FILE`); DPoP not implemented, see `docs/architecture/dpop-plan.md` |
+| `libs/go-common/` | logging, shared AAS JWT verification, HTTP auth middleware | DPP-014 | in progress; `auth.Introspector`/`RequireActive` (opt-in L3, live-verified, wired into query-api via `AAS_INTROSPECTION_KEY_FILE`); DPoP core implemented (memory replay store; Redis store/live test pending), see `docs/architecture/dpop-plan.md` |
 
 ## Conventions
 Go 1.22 workspace (`go.work`), one module per service/lib; module prefix `github.com/astryon/<name>`. Ownership: one agent per subtree.

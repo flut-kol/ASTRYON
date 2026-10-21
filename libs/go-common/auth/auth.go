@@ -36,6 +36,8 @@ type Principal struct {
 	ClientID string
 	JTI      string
 	Scopes   []string
+	// Confirmation is the DPoP key thumbprint (cnf.jkt) when the token is sender-constrained.
+	Confirmation string
 }
 
 // HasScope reports whether p includes scope.
@@ -67,8 +69,18 @@ type Config struct {
 	JWKSMinRefresh time.Duration
 	JWKSMaxStale   time.Duration
 	ClockSkew      time.Duration
-	HTTPClient     *http.Client
-	Now            func() time.Time
+
+	// DPoP (RFC 9449, L2). Enabled when ReplayStore is set. PublicBaseURL (scheme://host[:port], as clients
+	// see it) rebuilds `htu`; Host/X-Forwarded-* are never trusted. RequireDPoP rejects Bearer tokens.
+	PublicBaseURL   string
+	ReplayStore     ReplayStore
+	RequireDPoP     bool
+	ProofMaxAge     time.Duration // default 60s
+	ProofFutureSkew time.Duration // default 5s
+	ReplayTTL       time.Duration // default 120s
+
+	HTTPClient *http.Client
+	Now        func() time.Time
 }
 
 type discovery struct {
@@ -117,6 +129,18 @@ func NewVerifier(ctx context.Context, cfg Config) (*Verifier, error) {
 	if cfg.JWKSMaxStale <= 0 {
 		cfg.JWKSMaxStale = time.Hour
 	}
+	if cfg.ProofMaxAge <= 0 {
+		cfg.ProofMaxAge = 60 * time.Second
+	}
+	if cfg.ProofFutureSkew <= 0 {
+		cfg.ProofFutureSkew = 5 * time.Second
+	}
+	if cfg.ReplayTTL <= 0 {
+		cfg.ReplayTTL = 120 * time.Second
+	}
+	if cfg.RequireDPoP && (cfg.ReplayStore == nil || cfg.PublicBaseURL == "") {
+		return nil, errors.New("auth: RequireDPoP needs ReplayStore and PublicBaseURL")
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
 	}
@@ -134,14 +158,25 @@ func NewVerifier(ctx context.Context, cfg Config) (*Verifier, error) {
 func (v *Verifier) Authenticate(r *http.Request) (Principal, error) {
 	authorization := r.Header.Get("Authorization")
 	parts := strings.Fields(authorization)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+	if len(parts) != 2 {
 		return Principal{}, ErrUnauthenticated
 	}
-	return v.Verify(r.Context(), parts[1])
+	switch {
+	case strings.EqualFold(parts[0], "DPoP"):
+		return v.authenticateDPoP(r, parts[1])
+	case strings.EqualFold(parts[0], "Bearer") && !v.cfg.RequireDPoP:
+		return v.Verify(r.Context(), parts[1])
+	}
+	return Principal{}, ErrUnauthenticated
 }
 
 // Verify validates token independently from HTTP middleware.
 func (v *Verifier) Verify(ctx context.Context, token string) (Principal, error) {
+	return v.verify(ctx, token, false)
+}
+
+// verify checks the access token; bound selects the DPoP flavour (typ DPoP + cnf.jkt) versus plain Bearer.
+func (v *Verifier) verify(ctx context.Context, token string, bound bool) (Principal, error) {
 	header, payload, signature, signed, err := splitJWT(token)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
@@ -155,16 +190,16 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Principal, error) 
 	if err != nil || !verifySignature(alg, key, signed, signature) {
 		return Principal{}, ErrUnauthenticated
 	}
-	return v.principal(payload)
+	return v.principal(payload, bound)
 }
 
-func (v *Verifier) principal(claims map[string]any) (Principal, error) {
+func (v *Verifier) principal(claims map[string]any, bound bool) (Principal, error) {
 	now := v.cfg.Now().UTC()
 	issuer, ok := claims["iss"].(string)
 	if !ok || issuer != v.issuer || !audienceContains(claims["aud"], v.cfg.Audience) {
 		return Principal{}, ErrUnauthenticated
 	}
-	if stringClaim(claims, "env") != v.cfg.Environment || !v.typeAllowed(stringClaim(claims, "typ")) {
+	if stringClaim(claims, "env") != v.cfg.Environment || !v.typeAllowed(stringClaim(claims, "typ"), bound) {
 		return Principal{}, ErrUnauthenticated
 	}
 	if len(v.cfg.AllowedAZP) > 0 && !contains(v.cfg.AllowedAZP, stringClaim(claims, "azp")) {
@@ -183,14 +218,21 @@ func (v *Verifier) principal(claims map[string]any) (Principal, error) {
 	if iat, ok := numericDate(claims["iat"]); !ok || iat.After(now.Add(v.cfg.ClockSkew)) {
 		return Principal{}, ErrUnauthenticated
 	}
-	p := Principal{TenantID: stringClaim(claims, "tenant_id"), Subject: stringClaim(claims, "sub"), ClientID: stringClaim(claims, "client_id"), JTI: stringClaim(claims, "jti"), Scopes: scopes(claims["scope"])}
+	jkt := confirmationJKT(claims)
+	if bound != (jkt != "") {
+		return Principal{}, ErrUnauthenticated // downgrade / unbound token under the DPoP scheme
+	}
+	p := Principal{Confirmation: jkt, TenantID: stringClaim(claims, "tenant_id"), Subject: stringClaim(claims, "sub"), ClientID: stringClaim(claims, "client_id"), JTI: stringClaim(claims, "jti"), Scopes: scopes(claims["scope"])}
 	if !isUUID(p.TenantID) || p.Subject == "" || p.JTI == "" {
 		return Principal{}, ErrUnauthenticated
 	}
 	return p, nil
 }
 
-func (v *Verifier) typeAllowed(typ string) bool {
+func (v *Verifier) typeAllowed(typ string, bound bool) bool {
+	if bound {
+		return typ == "DPoP"
+	}
 	if v.cfg.TokenType != "" {
 		return typ == v.cfg.TokenType
 	}
