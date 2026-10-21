@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/astryon/go-common/auth"
@@ -46,5 +47,19 @@ func TestDPoPConfig(t *testing.T) {
 	t.Setenv("AAS_REDIS_URL", "http://bad")
 	if _, err := dpopConfig(aasConfig()); err == nil {
 		t.Fatal("bad redis url accepted")
+	}
+}
+
+func TestDPoPRejectsMetrics(t *testing.T) {
+	d := &dpopRejects{}
+	d.Inc("replay")
+	d.Inc("replay")
+	d.Inc("attacker-chosen text")
+	var b strings.Builder
+	d.WritePrometheus(&b)
+	for _, want := range []string{`{reason="replay"} 2`, `{reason="other"} 1`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("missing %s in\n%s", want, b.String())
+		}
 	}
 }

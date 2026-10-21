@@ -24,7 +24,7 @@ With `QUERY_PG_URL` set (PostgreSQL role WITHOUT BYPASSRLS; table `source_active
 ## Run
 Env: `LISTEN_ADDR` (:8082), `CH_URL`, `CH_DATABASE`, `CH_USER`, `CH_PASSWORD`.
 Auth (token needs scope `astryon:query:read` and a tenant claim): `AAS_BASE_URL`, `AAS_ISSUER`, `AAS_AUDIENCE`, `AAS_ENV`,
-`AAS_ALLOWED_AZP`. Optional L3 (live token status, fail closed on AAS outage): `AAS_INTROSPECTION_KEY_FILE` (enables it), `AAS_INTROSPECTION_CLIENT_ID`, `AAS_INTROSPECTION_KEY_ID`. Optional DPoP (L2, `Authorization: DPoP` + `DPoP` proof header): `AAS_PUBLIC_BASE_URL` (enables it), `AAS_REDIS_URL` + `AAS_REDIS_CA_FILE` (shared replay store; per-instance otherwise), `AAS_REQUIRE_DPOP=true`. Optional: `QUERY_PG_URL`, `QUERY_VERSION_CACHE_SECONDS`. Dev only: `QUERY_DEV_TOKEN` + `QUERY_DEV_TENANT`. With neither, every request is rejected.
+`AAS_ALLOWED_AZP`. Optional L3 (live token status, fail closed on AAS outage): `AAS_INTROSPECTION_KEY_FILE` (enables it), `AAS_INTROSPECTION_CLIENT_ID`, `AAS_INTROSPECTION_KEY_ID`. Optional DPoP (L2, `Authorization: DPoP` + `DPoP` proof header): `AAS_PUBLIC_BASE_URL` (enables it), `AAS_REDIS_URL` + `AAS_REDIS_CA_FILE` (shared replay store; per-instance otherwise), `AAS_REQUIRE_DPOP=true`. `QUERY_METRICS_ADDR` (e.g. `127.0.0.1:9102`) serves `/metrics` with `astryon_query_api_dpop_rejected_total{reason}`; off when unset. Optional: `QUERY_PG_URL`, `QUERY_VERSION_CACHE_SECONDS`. Dev only: `QUERY_DEV_TOKEN` + `QUERY_DEV_TENANT`. With neither, every request is rejected.
 
 Tenant protection (DPP-050; in-memory per instance unless `QUERY_REDIS_URL` is set, keyed only by the verified token's tenant, idle tenants evicted;
 over limit -> HTTP 429 `rate_limited` with `Retry-After`, or `too_many_concurrent_queries`):

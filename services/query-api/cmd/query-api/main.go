@@ -36,11 +36,14 @@ func (denyAll) Authenticate(*http.Request) (query.Principal, error) {
 
 func main() {
 	var auth query.Authenticator = denyAll{}
+	rejects := &dpopRejects{}
+	serveMetrics(rejects)
 	if os.Getenv("AAS_BASE_URL") != "" {
 		cfg, err := dpopConfig(aasConfig())
 		if err != nil {
 			log.Fatalf("aas dpop: %v", err)
 		}
+		cfg.OnDPoPReject = rejects.Inc
 		v, err := goauth.NewVerifier(context.Background(), cfg)
 		if err != nil {
 			log.Fatalf("aas: %v", err)
