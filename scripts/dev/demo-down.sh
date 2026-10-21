@@ -6,7 +6,10 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-astryon-demo}"
 DEMO_DIR="${DEMO_DIR:-${TMPDIR:-/tmp}/astryon-demo}"
 for f in "$DEMO_DIR"/pids/*.pid; do
   [ -f "$f" ] || continue
-  pid=$(cat "$f"); kill "$pid" 2>/dev/null && echo "stopped $(basename "$f" .pid) ($pid)" || true; rm -f "$f"
+  pid=$(cat "$f")
+  # admin-ui pid is the npm wrapper: also stop its children (vite)
+  pkill -P "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null && echo "stopped $(basename "$f" .pid) ($pid)" || true; rm -f "$f"
 done
 case "${1:-}" in
   --all) docker compose -f "$ROOT/infra/docker/docker-compose.dev.yml" down ;;

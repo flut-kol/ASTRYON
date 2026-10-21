@@ -7,7 +7,8 @@ Vanilla TypeScript + Vite, no runtime dependencies. Hash routes: Overview, Uploa
 Override with env `PROXY_GATEWAY|PROXY_FILES|PROXY_QUERY|PROXY_CONNECTORS|PROXY_S3`. `npm run typecheck`, `npm test`, `npm run build`.
 
 ## Auth
-Paste a bearer token in the header box (dev: the static demo token; later an AAS access token, optionally returned in `#token=` after `VITE_LOGIN_URL`).
+Dev: `scripts/dev/demo-up.sh` generates a random token once (`openssl rand -hex 24`, file `$DEMO_DIR/dev-token`, mode 0600, reused on restart), configures the services with it and starts this Vite server with env `ADMIN_UI_DEV_TOKEN`; the dev proxy then adds `Authorization: Bearer <token>` server-side to `/api/*` (not `/api/s3`) when the request has none, so no pasting is needed. The token is not bundled into client JS; the server binds 127.0.0.1 only. Running `npm run dev` by hand without that env var behaves as before.
+Override: paste a bearer token in the header box (takes precedence over the injected one; dev: the static demo token; later an AAS access token, optionally returned in `#token=` after `VITE_LOGIN_URL`).
 Kept in memory + sessionStorage only; never in source. The UI never sends tenant_id (comes from token claims server-side).
 
 ## Pages

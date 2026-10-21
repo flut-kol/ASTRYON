@@ -3,7 +3,16 @@ import { defineConfig } from 'vite';
 // Targets default to the demo stack ports; override with env vars.
 const t = (name: string, def: string) => process.env[name] ?? def;
 const strip = (prefix: string) => (p: string) => p.replace(new RegExp(`^${prefix}`), '');
-const px = (prefix: string, target: string) => ({ target, changeOrigin: true, rewrite: strip(prefix) });
+// DEV ONLY: demo-up.sh exports ADMIN_UI_DEV_TOKEN; the proxy adds it server-side as a bearer token when the request has none
+// (the manual token box still overrides). Read at server start, no VITE_ prefix, so never bundled into client JS.
+const devToken = process.env.ADMIN_UI_DEV_TOKEN;
+const px = (prefix: string, target: string, auth = true) => ({
+  target, changeOrigin: true, rewrite: strip(prefix),
+  configure: (proxy: any) => {
+    if (!devToken || !auth) return;
+    proxy.on('proxyReq', (req: any) => { if (!req.getHeader('authorization')) req.setHeader('authorization', `Bearer ${devToken}`); });
+  },
+});
 export default defineConfig({
   server: {
     proxy: {
@@ -12,7 +21,7 @@ export default defineConfig({
       '/api/query': px('/api/query', t('PROXY_QUERY', 'http://127.0.0.1:18082')),
       '/api/connectors': px('/api/connectors', t('PROXY_CONNECTORS', 'http://127.0.0.1:8089')),
       // Pre-signed part URLs point at S3 directly; the page rewrites them to /api/s3 (dev only, avoids S3 CORS).
-      '/api/s3': px('/api/s3', t('PROXY_S3', 'http://127.0.0.1:19200')),
+      '/api/s3': px('/api/s3', t('PROXY_S3', 'http://127.0.0.1:19200'), false),
     },
   },
   test: { environment: 'node' },
