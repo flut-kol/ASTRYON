@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"io"
+	"unicode/utf8"
 )
 
 // CSVRecord is one RFC 4180 CSV record. Raw excludes its terminating newline.
@@ -56,6 +57,8 @@ func CSVFrom(r io.Reader, maxRecordBytes int, startOffset int64, startNumber int
 		offset += consumed
 		if errors.Is(err, ErrRecordTooLarge) {
 			record.Err = err
+		} else if !utf8.Valid(raw) {
+			record.Err = ErrInvalidEncoding
 		} else if parsed, parseErr := csv.NewReader(bytes.NewReader(raw)).Read(); parseErr != nil {
 			record.Err = ErrCSVMalformed // never wrap parseErr: callers must not see content-derived text
 		} else {

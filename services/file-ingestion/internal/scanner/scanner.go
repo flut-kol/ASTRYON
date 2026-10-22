@@ -40,6 +40,72 @@ type Provider interface {
 
 var ErrCircuitOpen = errors.New("scanner: circuit open")
 
+// RateLimited bounds pressure on an external scanner. The limiter is per
+// provider, so one unhealthy engine cannot consume another engine's budget.
+type RateLimited struct {
+	Provider          Provider
+	MaxConcurrent     int
+	RequestsPerSecond int
+	sem               chan struct{}
+	mu                sync.Mutex
+	next              time.Time
+}
+
+func (r *RateLimited) Name() string {
+	if r == nil || r.Provider == nil {
+		return "unknown"
+	}
+	return r.Provider.Name()
+}
+
+func (r *RateLimited) Scan(ctx context.Context, f File) Verdict {
+	if r == nil || r.Provider == nil {
+		return Verdict{Status: ScanError, Provider: "unknown", ReasonCode: "not_configured"}
+	}
+	max := r.MaxConcurrent
+	if max <= 0 {
+		max = 4
+	}
+	if r.sem == nil {
+		r.mu.Lock()
+		if r.sem == nil {
+			r.sem = make(chan struct{}, max)
+		}
+		r.mu.Unlock()
+	}
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+	case <-ctx.Done():
+		return Verdict{Status: ScanError, Provider: r.Name(), Retryable: true, ReasonCode: "rate_limited"}
+	}
+
+	rate := r.RequestsPerSecond
+	if rate <= 0 {
+		rate = 10
+	}
+	interval := time.Second / time.Duration(rate)
+	r.mu.Lock()
+	now := time.Now()
+	start := now
+	if r.next.After(start) {
+		start = r.next
+	}
+	r.next = start.Add(interval)
+	wait := time.Until(start)
+	r.mu.Unlock()
+	if wait > 0 {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			return Verdict{Status: ScanError, Provider: r.Name(), Retryable: true, ReasonCode: "rate_limited"}
+		}
+	}
+	return r.Provider.Scan(ctx, f)
+}
+
 // CircuitBreaker turns provider outages into bounded retryable verdicts.
 type CircuitBreaker struct {
 	Provider Provider

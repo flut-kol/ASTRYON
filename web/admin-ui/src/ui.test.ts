@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, call, parseError } from './http';
 import { parseProm } from './prom';
-import { labelSummary, parseTags, planParts, rewritePartUrl, sha256Hex, uploadFile } from './upload';
+import { labelSummary, parseTags, planParts, rewritePartUrl, sha256Hex, sourceTypeForFile, uploadFile } from './upload';
 import { localToRfc3339, queryEvents } from './query';
 import { takeTokenFromHash } from './auth';
 
@@ -45,6 +45,8 @@ describe('helpers', () => {
     expect(await sha256Hex(new TextEncoder().encode('abc').buffer as ArrayBuffer)).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
     expect(localToRfc3339('')).toBeUndefined();
     expect(takeTokenFromHash('#token=a%2Bb')).toBe('a+b');
+    expect(sourceTypeForFile(new File(['x'], 'photo.jpg', { type: 'image/jpeg' }), 'unknown')).toBe('media_meta');
+    expect(sourceTypeForFile(new File(['x'], 'photo.jpg', { type: 'image/jpeg' }), 'geo')).toBe('geo');
   });
 });
 

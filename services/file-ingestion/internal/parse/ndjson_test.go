@@ -18,6 +18,17 @@ func TestNDJSONQuarantinesBadRecordAndContinues(t *testing.T) {
 	}
 }
 
+func TestNDJSONRejectsInvalidUTF8(t *testing.T) {
+	data := append([]byte("{\"ok\":1}\n"), []byte{'{', '"', 'x', '"', ':', 0xff, '}'}...)
+	var got []Record
+	if err := NDJSON(bytes.NewReader(data), 64, func(r Record) error { got = append(got, r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !errors.Is(got[1].Err, ErrInvalidEncoding) {
+		t.Fatalf("records=%+v", got)
+	}
+}
+
 func TestNDJSONBoundsRecordMemory(t *testing.T) {
 	input := "{\"a\":1}\n" + strings.Repeat("x", 128) + "\n{\"b\":2}\n"
 	var got []Record

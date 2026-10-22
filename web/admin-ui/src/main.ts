@@ -6,7 +6,7 @@ import { applyTheme, getTheme, setTheme, THEMES, type Theme } from './theme';
 import { getSource, getToken, loginUrl, setSource, setToken, takeTokenFromHash } from './auth';
 import { ApiError, type Ctx } from './http';
 import { parseProm } from './prom';
-import { getUpload, listUploads, parseTags, previewUpload, SENSITIVITIES, SOURCE_TYPES, STATUSES, uploadFile, type UploadItem } from './upload';
+import { getUpload, listLocations, listUploads, parseTags, previewUpload, SENSITIVITIES, SOURCE_TYPES, STATUSES, sourceTypeForFile, uploadFile, type LocationPoint, type UploadItem } from './upload';
 import { fmtNum, lastHours, localToRfc3339, metricsSummary, qualitySummary, queryEvents } from './query';
 import { CONNECTOR_KINDS, createConnector, listConnectors, parseConfig, setConnectorEnabled, validateConnector } from './connectors';
 import { createExport, getExport, isTerminal, knownExports, rememberExport, validateSpec, type ExportJob } from './exports';
@@ -38,7 +38,7 @@ if (frag) { setToken(frag); history.replaceState(null, '', location.pathname + l
 
 const ROUTES: [string, string, (el: HTMLElement) => void | Promise<void>][] = [
   ['overview', 'Overview', overview], ['uploads', 'Uploads', uploads], ['events', 'Events', events],
-  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['replays', 'Replays', replaysPage], ['jobs', 'Jobs', jobsPage], ['sources', 'Sources', sourcesPage],
+  ['quality', 'Quality', quality], ['map', 'Map', locationsPage], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['replays', 'Replays', replaysPage], ['jobs', 'Jobs', jobsPage], ['sources', 'Sources', sourcesPage],
   ['files', 'File API', filesPage], ['search', 'Text search', textSearchPage], ['access', 'Access & roles', accessPage],
 ];
 
@@ -119,8 +119,8 @@ function uploadForm(onDone: () => void) {
   const sens = h('select', {}, h('option', { value: '' }, t('(profile default)')), SENSITIVITIES.map((x) => h('option', { value: x }, human('sensitivity', x))));
   const tags = h('input', { size: '30', placeholder: 'purpose=demo,team=ops' });
   const log = live('mut');
-  const fileIn = h('input', { type: 'file', 'aria-label': t('Choose CSV or NDJSON files to upload'), accept: '.csv,.ndjson,.jsonl,text/csv,application/x-ndjson', multiple: true });
-  const drop = h('div', { class: 'drop', role: 'group', 'aria-label': t('File drop zone (or use the file chooser)') }, t('Drop CSV / NDJSON files here or '), fileIn);
+  const fileIn = h('input', { type: 'file', 'aria-label': t('Choose data, document or archive files to upload'), accept: '.csv,.ndjson,.jsonl,.pdf,.jpg,.jpeg,.png,.zip,.tar,.tgz,.gz,text/csv,application/x-ndjson,application/pdf,image/jpeg,image/png,application/zip,application/x-tar,application/gzip', multiple: true });
+  const drop = h('div', { class: 'drop', role: 'group', 'aria-label': t('File drop zone (or use the file chooser)') }, t('Drop CSV, NDJSON, PDF, image or archive files here or '), fileIn);
   const run = async (files: File[]) => {
     clear(log);
     let tg: Record<string, string>;
@@ -129,7 +129,7 @@ function uploadForm(onDone: () => void) {
     for (const f of files) {
       const line = h('div', {}, `${f.name}: `); const msg = h('span', {}, t('starting')); line.append(msg); log.append(line);
       try {
-        const r = await uploadFile(ctx, B.files, { file: f, source_id: src.value.trim(), source_type: st.value, sensitivity: sens.value || undefined, tags: tg }, { s3Proxy: B.s3Proxy, onProgress: (m) => { msg.textContent = m; } });
+        const r = await uploadFile(ctx, B.files, { file: f, source_id: src.value.trim(), source_type: sourceTypeForFile(f, st.value), sensitivity: sens.value || undefined, tags: tg }, { s3Proxy: B.s3Proxy, onProgress: (m) => { msg.textContent = m; } });
         msg.textContent = t('queued, file {file}, job {job}', { file: r.file_object_id, job: r.job_id }); msg.className = 'ok';
       } catch (e) { msg.replaceWith(errBox(e)); }
     }
@@ -186,6 +186,92 @@ async function uploads(el: HTMLElement) {
   await load();
 }
 
+async function locationsPage(el: HTMLElement) {
+  el.append(h('h2', {}, t('Map')), h('p', { class: 'hero-copy' }, t('GPS metadata from files in the current tenant. Coordinate values are not shown in the upload table.')));
+  const out = live(); out.append(t('Loading...'));
+  try {
+    const result = await listLocations(ctx, B.files);
+    clear(out);
+    if (!result.items.length) { out.append(h('div', { class: 'card mut' }, t('No file coordinates found yet. Upload a photo or document with GPS metadata.'))); return; }
+    const map = createTileMap(result.items);
+    const rows = result.items.map((p: LocationPoint) => [h('button', { class: 'lnk', onclick: () => { location.hash = '#/uploads'; } }, p.file_object_id.slice(0, 8)), p.latitude.toFixed(5), p.longitude.toFixed(5)]);
+    out.append(h('div', { class: 'card' }, h('div', { class: 'card-heading' }, h('div', {}, h('h3', {}, t('File coordinates')), h('p', { class: 'mut small' }, t('{n} coordinate point(s)', { n: result.items.length }))), h('span', { class: 'status-pill ok' }, t('tenant-scoped'))), map, table(['file', 'latitude', 'longitude'], rows, 'File coordinates')));
+  } catch (e) { clear(out); out.append(errBox(e)); }
+  el.append(out);
+}
+
+type TilePoint = LocationPoint;
+const TILE_SIZE = 256;
+const TILE_BASE = env.VITE_MAP_TILE_URL ?? 'https://map.lan/{z}/{x}/{y}.png';
+
+function createTileMap(points: TilePoint[]) {
+  const viewport = h('div', { class: 'geo-map', role: 'application', 'aria-label': t('Tenant file locations map') });
+  const layer = h('div', { class: 'geo-tile-layer' });
+  const markers = h('div', { class: 'geo-marker-layer' });
+  const zoomLabel = h('span', { class: 'geo-zoom' }, '');
+  const zoomIn = h('button', { class: 'geo-control', title: t('Zoom in'), 'aria-label': t('Zoom in') }, '+');
+  const zoomOut = h('button', { class: 'geo-control', title: t('Zoom out'), 'aria-label': t('Zoom out') }, '−');
+  viewport.append(layer, markers, h('div', { class: 'geo-controls' }, zoomIn, zoomOut, zoomLabel), h('div', { class: 'geo-attribution' }, h('a', { href: 'https://map.lan', target: '_blank', rel: 'noreferrer' }, 'Internal map')));
+
+  let zoom = points.length === 1 ? 12 : 3;
+  let center = points.length === 1 ? { lat: points[0].latitude, lon: points[0].longitude } : { lat: 0, lon: 0 };
+  if (points.length > 1) {
+    center = { lat: points.reduce((s, p) => s + p.latitude, 0) / points.length, lon: points.reduce((s, p) => s + p.longitude, 0) / points.length };
+    const spread = Math.max(...points.map((p) => Math.abs(p.latitude - center.lat) + Math.abs(p.longitude - center.lon)), 1);
+    zoom = Math.max(2, Math.min(12, Math.floor(Math.log2(360 / spread))));
+  }
+  const project = (lat: number, lon: number, z: number) => {
+    const scale = TILE_SIZE * 2 ** z;
+    const safeLat = Math.max(-85.0511, Math.min(85.0511, lat));
+    const x = (lon + 180) / 360 * scale;
+    const y = (1 - Math.asinh(Math.tan(safeLat * Math.PI / 180)) / Math.PI) / 2 * scale;
+    return { x, y };
+  };
+  const render = () => {
+    const rect = viewport.getBoundingClientRect();
+    const centerPx = project(center.lat, center.lon, zoom);
+    const startX = Math.floor((centerPx.x - rect.width / 2) / TILE_SIZE) - 1;
+    const startY = Math.floor((centerPx.y - rect.height / 2) / TILE_SIZE) - 1;
+    const endX = Math.floor((centerPx.x + rect.width / 2) / TILE_SIZE) + 1;
+    const endY = Math.floor((centerPx.y + rect.height / 2) / TILE_SIZE) + 1;
+    clear(layer); clear(markers);
+    const world = 2 ** zoom;
+    for (let ty = startY; ty <= endY; ty++) for (let tx = startX; tx <= endX; tx++) {
+      const wrappedX = ((tx % world) + world) % world;
+      if (ty < 0 || ty >= world) continue;
+      const img = h('img', { class: 'geo-tile', draggable: 'false', src: TILE_BASE.replace('{z}', String(zoom)).replace('{x}', String(wrappedX)).replace('{y}', String(ty)), alt: '' });
+      img.style.left = `${tx * TILE_SIZE - (centerPx.x - rect.width / 2)}px`;
+      img.style.top = `${ty * TILE_SIZE - (centerPx.y - rect.height / 2)}px`;
+      layer.append(img);
+    }
+    for (const p of points) {
+      const pos = project(p.latitude, p.longitude, zoom);
+      const marker = h('button', { class: 'geo-point', title: `${p.file_object_id} (${p.latitude.toFixed(5)}, ${p.longitude.toFixed(5)})`, 'aria-label': t('Open file {id}', { id: p.file_object_id }), onclick: () => { location.hash = '#/uploads'; } }, '');
+      marker.style.left = `${pos.x - (centerPx.x - rect.width / 2)}px`;
+      marker.style.top = `${pos.y - (centerPx.y - rect.height / 2)}px`;
+      markers.append(marker);
+    }
+    zoomLabel.textContent = `z${zoom}`;
+  };
+  let dragging = false; let lastX = 0; let lastY = 0;
+  viewport.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; viewport.setPointerCapture(e.pointerId); });
+  viewport.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const scale = TILE_SIZE * 2 ** zoom; const c = project(center.lat, center.lon, zoom);
+    const next = { x: c.x - (e.clientX - lastX), y: c.y - (e.clientY - lastY) };
+    const lat = 180 / Math.PI * Math.atan(Math.sinh(Math.PI * (1 - 2 * next.y / scale)));
+    center = { lat: Math.max(-85, Math.min(85, lat)), lon: next.x / scale * 360 - 180 };
+    lastX = e.clientX; lastY = e.clientY; render();
+  });
+  viewport.addEventListener('pointerup', () => { dragging = false; });
+  viewport.addEventListener('pointercancel', () => { dragging = false; });
+  viewport.addEventListener('wheel', (e) => { e.preventDefault(); zoom = Math.max(1, Math.min(19, zoom + (e.deltaY < 0 ? 1 : -1))); render(); }, { passive: false });
+  zoomIn.addEventListener('click', () => { zoom = Math.min(19, zoom + 1); render(); });
+  zoomOut.addEventListener('click', () => { zoom = Math.max(1, zoom - 1); render(); });
+  requestAnimationFrame(render);
+  return viewport;
+}
+
 function detailCard(u: UploadItem) {
   const j = u.job;
   const quarantined = j?.status === 'QUARANTINED';
@@ -206,6 +292,7 @@ function detailCard(u: UploadItem) {
       [t('status'), h('span', { class: quarantined ? 'warn' : j?.status === 'FAILED' ? 'err' : '' }, human('status', j?.status) || '-')],
       [t('error'), j?.error ? (errorText(j.error, 0) ?? human('reason', j.error)) : '-'],
       [t('content labels (counts only)'), Object.entries(j?.labels ?? {}).map(([k, v]) => `${human('label', k)}: ${v.count} (${t('{n} fields', { n: v.fields.length })})`).join('; ') || '-'],
+      [t('metadata classification'), j?.metadata?.tags?.join(', ') || '-'],
       [t('profile'), u.profile ? `${t('retention')}: ${human('retention', u.profile.retention_class) || '-'}; ${t('export')}: ${u.profile.export_allowed === undefined ? '-' : u.profile.export_allowed ? t('allowed') : t('not allowed')}` : '-'],
     ], 'Upload details'), quarantined ? h('p', { class: 'warn' }, t('Held back by content policy: nothing reached the sink.')) : null,
     h('div', { class: 'preview-panel' }, h('div', { class: 'card-heading' }, h('div', {}, h('h4', {}, t('File content')), h('p', { class: 'mut small' }, t('Only bounded, safe text is shown; sensitive values remain hidden.'))), previewButton), previewOut));
@@ -578,6 +665,7 @@ const ICONS: Record<string, string[]> = {
   uploads: ['M12 16V4', 'M7 9l5-5 5 5', 'M4 20h16'],
   events: ['M3 12h4l3-8 4 16 3-8h4'],
   quality: ['M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z', 'M9 12l2 2 4-4'],
+  map: ['M4 5l6-2 4 2 6-2v16l-6 2-4-2-6 2z', 'M10 3v16', 'M14 5v16'],
   connectors: ['M9 7V3', 'M15 7V3', 'M6 7h12v4a6 6 0 0 1-12 0z', 'M12 17v4'],
   exports: ['M12 4v12', 'M7 11l5 5 5-5', 'M4 20h16'],
   quarantine: ['M12 3l9 16H3z', 'M12 10v4', 'M12 17v.01'],
@@ -620,7 +708,7 @@ function prefs(): HTMLElement {
 }
 // Shared page shell: skip link, banner, labelled navigation with aria-current, focusable main landmark.
 function shell(root: HTMLElement, page: string, session: HTMLElement): HTMLElement {
-  const groups: [string, string[]][] = [['Monitor', ['overview', 'events', 'quality', 'search']], ['Operate', ['files', 'uploads', 'jobs', 'exports', 'quarantine', 'replays']], ['Manage', ['connectors', 'sources', 'access']]];
+  const groups: [string, string[]][] = [['Monitor', ['overview', 'events', 'quality', 'map', 'search']], ['Operate', ['files', 'uploads', 'jobs', 'exports', 'quarantine', 'replays']], ['Manage', ['connectors', 'sources', 'access']]];
   const nav = h('nav', { 'aria-label': t('Main') }, groups.map(([label, keys]) => h('div', { class: 'nav-group' },
     h('span', { class: 'nav-label' }, t(label)), keys.map((key) => { const route = ROUTES.find(([k]) => k === key)!; return h('a', { href: `#/${key}`, title: t(route[1]), class: key === page ? 'on' : '', ...(key === page ? { 'aria-current': 'page' } : {}) }, svg(ICONS[key] ?? ICONS.jobs, 18), h('span', {}, t(route[1]))); }))));
   const main = h('main', { id: 'main', tabindex: '-1' });

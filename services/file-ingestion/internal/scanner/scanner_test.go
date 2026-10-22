@@ -241,6 +241,20 @@ func TestTaggedPasswordCandidatesRejectInvalidCampaign(t *testing.T) {
 	}
 }
 
+func TestRateLimitedStopsCanceledWaitWithoutCallingProvider(t *testing.T) {
+	p := &countingProvider{verdict: Verdict{Status: Clean, Provider: "fake"}}
+	r := &RateLimited{Provider: p, MaxConcurrent: 1, RequestsPerSecond: 1}
+	if got := r.Scan(context.Background(), File{Path: "/tmp/a"}); got.Status != Clean {
+		t.Fatalf("first scan = %+v", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := r.Scan(ctx, File{Path: "/tmp/b"})
+	if got.ReasonCode != "rate_limited" || !got.Retryable || p.calls != 1 {
+		t.Fatalf("canceled rate wait = %+v calls=%d", got, p.calls)
+	}
+}
+
 type passwordProvider struct{ candidates []string }
 
 func (p passwordProvider) Candidates(context.Context, string, string) ([]string, error) {

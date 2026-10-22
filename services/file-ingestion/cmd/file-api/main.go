@@ -131,10 +131,12 @@ func main() {
 	c := &s3.Client{Endpoint: must("FILE_S3_ENDPOINT"), Bucket: bucket, Region: os.Getenv("FILE_S3_REGION"),
 		Creds: s3.Creds{AccessKey: must("FILE_S3_ACCESS_KEY"), SecretKey: must("FILE_S3_SECRET_KEY")}}
 	types := map[string]bool{}
-	for _, t := range strings.Split(env("FILE_CONTENT_TYPES", "application/x-ndjson,text/csv"), ",") {
+	for _, t := range strings.Split(env("FILE_CONTENT_TYPES", "application/x-ndjson,text/csv,application/pdf,image/jpeg,image/png"), ",") {
 		types[strings.TrimSpace(t)] = true
 	}
-	archiveMode := env("FILE_ARCHIVE_MODE", "")
+	// Safe archive handling is metadata-only and bounded; operators can disable
+	// it explicitly with FILE_ARCHIVE_MODE=disabled.
+	archiveMode := env("FILE_ARCHIVE_MODE", "inspect")
 	if archiveMode == "inspect" {
 		for _, t := range []string{"application/zip", "application/x-tar", "application/tar", "application/gzip", "application/x-gzip"} {
 			types[t] = true

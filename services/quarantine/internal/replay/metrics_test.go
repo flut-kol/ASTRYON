@@ -46,4 +46,8 @@ func TestMetricsCountOutcomesWithoutIdentityLabels(t *testing.T) {
 		!strings.Contains(out, `astryon_quarantine_replay_candidates_bucket{le="+Inf"}`) || strings.Contains(out, tenantA) {
 		t.Fatalf("bad exposition:\n%s", out)
 	}
+	if !strings.Contains(out, `astryon_quarantine_journal_records_total{outcome="inserted"}`) ||
+		!strings.Contains(out, "astryon_quarantine_journal_commit_errors_total") {
+		t.Fatalf("journal metrics missing:\n%s", out)
+	}
 }

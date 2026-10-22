@@ -130,7 +130,7 @@ func (d *defender) scanFiles(ctx context.Context, fileNames []string) (string, e
 	return string(output), nil
 }
 
-func (d *defender) parseFilesOutput(output string, fileNames []string) ([]FileScanResult, error) {
+func (d *defender) parseFilesOutput(output string, _ ...[]string) ([]FileScanResult, error) {
 	regexPath := regexp.MustCompile(`main\(\): Scanning`)
 	indexes := regexPath.FindAllStringSubmatchIndex(output, -1)
 	if len(indexes) == 0 {

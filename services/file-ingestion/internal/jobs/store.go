@@ -87,9 +87,12 @@ const (
 		VALUES ($1::uuid, '` + Kind + `', 'QUEUED', $2::uuid, $3::uuid, $3)
 		ON CONFLICT (tenant_id, kind, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
 		RETURNING id::text`
-	sqlRetryExisting = `UPDATE jobs SET status = 'QUEUED', attempt_count = 0, run_after = now(), finished_at = NULL,
+	// Keep attempt_count monotonic when re-queueing an existing job. Resetting it to
+	// zero reuses a job_attempts.attempt_no that is protected by a unique key.
+	sqlRetryExisting = `UPDATE jobs SET status = 'QUEUED', run_after = now(), finished_at = NULL,
 		last_error = NULL, locked_by = NULL, locked_until = NULL
-		WHERE tenant_id = $1::uuid AND kind = '` + Kind + `' AND file_object_id = $3::uuid AND status IN ('FAILED','QUARANTINED')
+		WHERE tenant_id = $1::uuid AND kind = '` + Kind + `' AND file_object_id = $3::uuid
+		AND (status IN ('FAILED','QUARANTINED') OR (status = 'SUCCEEDED' AND EXISTS (SELECT 1 FROM file_objects f WHERE f.id = jobs.file_object_id AND f.tenant_id = jobs.tenant_id AND f.source_type = 'media_meta')))
 		RETURNING id::text`
 	sqlAttempt = `INSERT INTO job_attempts (tenant_id, job_id, attempt_no, status, worker_id) VALUES ($1::uuid, $2::uuid, $3, 'RUNNING', $4)`
 
@@ -99,11 +102,12 @@ const (
 	sqlCheckpoint = `UPDATE jobs SET payload = jsonb_set(payload, '{checkpoint}', $5::jsonb), events_processed = events_processed + $6,
 		events_failed = events_failed + $7, locked_until = now() + make_interval(secs => $8),
 		content_labels = CASE WHEN $9::jsonb = '{}'::jsonb THEN content_labels ELSE $9::jsonb END` + fenced
-	sqlLabelsGet  = `SELECT content_labels::text FROM jobs` + fenced + ` FOR UPDATE`
-	sqlLabelsSet  = `UPDATE jobs SET content_labels = $5::jsonb` + fenced
-	sqlQuarantine = `UPDATE jobs SET status = 'QUARANTINED', finished_at = now(), last_error = $5, content_labels = $6::jsonb, locked_by = NULL, locked_until = NULL` + fenced
-	sqlRaise      = `UPDATE file_objects SET sensitivity = 'restricted' WHERE id = $1::uuid AND tenant_id = $2::uuid`
-	sqlJobInfo    = `SELECT id::text, status::text, COALESCE(last_error,''), content_labels::text FROM jobs
+	sqlLabelsGet   = `SELECT content_labels::text FROM jobs` + fenced + ` FOR UPDATE`
+	sqlLabelsSet   = `UPDATE jobs SET content_labels = $5::jsonb` + fenced
+	sqlMetadataSet = `UPDATE jobs SET metadata = $5::jsonb` + fenced
+	sqlQuarantine  = `UPDATE jobs SET status = 'QUARANTINED', finished_at = now(), last_error = $5, content_labels = $6::jsonb, locked_by = NULL, locked_until = NULL` + fenced
+	sqlRaise       = `UPDATE file_objects SET sensitivity = 'restricted' WHERE id = $1::uuid AND tenant_id = $2::uuid`
+	sqlJobInfo     = `SELECT id::text, status::text, COALESCE(last_error,''), content_labels::text, metadata::text FROM jobs
 		WHERE tenant_id = $1::uuid AND kind = '` + Kind + `' AND file_object_id = $2::uuid AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1`
 	sqlSucceed = `UPDATE jobs SET status = 'SUCCEEDED', finished_at = now(), locked_by = NULL, locked_until = NULL, last_error = NULL` + fenced
 	sqlRetry   = `UPDATE jobs SET status = 'RETRYING', run_after = now() + make_interval(secs => $5), last_error = $6, locked_by = NULL, locked_until = NULL` + fenced
@@ -125,6 +129,18 @@ type Store struct {
 	WorkerID string        // unique per replica
 	Lease    time.Duration // default 60s
 	Backoff  func(attempt int) time.Duration
+}
+
+// SetMetadata stores only bounded, validated document metadata for the job.
+func (s *Store) SetMetadata(ctx context.Context, j Job, m DocumentMetadata) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return s.inTx(ctx, true, j.TenantID, func(tx Tx) error {
+		_, err := tx.Exec(ctx, sqlMetadataSet, j.ID, j.TenantID, s.WorkerID, j.Fence, b)
+		return err
+	})
 }
 
 func (s *Store) lease() float64 {
@@ -271,6 +287,19 @@ func (s *Store) Quarantine(ctx context.Context, j Job, code string, labels class
 type Summary struct {
 	ID, Status, Error string
 	Labels            classify.Labels
+	Metadata          DocumentMetadata
+}
+
+type DocumentCoordinate struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+type DocumentMetadata struct {
+	Format      string               `json:"format,omitempty"`
+	Coordinates []DocumentCoordinate `json:"coordinates,omitempty"`
+	Tags        []string             `json:"tags,omitempty"`
+	Truncated   bool                 `json:"truncated,omitempty"`
 }
 
 // ErrNoSummary means the file has no job yet.
@@ -279,9 +308,9 @@ var ErrNoSummary = errors.New("jobs: no job for file object")
 // Describe returns the latest process_file job of a file object for the tenant (labels: counts and field names only).
 func (s *Store) Describe(ctx context.Context, tenant, fileObject string) (Summary, error) {
 	var out Summary
-	var raw string
+	var raw, meta string
 	err := s.inTx(ctx, false, tenant, func(tx Tx) error {
-		return tx.QueryRow(ctx, sqlJobInfo, tenant, fileObject).Scan(&out.ID, &out.Status, &out.Error, &raw)
+		return tx.QueryRow(ctx, sqlJobInfo, tenant, fileObject).Scan(&out.ID, &out.Status, &out.Error, &raw, &meta)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Summary{}, ErrNoSummary
@@ -290,6 +319,7 @@ func (s *Store) Describe(ctx context.Context, tenant, fileObject string) (Summar
 		return Summary{}, err
 	}
 	out.Labels = classify.Labels{}
+	_ = json.Unmarshal([]byte(meta), &out.Metadata)
 	_ = json.Unmarshal([]byte(raw), &out.Labels)
 	return out, nil
 }

@@ -25,14 +25,16 @@ const (
 
 // Config is safe to log only through Summary. It contains no credentials.
 type Config struct {
-	Mode            Mode
-	DefenderURL     string
-	ClamAVURL       string
-	Timeout         time.Duration
-	StageDir        string
-	MaxStageBytes   int64
-	CircuitFailures int
-	CircuitCooldown time.Duration
+	Mode              Mode
+	DefenderURL       string
+	ClamAVURL         string
+	Timeout           time.Duration
+	StageDir          string
+	MaxStageBytes     int64
+	CircuitFailures   int
+	CircuitCooldown   time.Duration
+	MaxConcurrent     int
+	RequestsPerSecond int
 }
 
 // Runtime is the dependency-injection bundle passed to the worker. Scanning
@@ -94,6 +96,15 @@ func LoadEnv() (Config, error) {
 	if c.CircuitCooldown, err = durationEnv("FILE_SCANNER_CIRCUIT_COOLDOWN", get("FILE_SCANNER_CIRCUIT_COOLDOWN"), 30*time.Second, time.Millisecond, time.Hour); err != nil {
 		return Config{}, err
 	}
+	var n int64
+	if n, err = int64Env("FILE_SCANNER_MAX_CONCURRENT", get("FILE_SCANNER_MAX_CONCURRENT"), 4, 1, 64); err != nil {
+		return Config{}, err
+	}
+	c.MaxConcurrent = int(n)
+	if n, err = int64Env("FILE_SCANNER_RATE_PER_SECOND", get("FILE_SCANNER_RATE_PER_SECOND"), 10, 1, 1000); err != nil {
+		return Config{}, err
+	}
+	c.RequestsPerSecond = int(n)
 	if c.Mode != ModeOff && c.DefenderURL == "" && c.ClamAVURL == "" {
 		return Config{}, fmt.Errorf("FILE_SCANNER_MODE requires FILE_SCANNER_DEFENDER_URL or FILE_SCANNER_CLAMAV_URL")
 	}
@@ -137,16 +148,22 @@ func New(c Config) Runtime {
 	if c.CircuitCooldown <= 0 {
 		c.CircuitCooldown = 30 * time.Second
 	}
+	if c.MaxConcurrent <= 0 {
+		c.MaxConcurrent = 4
+	}
+	if c.RequestsPerSecond <= 0 {
+		c.RequestsPerSecond = 10
+	}
 	r := Runtime{Config: c}
 	if c.Mode == ModeOff {
 		return r
 	}
 	r.Client = &http.Client{Timeout: c.Timeout}
 	if c.DefenderURL != "" {
-		r.Providers = append(r.Providers, &CircuitBreaker{Provider: Defender{BaseURL: c.DefenderURL, Client: r.Client, Timeout: c.Timeout}, Failures: c.CircuitFailures, Cooldown: c.CircuitCooldown})
+		r.Providers = append(r.Providers, &RateLimited{Provider: &CircuitBreaker{Provider: Defender{BaseURL: c.DefenderURL, Client: r.Client, Timeout: c.Timeout}, Failures: c.CircuitFailures, Cooldown: c.CircuitCooldown}, MaxConcurrent: c.MaxConcurrent, RequestsPerSecond: c.RequestsPerSecond})
 	}
 	if c.ClamAVURL != "" {
-		r.Providers = append(r.Providers, &CircuitBreaker{Provider: ClamAV{BaseURL: c.ClamAVURL, Client: r.Client, Timeout: c.Timeout}, Failures: c.CircuitFailures, Cooldown: c.CircuitCooldown})
+		r.Providers = append(r.Providers, &RateLimited{Provider: &CircuitBreaker{Provider: ClamAV{BaseURL: c.ClamAVURL, Client: r.Client, Timeout: c.Timeout}, Failures: c.CircuitFailures, Cooldown: c.CircuitCooldown}, MaxConcurrent: c.MaxConcurrent, RequestsPerSecond: c.RequestsPerSecond})
 	}
 	return r
 }
@@ -159,5 +176,5 @@ func (c Config) Summary() string {
 	if c.ClamAVURL != "" {
 		providers++
 	}
-	return fmt.Sprintf("mode=%s providers=%d timeout=%s stage_limit=%d", c.Mode, providers, c.Timeout, c.MaxStageBytes)
+	return fmt.Sprintf("mode=%s providers=%d timeout=%s stage_limit=%d max_concurrent=%d rate_per_second=%d", c.Mode, providers, c.Timeout, c.MaxStageBytes, c.MaxConcurrent, c.RequestsPerSecond)
 }

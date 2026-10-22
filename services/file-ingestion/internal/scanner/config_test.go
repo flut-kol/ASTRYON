@@ -8,7 +8,7 @@ import (
 
 func clearScannerEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"FILE_SCANNER_MODE", "FILE_SCANNER_DEFENDER_URL", "FILE_SCANNER_CLAMAV_URL", "FILE_SCANNER_TIMEOUT", "FILE_SCANNER_STAGE_DIR", "FILE_SCANNER_MAX_STAGE_BYTES", "FILE_SCANNER_CIRCUIT_FAILURES", "FILE_SCANNER_CIRCUIT_COOLDOWN"} {
+	for _, k := range []string{"FILE_SCANNER_MODE", "FILE_SCANNER_DEFENDER_URL", "FILE_SCANNER_CLAMAV_URL", "FILE_SCANNER_TIMEOUT", "FILE_SCANNER_STAGE_DIR", "FILE_SCANNER_MAX_STAGE_BYTES", "FILE_SCANNER_CIRCUIT_FAILURES", "FILE_SCANNER_CIRCUIT_COOLDOWN", "FILE_SCANNER_MAX_CONCURRENT", "FILE_SCANNER_RATE_PER_SECOND"} {
 		t.Setenv(k, "")
 	}
 }
@@ -19,7 +19,7 @@ func TestLoadEnvDefaultsOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Mode != ModeOff || c.Timeout.String() != "30s" || c.MaxStageBytes != 1<<30 {
+	if c.Mode != ModeOff || c.Timeout.String() != "30s" || c.MaxStageBytes != 1<<30 || c.MaxConcurrent != 4 || c.RequestsPerSecond != 10 {
 		t.Fatalf("defaults: %+v", c)
 	}
 	if got := New(c); len(got.Providers) != 0 || got.Client != nil {
@@ -65,6 +65,16 @@ func TestLoadEnvRejectsInvalidBounds(t *testing.T) {
 	t.Setenv("FILE_SCANNER_MAX_STAGE_BYTES", "0")
 	if _, err := LoadEnv(); err == nil {
 		t.Fatal("expected stage bounds error")
+	}
+	t.Setenv("FILE_SCANNER_MAX_STAGE_BYTES", "")
+	t.Setenv("FILE_SCANNER_MAX_CONCURRENT", "65")
+	if _, err := LoadEnv(); err == nil {
+		t.Fatal("expected concurrency bounds error")
+	}
+	t.Setenv("FILE_SCANNER_MAX_CONCURRENT", "")
+	t.Setenv("FILE_SCANNER_RATE_PER_SECOND", "0")
+	if _, err := LoadEnv(); err == nil {
+		t.Fatal("expected rate bounds error")
 	}
 }
 

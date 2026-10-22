@@ -112,6 +112,11 @@ button.lnk{background:none;border:0;padding:0;color:var(--ac);text-decoration:un
 .kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:16px}
 .kpi{margin:0}.kpi b{display:block;font-size:26px;line-height:1.2;margin-top:4px}
 .na{padding:20px;border:1px dashed var(--ctl);border-radius:var(--r);color:var(--mut);background:var(--card)}
+.geo-map{position:relative;height:520px;min-height:420px;margin:4px 0 20px;border:1px solid var(--bd);border-radius:10px;overflow:hidden;background:#dbeafe;touch-action:none;cursor:grab}
+.geo-map:active{cursor:grabbing}.geo-tile-layer,.geo-marker-layer{position:absolute;inset:0;overflow:hidden}.geo-tile{position:absolute;width:256px;height:256px;max-width:none;user-select:none}.geo-marker-layer{z-index:2}.geo-point{position:absolute;width:16px;height:16px;padding:0;transform:translate(-50%,-50%);border:2px solid #fff;border-radius:50%;background:var(--ac);box-shadow:0 0 0 4px color-mix(in srgb,var(--ac) 30%,transparent);cursor:pointer}.geo-point:hover{transform:translate(-50%,-50%) scale(1.25);background:var(--ok)}
+.geo-controls{position:absolute;top:12px;left:12px;z-index:3;display:flex;gap:4px;align-items:center}.geo-control{width:32px;height:32px;padding:0;background:var(--card);font-size:20px;line-height:1}.geo-zoom{padding:7px 9px;border-radius:7px;background:color-mix(in srgb,var(--card) 88%,transparent);font-size:11px;color:var(--mut)}.geo-attribution{position:absolute;right:5px;bottom:3px;z-index:3;padding:2px 5px;background:rgb(255 255 255 / 75%);font-size:10px}.geo-attribution a{color:#24508f}
+.geo-point{position:absolute;width:14px;height:14px;padding:0;transform:translate(-50%,-50%);border:2px solid var(--onac);border-radius:50%;background:var(--ac);box-shadow:0 0 0 4px color-mix(in srgb,var(--ac) 25%,transparent);z-index:2}
+.geo-point:hover{transform:translate(-50%,-50%) scale(1.25);background:var(--ok)}
 :focus-visible{outline:2px solid var(--ac);outline-offset:2px}
 main:focus{outline:none}
 .skip{position:absolute;left:-999px;top:0;background:var(--card);color:var(--fg);padding:8px 12px;z-index:20;border-radius:8px}.skip:focus{left:8px;top:8px}

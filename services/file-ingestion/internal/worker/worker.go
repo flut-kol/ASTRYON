@@ -16,6 +16,7 @@ import (
 
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
+	"github.com/astryon/file-ingestion/internal/metadata"
 	"github.com/astryon/file-ingestion/internal/parse"
 	"github.com/astryon/file-ingestion/internal/profile"
 	malwarescan "github.com/astryon/file-ingestion/internal/scanner"
@@ -30,6 +31,10 @@ type JobStore interface {
 	Quarantine(ctx context.Context, j jobs.Job, code string, labels classify.Labels) error
 	Succeed(ctx context.Context, j jobs.Job) error
 	Fail(ctx context.Context, j jobs.Job, code string, retryable bool) (jobs.State, error)
+}
+
+type MetadataStore interface {
+	SetMetadata(ctx context.Context, j jobs.Job, m jobs.DocumentMetadata) error
 }
 
 // Source resolves a job's file object. Fingerprint identifies immutable content (the verified SHA-256), Open
@@ -302,6 +307,15 @@ func (w *Worker) process(parent context.Context, j jobs.Job) error {
 // quarantine/block really mean "nothing was written". It returns the final labels.
 func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) (classify.Labels, error) {
 	sc := prof.NewScanner()
+	// Some document containers carry GPS/XMP metadata outside the row payload.
+	// Inspect them separately and retain only a bounded classification finding;
+	// coordinate values must never enter jobs.content_labels or API responses.
+	if rc, _, e := w.Source.Open(ctx, j, 0); e == nil {
+		if md, me := metadata.Extract(ctx, rc, j.ContentType, metadata.SafeLimits()); me == nil && len(md.Coordinates) > 0 {
+			sc.Merge(classify.Labels{classify.Geo: {Count: int64(len(md.Coordinates)), Fields: []string{"metadata.gps"}}})
+		}
+		_ = rc.Close()
+	}
 	st := &stream{f: formatOf(j)}
 	var err error
 	emit := func(row row) error {
@@ -342,6 +356,27 @@ func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) 
 
 func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) error {
 	prof := profile.Select(j.SourceType)
+	if prof.Parser == "metadata" {
+		if len(j.Checkpoint) != 0 {
+			return nil
+		}
+		labels, err := w.prescanMetadata(ctx, j)
+		if err != nil {
+			return err
+		}
+		seen.Merge(labels)
+		if err := w.Store.SetLabels(ctx, j, labels); err != nil {
+			return err
+		}
+		pol := prof.EffectiveCredentialsPolicy(w.Policies, j.TenantID, j.SourceID)
+		switch out := prof.Evaluate(pol, labels); out.Action {
+		case profile.Quarantine:
+			return quarantined{code: out.Code, labels: labels}
+		case profile.Block:
+			return permanent{code: out.Code, blocked: true}
+		}
+		return nil
+	}
 	if prof.Parser != "ndjson" && prof.Parser != "csv" {
 		return Permanent("parser_unavailable")
 	}
@@ -477,6 +512,34 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		return err
 	}
 	return flush()
+}
+
+func (w *Worker) prescanMetadata(ctx context.Context, j jobs.Job) (classify.Labels, error) {
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	r, err := metadata.Extract(ctx, rc, j.ContentType, metadata.SafeLimits())
+	if err != nil {
+		return nil, Permanent("metadata_unavailable")
+	}
+	labels := classify.Labels{}
+	if ms, ok := w.Store.(MetadataStore); ok {
+		coords := make([]jobs.DocumentCoordinate, 0, len(r.Coordinates))
+		for _, c := range r.Coordinates {
+			if c.Valid() {
+				coords = append(coords, jobs.DocumentCoordinate{Latitude: c.Latitude, Longitude: c.Longitude})
+			}
+		}
+		if err := ms.SetMetadata(ctx, j, jobs.DocumentMetadata{Format: r.Format, Coordinates: coords, Tags: r.Tags, Truncated: r.Truncated}); err != nil {
+			return nil, err
+		}
+	}
+	if len(r.Coordinates) > 0 {
+		labels.Merge(classify.Labels{classify.Geo: {Count: int64(len(r.Coordinates)), Fields: []string{"metadata.gps"}}})
+	}
+	return labels, nil
 }
 
 // scanObject stages the verified object to a private temporary file and asks

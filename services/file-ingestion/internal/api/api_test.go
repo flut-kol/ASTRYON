@@ -106,7 +106,7 @@ func newServer(p Principal) (*Server, *files, *mp, *enq) {
 	fs, m, e := &files{}, &mp{}, &enq{}
 	return &Server{Auth: auth{p}, Files: fs, Objs: objs{}, Multipart: m, Jobs: e, Bucket: "b",
 		Uploads: upload.Service{Store: startStore{}, Now: time.Now, MaxBytes: 1 << 30, MaxParts: 100,
-			ContentTypes: map[string]bool{"application/x-ndjson": true}}}, fs, m, e
+			ContentTypes: map[string]bool{"application/x-ndjson": true, "application/pdf": true, "image/jpeg": true, "image/png": true}}}, fs, m, e
 }
 
 func call(h http.Handler, path, body string) *httptest.ResponseRecorder {
@@ -122,6 +122,15 @@ func TestCreateUsesTrustedTenantAndRegistersFile(t *testing.T) {
 	w := call(s.Handler(), "/v1/files/uploads", okBody)
 	if w.Code != 201 || !strings.Contains(w.Body.String(), fileID) || fs.tenants[0] != tenant || !strings.HasPrefix(fs.f.Key, tenant+"/uploads/") {
 		t.Fatalf("%d %s %+v", w.Code, w.Body, fs)
+	}
+}
+
+func TestCreateRoutesBrowserDocumentToMetadataProfile(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	body := strings.Replace(okBody, `"a.ndjson"`, `"7fe0add0-c535-40d3-b44c-4bee097e6433.jpg"`, 1)
+	body = strings.Replace(body, "application/x-ndjson", "image/jpeg", 1)
+	if w := call(s.Handler(), "/v1/files/uploads", body); w.Code != 201 || fs.f.SourceType != "media_meta" {
+		t.Fatalf("%d %s source_type=%q", w.Code, w.Body, fs.f.SourceType)
 	}
 }
 
@@ -377,6 +386,24 @@ func TestPreviewSensitiveIsMetadataOnly(t *testing.T) {
 	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID+"/preview", nil))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"mode":"metadata-only"`) || strings.Contains(w.Body.String(), "do-not-return") {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestProfileSpecificReadScopeIsEnforced(t *testing.T) {
+	s, fs, _, _ := newServer(Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite}})
+	fs.f = objects.File{ID: fileID, SourceType: "credentials_bundle", ContentType: "application/x-ndjson"}
+	for _, path := range []string{"/v1/files/uploads/" + fileID, "/v1/files/uploads/" + fileID + "/preview"} {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 403 {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	s.Auth = auth{Principal{TenantID: tenant, Scopes: []string{ScopeUploadsWrite, "astryon:secrets:read"}}}
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/files/uploads/"+fileID, nil))
+	if w.Code != 200 {
+		t.Fatalf("secret scope should read metadata: %d %s", w.Code, w.Body.String())
 	}
 }
 

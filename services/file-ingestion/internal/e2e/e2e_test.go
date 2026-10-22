@@ -200,7 +200,7 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lineage := &jobs.MemLineage{}
+	lineage := &jobs.PGLineage{DB: db}
 	w := worker.New(worker.Config{Store: store, Source: objects.Source{Store: files, Objs: s3c, Bucket: bucket}, Sink: sink,
 		BatchSize: 2, Heartbeat: 10 * time.Second, Poll: 100 * time.Millisecond, Lineage: lineage})
 
@@ -311,21 +311,10 @@ func TestE2EUploadToClickHouse(t *testing.T) {
 		t.Errorf("parquet PG state/checkpoint = %q", pgState)
 	}
 
-	// Durable lineage has no PostgreSQL repository/schema yet. Verify the worker still emits the supported
-	// in-process batch lineage contract, and keep this assertion explicit until a PG recorder is implemented.
-	var parquetBatches, parquetRows int
-	for _, b := range lineage.All() {
-		if b.SourceFileID != parquetID {
-			continue
-		}
-		parquetBatches++
-		parquetRows += b.Valid
-		if b.Destination != jobs.ClickHouseBulk || b.SourceChecksum != strings.ToLower(pf.SHA256) || b.JobID == "" || b.Validate() != nil {
-			t.Errorf("parquet lineage: %+v", b)
-		}
-	}
-	if parquetBatches != 2 || parquetRows != 3 {
-		t.Errorf("parquet lineage batches=%d rows=%d", parquetBatches, parquetRows)
+	lineageState := strings.TrimSpace(psql(`SELECT count(*)::text || '|' || COALESCE(sum(valid_rows), 0)::text || '|' ||
+		COALESCE(min(destination), '') FROM file_batch_lineage WHERE source_file_id='` + parquetID + `'::uuid`))
+	if lineageState != "2|3|CLICKHOUSE_BULK" {
+		t.Errorf("durable parquet lineage = %q", lineageState)
 	}
 }
 

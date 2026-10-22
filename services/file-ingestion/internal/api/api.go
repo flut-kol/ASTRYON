@@ -95,8 +95,8 @@ type Server struct {
 	}
 	// Audit is optional. When configured, state changes and authorization denials are queued for PostgreSQL.
 	Audit AuditSink
-	// ArchiveMode is empty by default; "inspect" enables bounded archive
-	// inspection at complete and keeps archives out of the normal worker path.
+	// ArchiveMode defaults to "inspect" in the file-api command; "disabled"
+	// rejects archive uploads. "inspect" keeps archives out of the normal worker path.
 	ArchiveMode string
 
 	mu     sync.Mutex
@@ -111,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/files/uploads", s.count("create", s.create))
 	mux.HandleFunc("GET /v1/files/uploads", s.count("list", s.list))
+	mux.HandleFunc("GET /v1/files/locations", s.count("locations", s.locations))
 	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
 	mux.HandleFunc("GET /v1/files/uploads/{id}/preview", s.count("preview", s.preview))
 	mux.HandleFunc("GET /v1/jobs", s.count("jobs_list", s.listJobs))
@@ -198,6 +199,31 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 	})
 	writeErr(w, 403, "FORBIDDEN")
 	return Principal{}, false
+}
+
+func hasScope(p Principal, want string) bool {
+	for _, sc := range p.Scopes {
+		if sc == want {
+			return true
+		}
+	}
+	return false
+}
+
+// profileReadAllowed enforces stricter profile scopes while retaining the
+// historical uploads:write/data:read access for ordinary profiles. Sensitive
+// profiles such as credentials_bundle declare a distinct scope and cannot be
+// read through the upload writer permission alone.
+func (s *Server) profileReadAllowed(w http.ResponseWriter, r *http.Request, p Principal, sourceType, resource string) bool {
+	required := profile.Select(sourceType).RequiredReadScope
+	if required == "" || required == ScopeFilesRead || hasScope(p, required) {
+		return true
+	}
+	s.audit(r, p, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied, audit.Resource{Type: resource}, map[string]string{
+		"reason": "missing_scope", "required_scope": required,
+	})
+	writeErr(w, 403, "FORBIDDEN")
+	return false
 }
 
 var traceIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -331,7 +357,14 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BODY_INVALID")
 		return
 	}
-	prof := profile.Select(in.SourceType)
+	// Browser uploads commonly omit source_type (the UI's default is unknown).
+	// Route document containers to the bounded metadata-only profile instead of
+	// trying to feed binary bytes to the NDJSON parser.
+	effectiveSourceType := in.SourceType
+	if (effectiveSourceType == "" || effectiveSourceType == profile.DefaultName) && metadataDocument(in.ContentType, in.Filename) {
+		effectiveSourceType = "media_meta"
+	}
+	prof := profile.Select(effectiveSourceType)
 	sens, ok := prof.Sensitivity(in.Sensitivity)
 	archiveUpload := archiveType(in.ContentType, in.Filename)
 	if !ok || (!prof.AllowsFormat(in.ContentType, in.Filename) && !(s.ArchiveMode == "inspect" && archiveUpload)) || prof.MissingTag(in.Tags) != "" {
@@ -373,6 +406,16 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, p, audit.CategoryAudit, "upload.create", audit.OutcomeSuccess, audit.Resource{Type: "upload", ID: id}, nil)
 	writeJSON(w, 201, createResp{FileObjectID: id, UploadID: sess.UploadID, PartURLs: sess.PartURLs, ExpiresAt: sess.ExpiresAt})
+}
+
+func metadataDocument(contentType, filename string) bool {
+	mt, _, _ := strings.Cut(strings.ToLower(contentType), ";")
+	name := strings.ToLower(filename)
+	switch mt {
+	case "application/pdf", "image/jpeg", "image/png":
+		return true
+	}
+	return strings.HasSuffix(name, ".pdf") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") || strings.HasSuffix(name, ".png")
 }
 
 func archiveType(contentType, filename string) bool {
@@ -427,7 +470,7 @@ type getResp struct {
 	SizeBytes    int64             `json:"size_bytes"`
 	Sensitivity  string            `json:"sensitivity"`
 	Tags         map[string]string `json:"tags"`
-	// Profile is the declared handling metadata of the source type (retention, read scope, export flag are not enforced yet).
+	// Profile exposes handling metadata; a distinct RequiredReadScope is enforced on reads, while retention and export remain declarative.
 	Profile struct {
 		RetentionClass    string `json:"retention_class"`
 		RequiredReadScope string `json:"required_read_scope"`
@@ -442,7 +485,8 @@ type jobResp struct {
 	// Error is the catalog code when the job failed or was quarantined (e.g. CREDENTIALS_DETECTED).
 	Error string `json:"error,omitempty"`
 	// Labels hold per-label match counts and column/field names only, never matched values.
-	Labels classify.Labels `json:"labels"`
+	Labels   classify.Labels       `json:"labels"`
+	Metadata jobs.DocumentMetadata `json:"metadata,omitempty"`
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
@@ -464,6 +508,9 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "UNAVAILABLE")
 		return
 	}
+	if !s.profileReadAllowed(w, r, p, f.SourceType, "file_metadata") {
+		return
+	}
 	out := getResp{FileObjectID: f.ID, SourceID: f.SourceID, SourceType: f.SourceType, Committed: f.Committed, SizeBytes: f.Size,
 		Sensitivity: f.Sensitivity, Tags: f.Tags}
 	if out.Tags == nil {
@@ -475,13 +522,54 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		sum, err := s.Insights.Describe(r.Context(), p.TenantID, id)
 		switch {
 		case err == nil:
-			out.Job = &jobResp{ID: sum.ID, Status: sum.Status, Error: sum.Error, Labels: sum.Labels}
+			out.Job = &jobResp{ID: sum.ID, Status: sum.Status, Error: sum.Error, Labels: sum.Labels, Metadata: sum.Metadata}
 		case !errors.Is(err, jobs.ErrNoSummary):
 			writeErr(w, 503, "UNAVAILABLE")
 			return
 		}
 	}
 	writeJSON(w, 200, out)
+}
+
+type locationPoint struct {
+	FileObjectID string  `json:"file_object_id"`
+	Latitude     float64 `json:"latitude"`
+	Longitude    float64 `json:"longitude"`
+}
+
+// locations returns only validated coordinates from the caller's tenant. It
+// intentionally has no tenant query/body parameter and is capped like uploads.
+func (s *Server) locations(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.principal(w, r)
+	if !ok {
+		return
+	}
+	if len(r.URL.Query()) != 0 || s.Lister == nil || s.Insights == nil {
+		if s.Lister == nil || s.Insights == nil {
+			writeErr(w, 503, "UNAVAILABLE")
+		} else {
+			writeErr(w, 400, "BODY_INVALID")
+		}
+		return
+	}
+	page, err := s.Lister.List(r.Context(), p.TenantID, listing.Filter{Limit: listing.MaxLimit, SourceType: "media_meta"})
+	if err != nil {
+		writeErr(w, 503, "UNAVAILABLE")
+		return
+	}
+	out := make([]locationPoint, 0)
+	for _, it := range page.Items {
+		sum, err := s.Insights.Describe(r.Context(), p.TenantID, it.FileObjectID)
+		if errors.Is(err, jobs.ErrNoSummary) || err != nil {
+			continue
+		}
+		for _, c := range sum.Metadata.Coordinates {
+			if c.Latitude >= -90 && c.Latitude <= 90 && c.Longitude >= -180 && c.Longitude <= 180 {
+				out = append(out, locationPoint{FileObjectID: it.FileObjectID, Latitude: c.Latitude, Longitude: c.Longitude})
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{"items": out, "next_cursor": page.NextCursor})
 }
 
 const (
@@ -539,6 +627,9 @@ func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeErr(w, 503, "UNAVAILABLE")
+		return
+	}
+	if !s.profileReadAllowed(w, r, p, f.SourceType, "file_preview") {
 		return
 	}
 	labels := classify.Labels(nil)
