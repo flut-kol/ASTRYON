@@ -198,3 +198,27 @@ func TestEventIDsAreStable(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestBackoffHookReplacesBuiltInSchedule(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(page)) }))
+	defer srv.Close()
+	s := &store{c: claimed(srv.URL, nil)}
+	s.c.ConsecutiveFailures = 2
+	var gotCode string
+	var gotFailures int
+	r := newRunner(s, &emitter{err: errors.New("kafka down")})
+	r.Backoff = func(code string, failures int, _ error, _ time.Duration) (time.Duration, error) {
+		gotCode, gotFailures = code, failures
+		return 7 * time.Second, nil
+	}
+	if _, err := r.RunOnce(context.Background()); err == nil || s.failCode != "emit_failed" || s.delay != 7*time.Second || gotCode != "emit_failed" || gotFailures != 2 || len(s.succeed) != 0 {
+		t.Fatalf("err=%v code=%s delay=%v hook=%s/%d", err, s.failCode, s.delay, gotCode, gotFailures)
+	}
+	// a hook error must not strand the connector silently: the failure is returned
+	s2 := &store{c: claimed(srv.URL, nil)}
+	r2 := newRunner(s2, &emitter{err: errors.New("kafka down")})
+	r2.Backoff = func(string, int, error, time.Duration) (time.Duration, error) { return 0, errors.New("bad policy") }
+	if _, err := r2.RunOnce(context.Background()); err == nil || s2.failCode != "" {
+		t.Fatalf("err=%v code=%q", err, s2.failCode)
+	}
+}

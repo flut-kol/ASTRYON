@@ -51,6 +51,12 @@ There are currently no source create/update/pause/resume, connector update, or c
 endpoints in this service. Audit events for those actions must be added with the endpoints rather than inventing
 write paths solely for audit.
 
+## Retry mode (DPP-041)
+
+`CONNECTOR_RETRY_MODE` (default `local` = built-in 30 s base, 1 h cap schedule). `controller` (`internal/retrybridge`) takes the delay from the retry-controller's public `pkg/retryclient` policy and classification instead: transient failures (`pull_error`, `emit_failed`, `secret_unavailable`, HTTP 408/425/429/5xx) back off exponentially with jitter (`CONNECTOR_RETRY_BASE_SECONDS` 30, `CONNECTOR_RETRY_MAX_SECONDS` 3600, `CONNECTOR_RETRY_MAX_ATTEMPTS` 10); permanent ones (`bad_config`, `bad_response`, other 4xx, `response_too_large`) and transient ones past the attempt limit are parked at the max delay. `Retry-After` stays a minimum. Claim, lease fence, cursor-after-emit and `pullstore.Fail` are unchanged.
+
+Limits, stated plainly: `retryclient.Client.Fail` and the dispatcher work on the `jobs` table and `scheduled_retries(job_id -> jobs)`, and a pull connector is not a job. So in this mode nothing is written to `scheduled_retries`, the retry-controller does not dispatch these retries, there is no dead-letter (a permanently failing connector keeps retrying at the max delay until paused) and the retry backlog metrics do not include connectors. Real controller scheduling would need a connector-aware ledger or schema change (not done). Tests: `internal/retrybridge`, runner hook, env parsing; no live test.
+
 ## Not yet
 
 - Kafka `Emitter` for `raw.events.v1` (gateway has its own TLS/SASL/mTLS producer; extract a shared client first), a `SecretRef` resolver (Vault),

@@ -48,6 +48,9 @@ type Config struct {
 	Poll     time.Duration // idle wait, default 2s
 	Now      func() time.Time
 	Jitter   func() float64 // [0,1], default rand 0..0.2
+	// Backoff, when set (CONNECTOR_RETRY_MODE=controller), replaces the built-in 30 s..1 h schedule. failures is the
+	// consecutive failure count before this failure; retryAfter is the source's minimum.
+	Backoff func(code string, failures int, cause error, retryAfter time.Duration) (time.Duration, error)
 }
 
 type Runner struct {
@@ -151,6 +154,16 @@ func (r *Runner) page(ctx context.Context, c pullstore.Claimed) error {
 	fail := func(code string, retryAfter time.Duration, cause error) error {
 		r.M.Failures.Add(1)
 		now := r.Now()
+		if r.Backoff != nil {
+			d, berr := r.Backoff(code, c.ConsecutiveFailures, cause, retryAfter)
+			if berr != nil {
+				return errors.Join(cause, berr)
+			}
+			if err := r.Store.Fail(context.WithoutCancel(ctx), c, d, code); err != nil {
+				return errors.Join(cause, err)
+			}
+			return cause
+		}
 		p, perr := restpull.Progress{ConsecutiveFailures: c.ConsecutiveFailures}.Fail(now, 30*time.Second, time.Hour, r.Jitter(), retryAfter)
 		if perr != nil {
 			return perr

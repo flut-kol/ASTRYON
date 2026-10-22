@@ -155,13 +155,43 @@ func TestInvalidEnvelopeQuarantined(t *testing.T) {
 		t.Fatalf("%d %s", resp.StatusCode, body)
 	}
 	q := pub.ByTopic(ec.TopicQuarantine)
-	if len(q) != 1 || !strings.Contains(string(q[0].Value), "ERR_SOURCE_ID_INVALID") || !strings.Contains(string(q[0].Value), "ERR_EVENT_TIME_MISSING") {
+	if len(q) != 1 {
 		t.Fatalf("quarantine: %v", q)
+	}
+	rec, err := ec.DecodeQuarantineRecordV1(q[0].Value)
+	if err != nil {
+		t.Fatalf("not strict QuarantineRecordV1: %v", err)
+	}
+	if rec.TenantID != tenantA || rec.Stage != "gateway_validate" || rec.Provenance.SourceTopic != ec.TopicRawEvents ||
+		rec.Provenance.SourcePartition != nil || rec.Original == nil ||
+		!strings.Contains(rec.Diagnostic, "ERR_SOURCE_ID_INVALID") || !strings.Contains(rec.Diagnostic, "ERR_EVENT_TIME_MISSING") {
+		t.Fatalf("record: %+v", rec)
 	}
 	// undecodable JSON
 	resp, _ = do(t, ts.URL+"/v1/events", `{"nope":1}`, nil)
-	if resp.StatusCode != 422 || !strings.Contains(string(pub.ByTopic(ec.TopicQuarantine)[1].Value), string(ErrEnvelopeMalformed)) {
+	if resp.StatusCode != 422 {
 		t.Fatalf("malformed: %d", resp.StatusCode)
+	}
+	rec2, err := ec.DecodeQuarantineRecordV1(pub.ByTopic(ec.TopicQuarantine)[1].Value)
+	if err != nil || rec2.ReasonCode == "" || rec2.DeviationID == rec.DeviationID {
+		t.Fatalf("malformed record: %+v %v", rec2, err)
+	}
+}
+
+func TestQuarantineDeviationIDStableUnderIdempotencyKey(t *testing.T) {
+	ts, pub := newSrv(write, nil)
+	defer ts.Close()
+	h := map[string]string{"Idempotency-Key": "k-1"}
+	for i := 0; i < 2; i++ {
+		if resp, _ := do(t, ts.URL+"/v1/events", `{"nope":1}`, h); resp.StatusCode != 422 {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+	}
+	q := pub.ByTopic(ec.TopicQuarantine)
+	a, errA := ec.DecodeQuarantineRecordV1(q[0].Value)
+	b, errB := ec.DecodeQuarantineRecordV1(q[1].Value)
+	if errA != nil || errB != nil || a.DeviationID != b.DeviationID {
+		t.Fatalf("%v %v %s %s", errA, errB, a.DeviationID, b.DeviationID)
 	}
 }
 

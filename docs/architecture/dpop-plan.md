@@ -1,4 +1,4 @@
-# DPoP (L2) in libs/go-common/auth: core implemented, Redis store and live test pending
+# DPoP (L2) in libs/go-common/auth: core and Redis store implemented, live-tested on Redis; DPoP-bound AAS client test pending
 
 Status 2026-10-21: `auth/dpop.go` implements items 1-5 (scheme handling, downgrade protection, proof validation, `ReplayStore` + `MemoryReplayStore`,
 `Principal.Confirmation`, `Config.RequireDPoP/PublicBaseURL/ReplayStore`); unit tests in `auth/dpop_test.go`. Done too: `RedisReplayStore` (standalone redis[s]://, CA file, fail closed; no Cluster/Sentinel).

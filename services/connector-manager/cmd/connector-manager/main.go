@@ -2,6 +2,8 @@
 // Config (env only): ASTRYON_DATABASE_URL, ASTRYON_KAFKA_*, ASTRYON_WORKER_ID (optional),
 // ASTRYON_CONNECTOR_SYNC_INTERVAL (default 30s), ASTRYON_CONNECTOR_METRICS_ADDR (optional, e.g. :9102).
 // Optional Debezium CDC consumer (off unless ASTRYON_CDC_TOPIC): ASTRYON_CDC_{CONNECTOR_ID,TENANT_ID,SOURCE_ID,SCHEMA_ID,PRIMARY_KEY,GROUP,SCHEMA_VERSION,PROCESSING_VERSION}.
+// CONNECTOR_RETRY_MODE (local = built-in 30 s..1 h backoff, default; controller = retry-controller policy via pkg/retryclient) with
+// CONNECTOR_RETRY_BASE_SECONDS 30, CONNECTOR_RETRY_MAX_SECONDS 3600, CONNECTOR_RETRY_MAX_ATTEMPTS 10.
 // Admin API (off unless ASTRYON_CONNECTOR_ADMIN_ADDR is set, e.g. :8089): auth via ASTRYON_AAS_BASE_URL/_ISSUER/_AUDIENCE/_ENV/_ALLOWED_AZP/_TOKEN_TYPE
 // (AAS, scope astryon:connectors:write) or dev-only ASTRYON_CONNECTOR_DEV_TOKEN + ASTRYON_CONNECTOR_DEV_TENANT; neither -> all requests 401.
 package main
@@ -73,7 +75,11 @@ func run(ctx context.Context, getenv func(string) string) error {
 		worker = fmt.Sprintf("%s-%d", h, os.Getpid())
 	}
 	store := &pullstore.Store{DB: pullstore.PoolDB{Pool: pool}, WorkerID: worker}
-	r := runner.New(runner.Config{Store: store, Emitter: em, Resolver: secrets.Env{}, HTTP: &http.Client{Timeout: 30 * time.Second}})
+	rc := runner.Config{Store: store, Emitter: em, Resolver: secrets.Env{}, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	if rc.Backoff, err = retryBackoff(getenv); err != nil {
+		return err
+	}
+	r := runner.New(rc)
 
 	cs, err := loadCDC(getenv)
 	if err != nil {

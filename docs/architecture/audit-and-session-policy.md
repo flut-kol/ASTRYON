@@ -33,7 +33,7 @@ Migrations are forward-only; prod `audit_log` is retained (compliance), no rollb
   Exposure through an API needs a scope (see roles.md: `auditor` read-only); none is defined yet.
 - The DB role must be neither superuser nor BYPASSRLS; `astryon.platform_admin` must not be set by this library.
 
-## Integration points (not wired here; owners of each service integrate)
+## Integration points (wired opt-in in query-api and export-worker; other services not yet)
 
 | Service | Events |
 |---|---|
@@ -71,4 +71,4 @@ ASTRYON has no IdP and stores no passwords or TOTP seeds. Policy:
 
 `go test -race` passes in `libs/audit`; the live test (`AUDIT_IT_PG_URL`) was run against PostgreSQL 16 with
 migrations 0001-0015 (non-superuser role): round trip, tenant isolation, keyset pagination, append-only. Not verified:
-integration into any service, real AAS `acr`/`amr` values, load behaviour of the writer.
+the service-to-PostgreSQL path (query-api and export-worker are wired, tested with fake writers only), other services, real AAS `acr`/`amr` values, load behaviour of the writer.

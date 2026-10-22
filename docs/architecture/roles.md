@@ -24,9 +24,9 @@ object-level/tenant authorization: `tenant_id` береться лише з clai
 | `astryon:quarantine-replay:write` | quarantine | publish replay jobs (grant separately) |
 | `astryon:data:read`, `astryon:secrets:read`, `astryon:pii:read` | file-ingestion profiles | required read scope per data class, not an endpoint scope |
 
-Розбіжність із початковою моделлю в `authentication.md` (`replays:write`, `exports:*`, `jobs:*`, `sources:*`,
-`pipelines:*`, `metrics:read`, `platform:admin`): код використовує форми з таблиці вище. Перед реєстрацією клієнтів
-в AAS узгодити імена; ця таблиця описує те, що код приймає сьогодні.
+Імена scopes у цій таблиці та в `authentication.md` ідентичні (джерело — код). Старі імена початкової моделі
+(`replays:write`, `exports:*`, `pipelines:*`, `metrics:read`, `platform:admin`) не використовуються; scope-и
+`astryon:*` реєструються в AAS саме в цих формах.
 
 ## Ролі
 

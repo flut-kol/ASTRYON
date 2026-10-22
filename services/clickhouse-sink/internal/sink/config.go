@@ -21,6 +21,7 @@ type Config struct {
 	KafkaSASLPass          string
 	Topic                  string
 	QuarantineTopic        string
+	DLQTopic               string        // CHSINK_DLQ_TOPIC: tenantless rejections (default events.dlq.v1)
 	QuarantineTimeout      time.Duration // CHSINK_QUARANTINE_TIMEOUT: max wait for a quarantine produce ack (default 15s)
 	GroupID                string
 	CHURL                  string
@@ -82,6 +83,7 @@ func LoadConfig() (Config, error) {
 		KafkaSASLPass:    os.Getenv("CHSINK_KAFKA_SASL_PASSWORD"),
 		Topic:            env("CHSINK_TOPIC", "processed.events.v1"),
 		QuarantineTopic:  env("CHSINK_QUARANTINE_TOPIC", "events.quarantine.v1"),
+		DLQTopic:         env("CHSINK_DLQ_TOPIC", "events.dlq.v1"),
 		GroupID:          env("CHSINK_GROUP_ID", "clickhouse-sink"),
 		CHURL:            env("CHSINK_CH_URL", "http://127.0.0.1:18124"),
 		CHDatabase:       env("CHSINK_CH_DATABASE", "astryon"),

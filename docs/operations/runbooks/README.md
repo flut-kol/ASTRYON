@@ -17,7 +17,7 @@ actions in the platform audit trail.
 | Chaos | [chaos-gamedays.md](chaos-gamedays.md) | Planning or recording fault-injection drills (`scripts/chaos/`) and reconciliation after them (DPP-061/063). |
 | Backup and restore | [backup-restore.md](backup-restore.md) | PostgreSQL/ClickHouse/S3 restore procedure and restore tests (`scripts/backup/`) (DPP-062). |
 | Disaster recovery | [disaster-recovery.md](disaster-recovery.md) | Site or multi-component loss; RTO/RPO drill record (DPP-065, not yet confirmed). |
-| Maintenance | [rolling-upgrade-and-reshard.md](rolling-upgrade-and-reshard.md) | Rolling upgrades, reshard/rebalance (DPP-064, draft). |
+| Maintenance | [rolling-upgrade-and-reshard.md](rolling-upgrade-and-reshard.md) | Rolling upgrades, Kafka partition increase, ClickHouse shard add, migration rollout, service restarts (DPP-064, draft, not rehearsed). |
 | Release | [../../release/readiness-review.md](../../release/readiness-review.md) | Production readiness status (currently NO-GO) and evidence gaps. |
 | Handover | [../../release/handover.md](../../release/handover.md) | Component owners (TODO), dev stack start, env inventory by name. |
 

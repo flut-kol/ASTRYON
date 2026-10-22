@@ -37,7 +37,7 @@ DATABASE_URL='<platform-provided-postgres-url>' go run ./cmd/retry-controller
   dedupe on (tenant_id, job_id, attempt) and still claim the job themselves.
 - Set `ASTRYON_RETRY_DISPATCH_TOPIC` (+ `ASTRYON_KAFKA_*`) to run the controller in dispatch mode instead of the direct
   `QUEUED` flip. Never run both modes against one database.
-- Hooks for file-ingestion/connector-manager workers (not yet wired there): call `Client.Fail` on job failure and consume the topic.
+- file-ingestion worker wiring is done (opt-in `FILE_RETRY_MODE=controller`). connector-manager only borrows `retryclient.Policy`/classification for its backoff (opt-in `CONNECTOR_RETRY_MODE=controller`): its pull state is not a `jobs` row, so `Client.Fail`/dispatcher do not schedule or dispatch connector retries. Original hook note: call `Client.Fail` on job failure and consume the topic.
 - Tests: `go test -race ./...`; live PG: `RETRYCLIENT_LIVE=1 go test ./pkg/retryclient` (needs docker).
 
 See `docs/operations/runbooks/retry-controller.md` for diagnosis and recovery.
