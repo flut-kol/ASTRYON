@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestValidateAuthConfiguration(t *testing.T) {
 	values := map[string]string{}
@@ -29,5 +34,37 @@ func TestValidateAuthConfiguration(t *testing.T) {
 	}
 	if err := validateAuthConfiguration(getenv); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReportJournalFailureRequestsProcessRestart(t *testing.T) {
+	failures := make(chan error, 1)
+	reportJournalFailure(failures, errors.New("clickhouse unavailable"))
+	select {
+	case err := <-failures:
+		if err == nil || !strings.Contains(err.Error(), "clickhouse unavailable") {
+			t.Fatalf("reported error = %v", err)
+		}
+	default:
+		t.Fatal("journal failure was not reported to the process supervisor")
+	}
+}
+
+func TestReportJournalFailureIgnoresExpectedCancellation(t *testing.T) {
+	failures := make(chan error, 1)
+	reportJournalFailure(failures, context.Canceled)
+	select {
+	case err := <-failures:
+		t.Fatalf("cancellation reported as terminal failure: %v", err)
+	default:
+	}
+}
+
+func TestReportJournalFailureDoesNotBlockWhenSupervisorAlreadyHasFailure(t *testing.T) {
+	failures := make(chan error, 1)
+	failures <- errors.New("first failure")
+	reportJournalFailure(failures, errors.New("second failure"))
+	if got := (<-failures).Error(); got != "first failure" {
+		t.Fatalf("queued failure = %q", got)
 	}
 }

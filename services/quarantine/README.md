@@ -139,11 +139,38 @@ Run tests:
 go test ./...
 ```
 
+### Journal ingestion (opt-in)
+
+Set `QUARANTINE_JOURNAL_GROUP` together with the Kafka and ClickHouse settings
+to consume canonical `events.quarantine.v1` records. The consumer validates the
+shared `QuarantineRecordV1` contract, inserts tenant-bearing metadata into
+`processing_errors_local` (or `QUARANTINE_JOURNAL_TABLE`), and commits Kafka
+offsets only after ClickHouse acknowledges the insert. The opaque original is
+not copied into the browser read model. The feature is disabled when the group
+variable is empty; tenantless `events.dlq.v1` ingestion remains a separate
+follow-up because the current journal schema requires a validated tenant UUID.
+If a record on `events.quarantine.v1` fails canonical decoding, the consumer
+publishes a bounded, provenance-bearing rejection to `events.dlq.v1` and only
+then commits the source offset, so one malformed record cannot block its Kafka
+partition indefinitely.
+
+The flow was smoke-tested on the dev Kafka/ClickHouse stack on 2026-10-22:
+an invalid quarantine value produced `ERR_QUARANTINE_RECORD_INVALID` on the
+DLQ with source topic/partition/offset. If the opt-in journal consumer then
+encounters a terminal Kafka, ClickHouse, or commit error, the service performs
+graceful shutdown and exits non-zero so its container/orchestrator can restart
+it; it never continues serving a healthy-looking browser with ingestion stopped.
+
+Journal outcomes are exposed on the optional metrics listener as
+`astryon_quarantine_journal_records_total{outcome="inserted|dlq|error"}` and
+`astryon_quarantine_journal_commit_errors_total`; no tenant or source labels
+are emitted.
+
 ## Remaining DPP-042 gaps
 
 The read model is only as complete as writers feeding `processing_errors`.
-Ingestion from both `events.quarantine.v1` and `events.dlq.v1` into the
-ClickHouse deviation journal is still pending. Fetching a raw object through
+Ingestion from `events.dlq.v1` into the ClickHouse deviation journal is still
+pending. Fetching a raw object through
 `raw_ref` needs a separately audited, tenant-checked object-store path and is
 not implemented here. Actual replay execution remains pending. Planning is
 intentionally based on fields that exist in the deviation journal (`source_id`,

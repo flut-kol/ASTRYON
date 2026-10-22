@@ -29,10 +29,9 @@
 
 ## Авторизація і scopes
 
-AAS — єдине джерело identity. У realm `aas` визначено scopes `astryon:events:{read,write}`, `query:read`,
-`export:{read,write}`, `replay:{read,write}`, `quarantine:read`, `quarantine-payload:read`, `quarantine-replay:{read,write}`,
-`connectors:write`, `uploads:write`; клієнти `astryon-dev-ingest` і `astryon-portal`. Матриця ролей: `docs/architecture/roles.md`
-(ролі в AAS не створені).
+AAS — єдине джерело identity. Реалізована scope-модель перелічена в `docs/architecture/authentication.md` і
+`docs/architecture/roles.md`; клієнти `astryon-dev-ingest` і `astryon-portal`. Фактичне створення ролей у AAS ще
+не виконане.
 
 ## Відомі обмеження
 

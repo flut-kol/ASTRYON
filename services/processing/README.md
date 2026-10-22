@@ -9,13 +9,22 @@ Apache Flink 1.20.3 / Java 17 job for the first executable processing slice:
 5. publish unique normalized events to `processed.events.v1`;
 6. publish validation/normalization failures as canonical `QuarantineRecordV1` values, with a bounded original copy, to `events.quarantine.v1`.
 
+Inputs that cannot provide a validated UUID `tenant_id` are published to
+`events.dlq.v1` instead. The DLQ record deliberately has no tenant field (a
+tenant must never be invented), carries the Kafka topic/partition/offset,
+deterministic `dead_letter_id`, and fixed diagnostic. It deliberately does not
+copy opaque input bytes, because an invalid envelope cannot establish a safe
+tenant boundary. Tenant-bearing validation failures continue to use the canonical
+`QuarantineRecordV1`; invalid Kafka provenance fails the operator so a record
+cannot be acknowledged without a stable retry identity.
+
 The job uses incremental RocksDB state, exactly-once Flink checkpoints in S3 and at-least-once Kafka output. The output choice follows ADR-011: downstream consumers must remain idempotent.
 
 The actual dedup identity is `(tenant_id, source_id, event_id, processing_version)`, so a replay into a new processing version is never suppressed by an older version still inside the TTL window.
 
 `tenant_id` is never accepted from an HTTP header or request by this service. This internal job trusts the claim-derived `tenant_id` already embedded by the gateway because Kafka ACLs must restrict `raw.events.v1` writers to the authenticated gateway and explicitly approved producers. A producer ACL is therefore part of the security boundary.
 
-Quarantine records use a deterministic UUIDv8 derived from `("flink-processing", topic, partition, offset)`, carry Kafka provenance as a coordinate pair, and use the Kafka key `tenant_id + 0x1f + deviation_id`. Original bytes are canonical padded base64 and limited to 64 KiB. Diagnostics are bounded fixed messages and never copy payload data. If the envelope has no validated tenant or Kafka provenance is invalid, processing fails instead of publishing a misleading tenant record or checkpointing a silent drop.
+Quarantine records use a deterministic UUIDv8 derived from `("flink-processing", topic, partition, offset)`, carry Kafka provenance as a coordinate pair, and use the Kafka key `tenant_id + 0x1f + deviation_id`. Original bytes are canonical padded base64 and limited to 64 KiB. Diagnostics are bounded fixed messages and never copy payload data. Tenantless input uses the same provenance identity in the DLQ; invalid Kafka provenance still fails instead of publishing an unstable record or checkpointing a silent drop.
 
 ## Build and test
 
@@ -76,4 +85,4 @@ Unit tests (`BoundedDeduplicateFunctionTest`, Flink keyed-operator test harness)
 - Inline `payload_format=json` only. Avro, Protobuf and S3 object resolution are quarantined with `ERR_NORMALIZATION_UNSUPPORTED`; accepting them without a schema registry/object integrity adapter would be misleading.
 - An optional inline checksum is verified against the compact canonical JSON payload bytes and preserved unchanged. A mismatch is quarantined; the processor never rewrites a failed integrity claim.
 - Processing-time dedup is deliberate for the first bounded implementation. Event-time late-data policy and watermarks remain a follow-up.
-- This does not claim an end-to-end checkpoint/restore, TaskManager kill, Kafka failover, or state-growth benchmark. Those require the dev Flink/S3 deployment and are acceptance work, not unit evidence.
+- Live dev verification on 2026-10-22 covered the Flink/S3 checkpoint path and savepoint restore: a running job was savepointed, canceled, restarted from that savepoint, and a duplicate key was dropped after restore (`dedup_dropped_total` increased while `processed.events.v1` did not). This still does not claim TaskManager kill, Kafka failover, HA, or a state-growth benchmark; those remain acceptance work.

@@ -39,5 +39,5 @@ func (s *stubStore) Fail(context.Context, jobs.Job, string, bool) (jobs.State, e
 type strSource string
 
 func (s strSource) Open(_ context.Context, _ jobs.Job, off int64) (io.ReadCloser, string, error) {
-	return io.NopCloser(strings.NewReader(string(s)[off:])), "fp", nil
+	return io.NopCloser(strings.NewReader(string(s)[off:])), strings.Repeat("f", 64), nil
 }

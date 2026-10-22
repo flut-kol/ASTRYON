@@ -3,6 +3,7 @@
 // ClickHouse: CH_URL, CH_DATABASE, CH_USER, CH_PASSWORD, QUARANTINE_CH_TABLE.
 // AAS: AAS_BASE_URL, AAS_ISSUER, AAS_AUDIENCE, AAS_ENV, AAS_ALLOWED_AZP.
 // Kafka replay/audit: ASTRYON_KAFKA_* and optional QUARANTINE_REPLAY_TOPIC.
+// Journal ingestion: QUARANTINE_JOURNAL_GROUP enables events.quarantine.v1 -> ClickHouse.
 // QUARANTINE_METRICS_ADDR serves /metrics (off when unset; a bare ":port" binds loopback only).
 // DEV ONLY: QUARANTINE_DEV_TOKEN and QUARANTINE_DEV_TENANT.
 // With neither AAS nor the dev token configured, authentication fails closed.
@@ -37,6 +38,12 @@ func (denyAll) Authenticate(*http.Request) (replay.BrowserPrincipal, error) {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	if err := validateAuthConfiguration(os.Getenv); err != nil {
 		log.Fatal(err)
 	}
@@ -69,17 +76,42 @@ func main() {
 		User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
 		Table: env("QUARANTINE_CH_TABLE", "processing_errors_distributed"),
 	}
+	var kafkaConfig *replay.KafkaConfig
 	var kafka *replay.KafkaPublisher
+	var err error
 	if os.Getenv("ASTRYON_KAFKA_BROKERS") != "" {
 		config, err := replay.LoadKafkaConfig(os.Getenv)
 		if err != nil {
 			log.Fatalf("kafka config: %v", err)
 		}
+		kafkaConfig = &config
 		kafka, err = replay.NewKafkaPublisher(config)
 		if err != nil {
 			log.Fatalf("kafka: %v", err)
 		}
 		defer kafka.Close()
+	}
+	var journal *replay.JournalConsumer
+	journalErrors := make(chan error, 1)
+	journalCtx, journalCancel := context.WithCancel(context.Background())
+	defer journalCancel()
+	if group := os.Getenv("QUARANTINE_JOURNAL_GROUP"); group != "" {
+		if kafkaConfig == nil {
+			log.Fatal("ASTRYON_KAFKA_BROKERS is required with QUARANTINE_JOURNAL_GROUP")
+		}
+		journalStore := &replay.ClickHouseStore{
+			URL: env("CH_URL", "http://localhost:8123"), Database: env("CH_DATABASE", "astryon"),
+			User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
+			Table: env("QUARANTINE_JOURNAL_TABLE", "processing_errors_local"),
+		}
+		journal, err = replay.NewJournalConsumer(*kafkaConfig, group, replay.ClickHouseJournal{Store: journalStore})
+		if err != nil {
+			log.Fatalf("quarantine journal: %v", err)
+		}
+		go func() {
+			reportJournalFailure(journalErrors, journal.Run(journalCtx))
+		}()
+		log.Printf("quarantine journal consuming %s as %s", replay.TopicQuarantineJournal, group)
 	}
 	auditCtx, auditCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	mirror, auditPool, err := newAuditMirror(auditCtx, os.Getenv)
@@ -101,20 +133,43 @@ func main() {
 	log.Printf("quarantine browser listening on %s", server.Addr)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	var runErr error
 	select {
 	case err := <-errorChannel:
 		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+			runErr = err
 		}
+	case err := <-journalErrors:
+		// The journal is opt-in, but once enabled it is part of this process's
+		// correctness boundary. Do not leave a healthy-looking HTTP service
+		// running after ingestion has stopped; let the orchestrator restart it.
+		runErr = fmt.Errorf("quarantine journal stopped: %w", err)
 	case <-signals:
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	journalCancel()
+	if journal != nil {
+		journal.Close()
+	}
 	if err := mirror.close(ctx); err != nil {
 		log.Printf("audit mirror shutdown: %v", err)
 	}
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
+	}
+	return runErr
+}
+
+func reportJournalFailure(dst chan<- error, err error) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	select {
+	case dst <- err:
+	default:
+		// The main lifecycle select owns shutdown; never let a failed journal
+		// goroutine block while reporting a terminal error.
 	}
 }
 

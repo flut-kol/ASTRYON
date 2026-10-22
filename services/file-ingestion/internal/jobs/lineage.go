@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"sync"
 )
 
 var ErrLineage = errors.New("invalid lineage")
+var sha256Hex = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
 type Destination string
 
@@ -65,6 +67,12 @@ func (b BatchLineage) Validate() error {
 	if b.Destination != ParquetS3 && b.Destination != ClickHouseBulk {
 		return fmt.Errorf("%w: destination", ErrLineage)
 	}
+	if !sha256Hex.MatchString(b.SourceChecksum) {
+		return fmt.Errorf("%w: source checksum", ErrLineage)
+	}
+	if b.Valid < 0 || b.Invalid < 0 || b.Valid+b.Invalid != int(b.LastRow-b.FirstRow+1) {
+		return fmt.Errorf("%w: row counts", ErrLineage)
+	}
 	return nil
 }
 
@@ -72,6 +80,43 @@ func (b BatchLineage) Validate() error {
 // sink write and the checkpoint replays the batch.
 type LineageRecorder interface {
 	Record(ctx context.Context, b BatchLineage) error
+}
+
+// PGLineage persists batch lineage in PostgreSQL. It uses the same tenant RLS
+// session setting as the job store and upserts by the deterministic batch ID,
+// making sink/checkpoint crash retries idempotent.
+type PGLineage struct{ DB DB }
+
+const sqlLineage = `INSERT INTO file_batch_lineage
+	(tenant_id, batch_id, job_id, source_file_id, source_checksum, pipeline_version, destination,
+	 first_row, last_row, valid_rows, invalid_rows, output_key)
+	VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12)
+	ON CONFLICT (tenant_id, batch_id) DO UPDATE SET
+	 job_id = EXCLUDED.job_id, source_file_id = EXCLUDED.source_file_id,
+	 source_checksum = EXCLUDED.source_checksum, pipeline_version = EXCLUDED.pipeline_version,
+	 destination = EXCLUDED.destination, first_row = EXCLUDED.first_row, last_row = EXCLUDED.last_row,
+	 valid_rows = EXCLUDED.valid_rows, invalid_rows = EXCLUDED.invalid_rows, output_key = EXCLUDED.output_key`
+
+func (l *PGLineage) Record(ctx context.Context, b BatchLineage) error {
+	if err := b.Validate(); err != nil {
+		return err
+	}
+	if l == nil || l.DB == nil {
+		return errors.New("jobs: nil PostgreSQL lineage DB")
+	}
+	tx, err := l.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('astryon.tenant_id', $1, true)`, b.TenantID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, sqlLineage, b.TenantID, b.BatchID, b.JobID, b.SourceFileID, b.SourceChecksum,
+		b.PipelineVersion, string(b.Destination), b.FirstRow, b.LastRow, b.Valid, b.Invalid, b.OutputKey); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // LogLineage writes one JSON line per batch (for log shipping). It is not a durable store.

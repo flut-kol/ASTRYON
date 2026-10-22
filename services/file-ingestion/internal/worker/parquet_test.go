@@ -57,7 +57,7 @@ func runPQ(t *testing.T, st *fakeStore, data []byte, sink Sink, lin jobs.Lineage
 		st.job.ContentType = pqJob().ContentType
 		st.job.ID, st.job.TenantID, st.job.FileObjectID = "j1", "t1", "f1"
 	}
-	w := New(Config{Store: st, Source: pqSource{data: data, fp: "fp"}, Sink: sink, BatchSize: batch, Heartbeat: time.Hour,
+	w := New(Config{Store: st, Source: pqSource{data: data, fp: strings.Repeat("f", 64)}, Sink: sink, BatchSize: batch, Heartbeat: time.Hour,
 		Policies: classify.PolicySet{Default: classify.Allow}, Lineage: lin})
 	_, _ = w.RunOnce(context.Background())
 }
@@ -89,7 +89,7 @@ func TestParquetProcessesRowGroupsAndCheckpointsOnlyAtGroupEnds(t *testing.T) {
 	}
 	rows := 0
 	for _, b := range all {
-		if b.SourceFileID != "f1" || b.SourceChecksum != "fp" || b.JobID != "j1" || b.PipelineVersion != "file-ingestion/1" || b.Destination != jobs.ClickHouseBulk || b.Validate() != nil {
+		if b.SourceFileID != "f1" || b.SourceChecksum != strings.Repeat("f", 64) || b.JobID != "j1" || b.PipelineVersion != "file-ingestion/1" || b.Destination != jobs.ClickHouseBulk || b.Validate() != nil {
 			t.Fatalf("%+v", b)
 		}
 		rows += b.Valid

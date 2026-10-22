@@ -148,24 +148,39 @@ class EnvelopeProcessorTest {
     }
 
     @Test
-    void rejectsTenantThatIsNotAUuid() throws Exception {
+    void sendsTenantlessInputToDlqWithoutInventingTenant() throws Exception {
         String invalid = new String(goodEnvelope(), StandardCharsets.UTF_8)
-                .replace("11111111-1111-4111-8111-111111111111", "not-a-tenant");
+                .replace("11111111-1111-4111-8111-111111111111", "tenant-secret-not-valid")
+                .replace("\"payload\":{\"amount\":42}", "\"payload\":{\"amount\":42,\"secret\":\"tenant-secret-not-valid\"}");
 
-        IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> processor.process(new RawRecord("raw.events.v1", 0, 1, KEY, invalid.getBytes(StandardCharsets.UTF_8))));
-        assertEquals("cannot quarantine without a validated tenant_id", failure.getMessage());
+        ProcessingResult result = processor.process(new RawRecord(
+                "raw.events.v1", 0, 1, KEY, invalid.getBytes(StandardCharsets.UTF_8)));
+        assertEquals(ProcessingConfig.DLQ_TOPIC, result.quarantined().topic());
+        JsonNode dlq = mapper.readTree(result.quarantined().value());
+        assertFalse(dlq.has("tenant_id"));
+        assertFalse(dlq.has("original"));
+        assertFalse(new String(result.quarantined().value(), StandardCharsets.UTF_8).contains("tenant-secret-not-valid"));
+        assertEquals("ERR_TENANT_ID_INVALID", dlq.path("reason_code").asText());
+        assertEquals("f83d5745-260c-8507-9b4f-f7710e051988", dlq.path("dead_letter_id").asText());
     }
 
     @Test
-    void failsClosedWithoutValidatedTenantSoOffsetCannotBeCheckpointed() {
-        IllegalStateException malformed = assertThrows(IllegalStateException.class, () -> processor.process(new RawRecord(
-                "raw.events.v1", 0, 1, KEY, "not-json".getBytes(StandardCharsets.UTF_8))));
-        IllegalStateException missing = assertThrows(IllegalStateException.class, () -> processor.process(new RawRecord(
-                "raw.events.v1", 0, 2, KEY, "{\"source_id\":\"22222222-2222-4222-8222-222222222222\"}".getBytes(StandardCharsets.UTF_8))));
+    void sendsMalformedAndMissingTenantInputsToDlq() throws Exception {
+        ProcessingResult malformed = processor.process(new RawRecord(
+                "raw.events.v1", 0, 1, KEY, "not-json".getBytes(StandardCharsets.UTF_8)));
+        ProcessingResult missing = processor.process(new RawRecord(
+                "raw.events.v1", 0, 2, KEY, "{\"source_id\":\"22222222-2222-4222-8222-222222222222\"}".getBytes(StandardCharsets.UTF_8)));
 
-        assertEquals("cannot quarantine without a validated tenant_id", malformed.getMessage());
-        assertEquals("cannot quarantine without a validated tenant_id", missing.getMessage());
+        assertEquals(ProcessingConfig.DLQ_TOPIC, malformed.quarantined().topic());
+        JsonNode malformedDlq = mapper.readTree(malformed.quarantined().value());
+        assertEquals("ERR_ENVELOPE_MALFORMED", malformedDlq.path("reason_code").asText());
+        assertFalse(malformedDlq.has("tenant_id"));
+        assertFalse(malformedDlq.has("original"));
+        assertEquals(ProcessingConfig.DLQ_TOPIC, missing.quarantined().topic());
+        JsonNode missingDlq = mapper.readTree(missing.quarantined().value());
+        assertEquals("ERR_EVENT_ID_INVALID", missingDlq.path("reason_code").asText());
+        assertFalse(missingDlq.has("tenant_id"));
+        assertFalse(missingDlq.has("original"));
     }
 
     @Test
