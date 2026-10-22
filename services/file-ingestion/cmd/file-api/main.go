@@ -1,4 +1,4 @@
-// Command file-api serves POST /v1/files/uploads and /v1/files/uploads/{id}/complete.
+// Command file-api serves uploads plus spreadsheet-prep preview/version endpoints.
 //
 // Required: FILE_API_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY.
 // Optional: FILE_S3_REGION, LISTEN_ADDR (:8085), FILE_MAX_BYTES (default 5 GiB), FILE_MAX_PARTS (default 1000),
@@ -8,6 +8,7 @@
 // FILE_METRICS_ADDR serves /metrics (off when unset). Audit tuning: FILE_AUDIT_QUEUE_SIZE, FILE_AUDIT_BATCH_SIZE,
 // FILE_AUDIT_FLUSH_MS, FILE_AUDIT_WRITE_TIMEOUT_MS, FILE_AUDIT_RETRIES and FILE_AUDIT_DRAIN_SECONDS.
 // Archive handling is disabled by default; FILE_ARCHIVE_MODE=inspect enables bounded metadata inspection at complete.
+// FILE_EDIT_MAX_BYTES (default 512 MiB) bounds spreadsheet-prep output; edit endpoints never enqueue a job.
 // AAS: see aas.go. DEV ONLY: FILE_API_DEV_TOKEN + FILE_API_DEV_TENANT. Without AAS or the dev token every request is rejected.
 package main
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/astryon/audit"
 	"github.com/astryon/file-ingestion/internal/api"
+	"github.com/astryon/file-ingestion/internal/editsave"
 	"github.com/astryon/file-ingestion/internal/joblist"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/listing"
@@ -149,7 +151,9 @@ func main() {
 		Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c, ArchiveMode: archiveMode,
 		Jobs: apiJobs, Insights: apiJobs, Lister: listing.PGStore{Pool: pool}, JobReader: joblist.PGStore{Pool: pool}, Audit: auditWriter,
 		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
-			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
+			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types},
+		Edits: editsave.Service{Files: objects.PGStore{DB: db}, Objs: c, Writer: c, Versions: editsave.PGStore{Pool: pool},
+			MaxBytes: num("FILE_EDIT_MAX_BYTES", 512<<20), Now: time.Now}}
 	metricsSrv := serveMetrics(s.WritePrometheus)
 	srv := &http.Server{Addr: env("LISTEN_ADDR", ":8085"), Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("file-api listening on %s", srv.Addr)

@@ -20,6 +20,7 @@ import (
 	"github.com/astryon/audit"
 	archivecheck "github.com/astryon/file-ingestion/internal/archive"
 	"github.com/astryon/file-ingestion/internal/classify"
+	"github.com/astryon/file-ingestion/internal/editsave"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/listing"
 	"github.com/astryon/file-ingestion/internal/objects"
@@ -98,6 +99,8 @@ type Server struct {
 	// ArchiveMode defaults to "inspect" in the file-api command; "disabled"
 	// rejects archive uploads. "inspect" keeps archives out of the normal worker path.
 	ArchiveMode string
+	// Edits serves spreadsheet-prep preview/save endpoints; nil Versions disables them.
+	Edits editsave.Service
 
 	mu     sync.Mutex
 	counts map[string]int64
@@ -113,11 +116,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/files/uploads", s.count("list", s.list))
 	mux.HandleFunc("GET /v1/files/locations", s.count("locations", s.locations))
 	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
-	mux.HandleFunc("GET /v1/files/uploads/{id}/preview", s.count("preview", s.preview))
+	mux.HandleFunc("GET /v1/files/uploads/{id}/preview", s.count("preview", s.previewUpload))
 	mux.HandleFunc("GET /v1/jobs", s.count("jobs_list", s.listJobs))
 	mux.HandleFunc("GET /v1/jobs/{id}", s.count("jobs_get", s.getJob))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/retry", s.count("retry", s.retry))
+	mux.HandleFunc("POST /v1/files/uploads/{id}/preview", s.count("preview", s.preview))
+	mux.HandleFunc("POST /v1/files/uploads/{id}/versions", s.count("create_version", s.createVersion))
+	mux.HandleFunc("GET /v1/files/uploads/{id}/versions", s.count("list_versions", s.listVersions))
+	mux.HandleFunc("GET /v1/files/uploads/{id}/versions/{versionId}", s.count("get_version", s.getVersion))
 	return mux
 }
 
@@ -251,21 +258,26 @@ func (s *Server) audit(r *http.Request, p Principal, category audit.Category, ac
 }
 
 var messages = map[string]string{
-	"UNAUTHENTICATED":     "Valid access token required.",
-	"FORBIDDEN":           "Required scope missing (astryon:uploads:write; astryon:jobs:read for /v1/jobs).",
-	"BODY_INVALID":        "Request body or path is invalid.",
-	"NOT_FOUND":           "File object not found.",
-	"STORAGE_UNAVAILABLE": "Object storage is unavailable; retry later.",
-	"SOURCE_UNKNOWN":      "Source does not exist for this tenant.",
-	"ALREADY_REGISTERED":  "This file was already registered for the tenant.",
-	"UNAVAILABLE":         "Temporarily unavailable; retry later.",
-	"CHECKSUM_MISMATCH":   "Uploaded content does not match the declared SHA-256 or size; the object was discarded.",
-	"FILE_TOO_LARGE":      "File exceeds the maximum upload size for this tenant.",
-	"TOO_MANY_UPLOADS":    "Too many uploads are open for this tenant; complete or wait for them to expire, then retry.",
-	"UPLOAD_QUOTA":        "The tenant's upload byte quota for the last 24 hours is exhausted.",
-	"UPLOAD_INCOMPLETE":   "Parts are missing or their ETags do not match.",
-	"PREVIEW_UNSUPPORTED": "Only committed text/csv and ndjson/jsonl objects can be previewed.",
-	"ARCHIVE_REJECTED":    "Archive failed bounded safety inspection and was not queued.",
+	"UNAUTHENTICATED":          "Valid access token required.",
+	"FORBIDDEN":                "Required scope missing (astryon:uploads:write; astryon:jobs:read for /v1/jobs).",
+	"BODY_INVALID":             "Request body or path is invalid.",
+	"NOT_FOUND":                "File object not found.",
+	"STORAGE_UNAVAILABLE":      "Object storage is unavailable; retry later.",
+	"SOURCE_UNKNOWN":           "Source does not exist for this tenant.",
+	"ALREADY_REGISTERED":       "This file was already registered for the tenant.",
+	"UNAVAILABLE":              "Temporarily unavailable; retry later.",
+	"CHECKSUM_MISMATCH":        "Uploaded content does not match the declared SHA-256 or size; the object was discarded.",
+	"FILE_TOO_LARGE":           "File exceeds the maximum upload size for this tenant.",
+	"TOO_MANY_UPLOADS":         "Too many uploads are open for this tenant; complete or wait for them to expire, then retry.",
+	"UPLOAD_QUOTA":             "The tenant's upload byte quota for the last 24 hours is exhausted.",
+	"UPLOAD_INCOMPLETE":        "Parts are missing or their ETags do not match.",
+	"PREVIEW_UNSUPPORTED":      "Only committed text/csv and ndjson/jsonl objects can be previewed.",
+	"ARCHIVE_REJECTED":         "Archive failed bounded safety inspection and was not queued.",
+	"OPS_INVALID":              "The edit ops are invalid (unknown column, bad pattern, or a naming collision).",
+	"UNSUPPORTED_CONTENT_TYPE": "Only text/csv uploads can be previewed or edited.",
+	"FILE_NOT_COMMITTED":       "The file upload is not committed yet.",
+	"EDIT_TOO_LARGE":           "The edited output exceeds the configured size limit.",
+	"VERSION_CONFLICT":         "Could not allocate a version number; retry.",
 }
 
 // writeErr uses the public error shape from docs/errors/api-error-catalog.md.
@@ -607,10 +619,10 @@ type previewMetadata struct {
 	Labels       []string `json:"labels,omitempty"`
 }
 
-// preview returns a bounded text view. It never reads archives, parquet or
+// previewUpload returns a bounded text view. It never reads archives, parquet or
 // uncommitted objects, and sensitive classifications are metadata-only so a
 // quarantine/PII/credential finding cannot be bypassed through AdminUI.
-func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
+func (s *Server) previewUpload(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.previewPrincipal(w, r)
 	if !ok {
 		return

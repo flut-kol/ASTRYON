@@ -33,6 +33,11 @@ item status of `quarantined` is terminal until the input is repaired.
 | 422 | `CHECKSUM_MISMATCH` | The object was deleted; verify the local file and start a new upload. |
 | 422 | `UPLOAD_INCOMPLETE` | Re-upload missing parts and call complete again with the right ETags. |
 | 502 / 503 | `STORAGE_UNAVAILABLE` / `UNAVAILABLE` | Retry after a short delay. |
+| 422 | `OPS_INVALID` | The spreadsheet-prep ops are invalid (unknown column, bad regex, a naming collision, or a malformed op); fix and resubmit. |
+| 422 | `UNSUPPORTED_CONTENT_TYPE` | Only `text/csv` uploads can be previewed or edited (`/preview`, `/versions`). |
+| 409 | `FILE_NOT_COMMITTED` | Complete the upload first; preview/edit only works on committed files. |
+| 413 | `EDIT_TOO_LARGE` | The edited output exceeds the configured size limit (`FILE_EDIT_MAX_BYTES`); split the file or reduce the ops. |
+| 409 | `VERSION_CONFLICT` | A concurrent save claimed the same version number; retry the save. |
 
 ### File job outcomes (`GET /v1/files/uploads/{id}` -> `job.error`)
 
