@@ -60,7 +60,7 @@ audiences, redirect URI, scopes, `tenant_id`, token exchange та revocation д�
 |---|---|
 | `astryon:events:write` | submit single/batch events |
 | `astryon:events:read` | query events у дозволеному tenant |
-| `astryon:uploads:write` | create/complete uploads |
+| `astryon:uploads:write` | create/complete uploads; also preview/edit-ops/save-as-new-version a committed CSV upload (`/preview`, `/versions`) — reused rather than a new scope, since registering a scope needs an external AAS realm change this repo doesn't own; see below |
 | `astryon:sources:read`, `astryon:sources:write` | read/change sources |
 | `astryon:pipelines:read`, `astryon:pipelines:write` | read/change pipelines |
 | `astryon:jobs:read`, `astryon:jobs:write` | inspect/cancel jobs |
@@ -72,6 +72,11 @@ audiences, redirect URI, scopes, `tenant_id`, token exchange та revocation д�
 | `astryon:platform:admin` | privileged control-plane operations |
 
 Остаточна матриця endpoint → audience → scopes зберігається поруч з OpenAPI і тестується автоматично.
+
+Trade-off: any principal holding `astryon:uploads:write` can now also rewrite its own uploads into new edited
+versions (preview/apply ops/save), not only create/complete them. If finer-grained separation is wanted later,
+a dedicated `astryon:uploads:edit` scope can be introduced additively — old `uploads:write` principals keep
+working during the migration window — without breaking the spreadsheet-prep MVP in `services/file-ingestion`.
 
 ## Потоки
 

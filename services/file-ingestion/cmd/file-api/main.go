@@ -1,10 +1,13 @@
-// Command file-api serves POST /v1/files/uploads and /v1/files/uploads/{id}/complete.
+// Command file-api serves POST /v1/files/uploads, /v1/files/uploads/{id}/complete, and the spreadsheet-prep
+// preview/version endpoints (/v1/files/uploads/{id}/preview, /v1/files/uploads/{id}/versions[/{versionId}]).
 //
 // Required: FILE_API_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY.
 // Optional: FILE_S3_REGION, LISTEN_ADDR (:8085), FILE_MAX_BYTES (default 5 GiB), FILE_MAX_PARTS (default 1000),
 // FILE_CONTENT_TYPES (comma list, default application/x-ndjson,text/csv).
 // Tenant upload quota defaults (override per tenant in tenant_quotas): FILE_MAX_BYTES per file, FILE_QUOTA_OPEN (20) concurrently open
 // uploads, FILE_QUOTA_BYTES_PER_DAY (100 GiB) declared bytes in the last 24h.
+// FILE_EDIT_MAX_BYTES (default 512 MiB) bounds the buffered output of a spreadsheet-prep save; independent of
+// FILE_MAX_BYTES. The edit/version endpoints reuse scope astryon:uploads:write and never enqueue a jobs row.
 // FILE_METRICS_ADDR serves /metrics (off when unset). AAS: see aas.go. DEV ONLY: FILE_API_DEV_TOKEN + FILE_API_DEV_TENANT. Without AAS or the dev token every request is rejected.
 package main
 
@@ -20,6 +23,7 @@ import (
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/api"
+	"github.com/astryon/file-ingestion/internal/editsave"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/listing"
 	"github.com/astryon/file-ingestion/internal/objects"
@@ -108,7 +112,9 @@ func main() {
 		Bucket: bucket, Files: objects.PGStore{DB: db}, Objs: c, Multipart: c,
 		Jobs: apiJobs, Insights: apiJobs, Lister: listing.PGStore{Pool: pool},
 		Uploads: upload.Service{Store: api.MultipartStarter{C: c}, Now: time.Now, MaxBytes: num("FILE_MAX_BYTES", 5<<30),
-			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types}}
+			MaxParts: int(num("FILE_MAX_PARTS", 1000)), ContentTypes: types},
+		Edits: editsave.Service{Files: objects.PGStore{DB: db}, Objs: c, Writer: c, Versions: editsave.PGStore{Pool: pool},
+			MaxBytes: num("FILE_EDIT_MAX_BYTES", 512<<20), Now: time.Now}}
 	serveMetrics(s.WritePrometheus)
 	srv := &http.Server{Addr: env("LISTEN_ADDR", ":8085"), Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("file-api listening on %s", srv.Addr)

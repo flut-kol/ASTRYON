@@ -209,6 +209,31 @@ func (c *Client) Get(ctx context.Context, key string, offset int64) (io.ReadClos
 	return resp.Body, nil
 }
 
+// Put writes a server-generated object in one signed request. It is for bounded, server-produced output only
+// (e.g. an edited-file save) — the regular upload path never proxies client bytes, and this method must not be
+// used for that.
+func (c *Client) Put(ctx context.Context, key string, body []byte, contentType string) error {
+	resp, err := c.do(ctx, http.MethodPut, key, nil, body, map[string]string{"content-type": contentType})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return check(resp, "put", 200)
+}
+
+// PresignGet returns a pre-signed GET URL valid for ttl, for handing a short-lived download link to a client.
+func (c *Client) PresignGet(key string, ttl time.Duration) (string, error) {
+	host, path, base, err := c.target(key)
+	if err != nil {
+		return "", err
+	}
+	t := c.now().UTC().Truncate(time.Second)
+	q := presignQuery(c.Creds, http.MethodGet, host, path, nil, ttl, t, c.region(), "s3")
+	u := *base
+	u.Path, u.RawPath, u.RawQuery = path, uriEncode(path, false), canonicalQuery(q)
+	return u.String(), nil
+}
+
 // Delete removes an object (used to discard uploads whose checksum did not verify).
 func (c *Client) Delete(ctx context.Context, key string) error {
 	resp, err := c.do(ctx, http.MethodDelete, key, nil, nil, nil)

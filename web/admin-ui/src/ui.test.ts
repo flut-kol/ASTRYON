@@ -4,6 +4,7 @@ import { parseProm } from './prom';
 import { labelSummary, parseTags, planParts, rewritePartUrl, sha256Hex, uploadFile } from './upload';
 import { localToRfc3339, queryEvents } from './query';
 import { takeTokenFromHash } from './auth';
+import { getVersion, listVersions, preview, saveVersion, validateOp, type OpSpec } from './fileEdit';
 
 const json = (b: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(b), { status, headers });
 
@@ -111,5 +112,50 @@ describe('bff mode', () => {
     expect(g.headers['X-Requested-With']).toBeUndefined();
     expect(p.headers['X-Requested-With']).toBe('astryon-admin');
     expect(p.credentials).toBe('same-origin');
+  });
+});
+
+describe('file edit', () => {
+  it('preview posts ops and format options to the right path', async () => {
+    const f = vi.fn().mockResolvedValue(json({ header: ['a'], rows: [['1']], truncated: false, warnings: [] }));
+    const ops: OpSpec[] = [{ type: 'rename_column', column: 'a', new_name: 'b' }];
+    await preview({ getToken: () => 't', fetchFn: f }, '/files', 'f1', ops, { output_delimiter: ',' }, 10);
+    expect(f.mock.calls[0][0]).toBe('/files/v1/files/uploads/f1/preview');
+    expect(f.mock.calls[0][1].method).toBe('POST');
+    expect(JSON.parse(f.mock.calls[0][1].body)).toEqual({ ops, output_delimiter: ',', limit: 10 });
+  });
+
+  it('saveVersion posts to the versions path', async () => {
+    const f = vi.fn().mockResolvedValue(json({ version_id: 'v1', file_object_id: 'f1', version_number: 1, header: ['a'], output_delimiter: ',', header_row: true, size_bytes: 1, row_count: 1, created_at: 't' }));
+    await saveVersion({ getToken: () => 't', fetchFn: f }, '/files', 'f1', [], { output_delimiter: ',' }, 'out.csv');
+    expect(f.mock.calls[0][0]).toBe('/files/v1/files/uploads/f1/versions');
+    expect(JSON.parse(f.mock.calls[0][1].body)).toEqual({ ops: [], output_delimiter: ',', filename: 'out.csv' });
+  });
+
+  it('listVersions and getVersion build the right URLs', async () => {
+    const f = vi.fn().mockResolvedValue(json({ items: [] }));
+    await listVersions({ getToken: () => 't', fetchFn: f }, '/files', 'f1');
+    expect(f.mock.calls[0][0]).toBe('/files/v1/files/uploads/f1/versions');
+    const g = vi.fn().mockResolvedValue(json({ version_id: 'v1' }));
+    await getVersion({ getToken: () => 't', fetchFn: g }, '/files', 'f1', 'v 1');
+    expect(g.mock.calls[0][0]).toBe('/files/v1/files/uploads/f1/versions/v%201');
+  });
+
+  it('validateOp rejects ops missing required fields and accepts valid ones', () => {
+    expect(validateOp({ type: 'rename_column', column: 'a' })).toBeDefined();
+    expect(validateOp({ type: 'rename_column', column: 'a', new_name: 'b' })).toBeUndefined();
+    expect(validateOp({ type: 'split_column', column: 'a', delimiter: ' ', new_columns: ['x'] })).toBeDefined();
+    expect(validateOp({ type: 'split_column', column: 'a', delimiter: ' ', new_columns: ['x', 'y'] })).toBeUndefined();
+    expect(validateOp({ type: 'merge_columns', columns: ['a'], new_column: 'c' })).toBeDefined();
+    expect(validateOp({ type: 'merge_columns', columns: ['a', 'b'], new_column: 'c' })).toBeUndefined();
+    expect(validateOp({ type: 'find_replace', find: 'x' })).toBeDefined();
+    expect(validateOp({ type: 'find_replace', all_columns: true, find: 'x' })).toBeUndefined();
+    expect(validateOp({ type: 'delete_column' })).toBeDefined();
+    expect(validateOp({ type: 'delete_column', column: 'a' })).toBeUndefined();
+    expect(validateOp({ type: 'reorder_columns', order: [] })).toBeDefined();
+    expect(validateOp({ type: 'reorder_columns', order: ['a'] })).toBeUndefined();
+    expect(validateOp({ type: 'trim_whitespace' })).toBeDefined();
+    expect(validateOp({ type: 'trim_whitespace', all_columns: true })).toBeUndefined();
+    expect(validateOp({ type: 'drop_empty_rows' })).toBeUndefined();
   });
 });

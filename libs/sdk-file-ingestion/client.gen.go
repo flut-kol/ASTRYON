@@ -45,6 +45,18 @@ const (
 	Unknown           CreateUploadSourceType = "unknown"
 )
 
+// Defines values for OpSpecType.
+const (
+	DeleteColumn   OpSpecType = "delete_column"
+	DropEmptyRows  OpSpecType = "drop_empty_rows"
+	FindReplace    OpSpecType = "find_replace"
+	MergeColumns   OpSpecType = "merge_columns"
+	RenameColumn   OpSpecType = "rename_column"
+	ReorderColumns OpSpecType = "reorder_columns"
+	SplitColumn    OpSpecType = "split_column"
+	TrimWhitespace OpSpecType = "trim_whitespace"
+)
+
 // Defines values for UploadInfoJobStatus.
 const (
 	UploadInfoJobStatusCANCELLED   UploadInfoJobStatus = "CANCELLED"
@@ -154,10 +166,107 @@ type Error struct {
 	Message string `json:"message"`
 }
 
+// FileEditVersion defines model for FileEditVersion.
+type FileEditVersion struct {
+	CreatedAt         time.Time  `json:"created_at"`
+	DownloadExpiresAt *time.Time `json:"download_expires_at,omitempty"`
+
+	// DownloadUrl Present on create/get; omitted from the list
+	DownloadUrl     *string            `json:"download_url,omitempty"`
+	FileObjectId    openapi_types.UUID `json:"file_object_id"`
+	Header          []string           `json:"header"`
+	HeaderRow       bool               `json:"header_row"`
+	OutputDelimiter string             `json:"output_delimiter"`
+	RowCount        int                `json:"row_count"`
+	SizeBytes       int                `json:"size_bytes"`
+	VersionId       openapi_types.UUID `json:"version_id"`
+	VersionNumber   int                `json:"version_number"`
+}
+
+// FormatOptions defines model for FormatOptions.
+type FormatOptions struct {
+	InputHeaderRow *bool `json:"input_header_row,omitempty"`
+
+	// OutputDelimiter Single character, e.g. ',' or a tab.
+	OutputDelimiter *string `json:"output_delimiter,omitempty"`
+	OutputHeaderRow *bool   `json:"output_header_row,omitempty"`
+}
+
 // Labels Content labels. Counts and field names only; matched values are never stored or returned.
 type Labels map[string]struct {
 	Count  int      `json:"count"`
 	Fields []string `json:"fields"`
+}
+
+// OpSpec One spreadsheet-prep pipeline step. Column references are resolved against the header as it stands after the preceding steps, so a later op can refer to a column a previous rename/split introduced.
+type OpSpec struct {
+	// AllColumns find_replace
+	AllColumns    *bool `json:"all_columns,omitempty"`
+	CaseSensitive *bool `json:"case_sensitive,omitempty"`
+
+	// Column rename_column, split_column, find_replace (scoped), trim_whitespace (scoped).
+	Column *string `json:"column,omitempty"`
+
+	// Columns merge_columns, in join order.
+	Columns *[]string `json:"columns,omitempty"`
+
+	// Delimiter split_column; a literal substring
+	Delimiter *string `json:"delimiter,omitempty"`
+
+	// DropOriginal split_column
+	DropOriginal *bool   `json:"drop_original,omitempty"`
+	Find         *string `json:"find,omitempty"`
+
+	// NewColumn merge_columns result name.
+	NewColumn *string `json:"new_column,omitempty"`
+
+	// NewColumns split_column result names.
+	NewColumns *[]string `json:"new_columns,omitempty"`
+
+	// NewName rename_column.
+	NewName *string `json:"new_name,omitempty"`
+
+	// Order reorder_columns: full target permutation of the current header.
+	Order   *[]string `json:"order,omitempty"`
+	Regex   *bool     `json:"regex,omitempty"`
+	Replace *string   `json:"replace,omitempty"`
+
+	// Separator merge_columns join separator.
+	Separator *string    `json:"separator,omitempty"`
+	Type      OpSpecType `json:"type"`
+}
+
+// OpSpecType defines model for OpSpec.Type.
+type OpSpecType string
+
+// PreviewRequest defines model for PreviewRequest.
+type PreviewRequest struct {
+	InputHeaderRow  *bool    `json:"input_header_row,omitempty"`
+	Limit           *int     `json:"limit,omitempty"`
+	Ops             []OpSpec `json:"ops"`
+	OutputDelimiter *string  `json:"output_delimiter,omitempty"`
+	OutputHeaderRow *bool    `json:"output_header_row,omitempty"`
+}
+
+// PreviewResult defines model for PreviewResult.
+type PreviewResult struct {
+	Header    []string   `json:"header"`
+	Rows      [][]string `json:"rows"`
+	Truncated bool       `json:"truncated"`
+	Warnings  []struct {
+		Message   string `json:"message"`
+		RowNumber int    `json:"row_number"`
+	} `json:"warnings"`
+}
+
+// SaveVersionRequest defines model for SaveVersionRequest.
+type SaveVersionRequest struct {
+	// Filename Defaults to the original filename; must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$.
+	Filename        *string  `json:"filename,omitempty"`
+	InputHeaderRow  *bool    `json:"input_header_row,omitempty"`
+	Ops             []OpSpec `json:"ops"`
+	OutputDelimiter *string  `json:"output_delimiter,omitempty"`
+	OutputHeaderRow *bool    `json:"output_header_row,omitempty"`
 }
 
 // UploadInfo defines model for UploadInfo.
@@ -264,6 +373,12 @@ type CreateUploadJSONRequestBody = CreateUpload
 // CompleteUploadJSONRequestBody defines body for CompleteUpload for application/json ContentType.
 type CompleteUploadJSONRequestBody = CompleteUpload
 
+// PreviewFileEditJSONRequestBody defines body for PreviewFileEdit for application/json ContentType.
+type PreviewFileEditJSONRequestBody = PreviewRequest
+
+// SaveFileEditVersionJSONRequestBody defines body for SaveFileEditVersion for application/json ContentType.
+type SaveFileEditVersionJSONRequestBody = SaveVersionRequest
+
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
 
@@ -352,6 +467,22 @@ type ClientInterface interface {
 	CompleteUploadWithBody(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CompleteUpload(ctx context.Context, id openapi_types.UUID, body CompleteUploadJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PreviewFileEditWithBody request with any body
+	PreviewFileEditWithBody(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PreviewFileEdit(ctx context.Context, id openapi_types.UUID, body PreviewFileEditJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListFileEditVersions request
+	ListFileEditVersions(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// SaveFileEditVersionWithBody request with any body
+	SaveFileEditVersionWithBody(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	SaveFileEditVersion(ctx context.Context, id openapi_types.UUID, body SaveFileEditVersionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetFileEditVersion request
+	GetFileEditVersion(ctx context.Context, id openapi_types.UUID, versionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
 
 func (c *Client) ListUploads(ctx context.Context, params *ListUploadsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -416,6 +547,78 @@ func (c *Client) CompleteUploadWithBody(ctx context.Context, id openapi_types.UU
 
 func (c *Client) CompleteUpload(ctx context.Context, id openapi_types.UUID, body CompleteUploadJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCompleteUploadRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PreviewFileEditWithBody(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPreviewFileEditRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PreviewFileEdit(ctx context.Context, id openapi_types.UUID, body PreviewFileEditJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPreviewFileEditRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListFileEditVersions(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListFileEditVersionsRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SaveFileEditVersionWithBody(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSaveFileEditVersionRequestWithBody(c.Server, id, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) SaveFileEditVersion(ctx context.Context, id openapi_types.UUID, body SaveFileEditVersionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSaveFileEditVersionRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetFileEditVersion(ctx context.Context, id openapi_types.UUID, versionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFileEditVersionRequest(c.Server, id, versionId)
 	if err != nil {
 		return nil, err
 	}
@@ -724,6 +927,175 @@ func NewCompleteUploadRequestWithBody(server string, id openapi_types.UUID, cont
 	return req, nil
 }
 
+// NewPreviewFileEditRequest calls the generic PreviewFileEdit builder with application/json body
+func NewPreviewFileEditRequest(server string, id openapi_types.UUID, body PreviewFileEditJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPreviewFileEditRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewPreviewFileEditRequestWithBody generates requests for PreviewFileEdit with any type of body
+func NewPreviewFileEditRequestWithBody(server string, id openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/uploads/%s/preview", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewListFileEditVersionsRequest generates requests for ListFileEditVersions
+func NewListFileEditVersionsRequest(server string, id openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/uploads/%s/versions", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewSaveFileEditVersionRequest calls the generic SaveFileEditVersion builder with application/json body
+func NewSaveFileEditVersionRequest(server string, id openapi_types.UUID, body SaveFileEditVersionJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewSaveFileEditVersionRequestWithBody(server, id, "application/json", bodyReader)
+}
+
+// NewSaveFileEditVersionRequestWithBody generates requests for SaveFileEditVersion with any type of body
+func NewSaveFileEditVersionRequestWithBody(server string, id openapi_types.UUID, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/uploads/%s/versions", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewGetFileEditVersionRequest generates requests for GetFileEditVersion
+func NewGetFileEditVersionRequest(server string, id openapi_types.UUID, versionId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "versionId", runtime.ParamLocationPath, versionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/uploads/%s/versions/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 func (c *Client) applyEditors(ctx context.Context, req *http.Request, additionalEditors []RequestEditorFn) error {
 	for _, r := range c.RequestEditors {
 		if err := r(ctx, req); err != nil {
@@ -782,6 +1154,22 @@ type ClientWithResponsesInterface interface {
 	CompleteUploadWithBodyWithResponse(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteUploadResponse, error)
 
 	CompleteUploadWithResponse(ctx context.Context, id openapi_types.UUID, body CompleteUploadJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteUploadResponse, error)
+
+	// PreviewFileEditWithBodyWithResponse request with any body
+	PreviewFileEditWithBodyWithResponse(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PreviewFileEditResponse, error)
+
+	PreviewFileEditWithResponse(ctx context.Context, id openapi_types.UUID, body PreviewFileEditJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewFileEditResponse, error)
+
+	// ListFileEditVersionsWithResponse request
+	ListFileEditVersionsWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*ListFileEditVersionsResponse, error)
+
+	// SaveFileEditVersionWithBodyWithResponse request with any body
+	SaveFileEditVersionWithBodyWithResponse(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SaveFileEditVersionResponse, error)
+
+	SaveFileEditVersionWithResponse(ctx context.Context, id openapi_types.UUID, body SaveFileEditVersionJSONRequestBody, reqEditors ...RequestEditorFn) (*SaveFileEditVersionResponse, error)
+
+	// GetFileEditVersionWithResponse request
+	GetFileEditVersionWithResponse(ctx context.Context, id openapi_types.UUID, versionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*GetFileEditVersionResponse, error)
 }
 
 type ListUploadsResponse struct {
@@ -887,6 +1275,108 @@ func (r CompleteUploadResponse) StatusCode() int {
 	return 0
 }
 
+type PreviewFileEditResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PreviewResult
+	JSON404      *Error
+	JSON409      *Error
+	JSON422      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r PreviewFileEditResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PreviewFileEditResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListFileEditVersionsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		Items []FileEditVersion `json:"items"`
+	}
+	JSONDefault *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ListFileEditVersionsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListFileEditVersionsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type SaveFileEditVersionResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *FileEditVersion
+	JSON404      *Error
+	JSON409      *Error
+	JSON413      *Error
+	JSON422      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r SaveFileEditVersionResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r SaveFileEditVersionResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetFileEditVersionResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FileEditVersion
+	JSON404      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFileEditVersionResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFileEditVersionResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 // ListUploadsWithResponse request returning *ListUploadsResponse
 func (c *ClientWithResponses) ListUploadsWithResponse(ctx context.Context, params *ListUploadsParams, reqEditors ...RequestEditorFn) (*ListUploadsResponse, error) {
 	rsp, err := c.ListUploads(ctx, params, reqEditors...)
@@ -937,6 +1427,58 @@ func (c *ClientWithResponses) CompleteUploadWithResponse(ctx context.Context, id
 		return nil, err
 	}
 	return ParseCompleteUploadResponse(rsp)
+}
+
+// PreviewFileEditWithBodyWithResponse request with arbitrary body returning *PreviewFileEditResponse
+func (c *ClientWithResponses) PreviewFileEditWithBodyWithResponse(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PreviewFileEditResponse, error) {
+	rsp, err := c.PreviewFileEditWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePreviewFileEditResponse(rsp)
+}
+
+func (c *ClientWithResponses) PreviewFileEditWithResponse(ctx context.Context, id openapi_types.UUID, body PreviewFileEditJSONRequestBody, reqEditors ...RequestEditorFn) (*PreviewFileEditResponse, error) {
+	rsp, err := c.PreviewFileEdit(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePreviewFileEditResponse(rsp)
+}
+
+// ListFileEditVersionsWithResponse request returning *ListFileEditVersionsResponse
+func (c *ClientWithResponses) ListFileEditVersionsWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*ListFileEditVersionsResponse, error) {
+	rsp, err := c.ListFileEditVersions(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListFileEditVersionsResponse(rsp)
+}
+
+// SaveFileEditVersionWithBodyWithResponse request with arbitrary body returning *SaveFileEditVersionResponse
+func (c *ClientWithResponses) SaveFileEditVersionWithBodyWithResponse(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SaveFileEditVersionResponse, error) {
+	rsp, err := c.SaveFileEditVersionWithBody(ctx, id, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSaveFileEditVersionResponse(rsp)
+}
+
+func (c *ClientWithResponses) SaveFileEditVersionWithResponse(ctx context.Context, id openapi_types.UUID, body SaveFileEditVersionJSONRequestBody, reqEditors ...RequestEditorFn) (*SaveFileEditVersionResponse, error) {
+	rsp, err := c.SaveFileEditVersion(ctx, id, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSaveFileEditVersionResponse(rsp)
+}
+
+// GetFileEditVersionWithResponse request returning *GetFileEditVersionResponse
+func (c *ClientWithResponses) GetFileEditVersionWithResponse(ctx context.Context, id openapi_types.UUID, versionId openapi_types.UUID, reqEditors ...RequestEditorFn) (*GetFileEditVersionResponse, error) {
+	rsp, err := c.GetFileEditVersion(ctx, id, versionId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetFileEditVersionResponse(rsp)
 }
 
 // ParseListUploadsResponse parses an HTTP response from a ListUploadsWithResponse call
@@ -1105,6 +1647,196 @@ func ParseCompleteUploadResponse(rsp *http.Response) (*CompleteUploadResponse, e
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePreviewFileEditResponse parses an HTTP response from a PreviewFileEditWithResponse call
+func ParsePreviewFileEditResponse(rsp *http.Response) (*PreviewFileEditResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PreviewFileEditResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PreviewResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListFileEditVersionsResponse parses an HTTP response from a ListFileEditVersionsWithResponse call
+func ParseListFileEditVersionsResponse(rsp *http.Response) (*ListFileEditVersionsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListFileEditVersionsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Items []FileEditVersion `json:"items"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseSaveFileEditVersionResponse parses an HTTP response from a SaveFileEditVersionWithResponse call
+func ParseSaveFileEditVersionResponse(rsp *http.Response) (*SaveFileEditVersionResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &SaveFileEditVersionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest FileEditVersion
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 413:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON413 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetFileEditVersionResponse parses an HTTP response from a GetFileEditVersionWithResponse call
+func ParseGetFileEditVersionResponse(rsp *http.Response) (*GetFileEditVersionResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetFileEditVersionResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FileEditVersion
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

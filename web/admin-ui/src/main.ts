@@ -8,6 +8,10 @@ import { listConnectors, setConnectorEnabled } from './connectors';
 import { createExport, getExport, isTerminal, knownExports, rememberExport, validateSpec, type ExportJob } from './exports';
 import { listQuarantine, planReplay } from './quarantine';
 import { listReplays, REPLAY_STATUSES } from './replays';
+import {
+  defaultOp, getEditTarget, getVersion, listVersions, OP_TYPES, preview, saveVersion, setEditTarget, validateOp,
+  type FormatOptions, type OpSpec, type OpType, type VersionSummary,
+} from './fileEdit';
 
 const env = import.meta.env;
 const B = {
@@ -28,7 +32,7 @@ if (frag) { setToken(frag); history.replaceState(null, '', location.pathname + l
 
 const ROUTES: [string, string, (el: HTMLElement) => void | Promise<void>][] = [
   ['overview', 'Overview', overview], ['uploads', 'Uploads', uploads], ['events', 'Events', events],
-  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['replays', 'Replays', replaysPage], ['jobs', 'Jobs', () => {}], ['sources', 'Sources', () => {}],
+  ['quality', 'Quality', quality], ['connectors', 'Connectors', connectors], ['exports', 'Exports', exportsPage], ['quarantine', 'Quarantine', quarantinePage], ['replays', 'Replays', replaysPage], ['file-edit', 'Edit file', fileEditPage], ['jobs', 'Jobs', () => {}], ['sources', 'Sources', () => {}],
 ];
 
 function na(what: string) { return h('div', { class: 'na' }, `${what}: API not available in this build.`); }
@@ -154,7 +158,8 @@ function detailCard(u: UploadItem) {
       ['error code', j?.error ?? '-'],
       ['content labels (counts only)', Object.entries(j?.labels ?? {}).map(([k, v]) => `${k}: ${v.count} (${v.fields.length} fields)`).join('; ') || '-'],
       ['profile', u.profile ? `retention=${u.profile.retention_class ?? '-'} export=${u.profile.export_allowed ?? '-'}` : '-'],
-    ]), quarantined ? h('p', { class: 'warn' }, 'Held back by content policy: nothing reached the sink.') : null);
+    ]), quarantined ? h('p', { class: 'warn' }, 'Held back by content policy: nothing reached the sink.') : null,
+    u.committed ? h('button', { onclick: () => { setEditTarget(u.file_object_id); location.hash = '#/file-edit'; } }, 'Edit this file (CSV only)') : null);
 }
 
 function rangeControls() {
@@ -348,6 +353,137 @@ async function quarantinePage(el: HTMLElement) {
   el.append(h('div', { class: 'card' }, h('h3', {}, 'Replay dry run'), h('div', { class: 'row' }, field('Source ID', src), field('Occurred from', from), field('Occurred to', to), field('Pipeline version', pv),
     h('button', { onclick: () => void dry() }, 'Count candidates')), plan), h('div', { class: 'card' }, list));
   await load();
+}
+
+// Each field helper owns the input/select it creates and reads back from it directly (never from the event
+// target), same style as the rest of this file; the setter mutates the OpSpec object in place so the ops
+// array stays the single source of truth without re-rendering on every keystroke.
+function strField(value: string, ph: string, set: (v: string) => void) {
+  const i = h('input', { size: '14', placeholder: ph, value, oninput: () => set(i.value) });
+  return i;
+}
+function boolField(checked: boolean, label: string, set: (v: boolean) => void) {
+  const i = h('input', { type: 'checkbox', checked, onchange: () => set(i.checked) });
+  return h('label', {}, i, ` ${label}`);
+}
+function listField(value: string[] | undefined, ph: string, set: (v: string[]) => void) {
+  return strField((value ?? []).join(','), ph, (s) => set(s.split(',').map((x) => x.trim()).filter(Boolean)));
+}
+
+function opRow(op: OpSpec, onRemove: () => void): HTMLElement {
+  let fields: Node[];
+  switch (op.type) {
+    case 'rename_column':
+      fields = [strField(op.column ?? '', 'column', (v) => { op.column = v; }), strField(op.new_name ?? '', 'new name', (v) => { op.new_name = v; })];
+      break;
+    case 'split_column':
+      fields = [strField(op.column ?? '', 'column', (v) => { op.column = v; }), strField(op.delimiter ?? '', 'delimiter', (v) => { op.delimiter = v; }),
+        listField(op.new_columns, 'new columns (a,b,c)', (v) => { op.new_columns = v; }), boolField(!!op.drop_original, 'drop original', (v) => { op.drop_original = v; })];
+      break;
+    case 'merge_columns':
+      fields = [listField(op.columns, 'columns (a,b)', (v) => { op.columns = v; }), strField(op.new_column ?? '', 'new column', (v) => { op.new_column = v; }),
+        strField(op.separator ?? ' ', 'separator', (v) => { op.separator = v; }), boolField(!!op.drop_original, 'drop originals', (v) => { op.drop_original = v; })];
+      break;
+    case 'find_replace':
+      fields = [strField(op.column ?? '', 'column (blank = all)', (v) => { op.column = v; }), boolField(!!op.all_columns, 'all columns', (v) => { op.all_columns = v; }),
+        strField(op.find ?? '', 'find', (v) => { op.find = v; }), strField(op.replace ?? '', 'replace', (v) => { op.replace = v; }),
+        boolField(!!op.regex, 'regex', (v) => { op.regex = v; }), boolField(!!op.case_sensitive, 'case sensitive', (v) => { op.case_sensitive = v; })];
+      break;
+    case 'delete_column':
+      fields = [strField(op.column ?? '', 'column', (v) => { op.column = v; })];
+      break;
+    case 'reorder_columns':
+      fields = [listField(op.order, 'target order (a,b,c)', (v) => { op.order = v; })];
+      break;
+    case 'trim_whitespace':
+      fields = [strField(op.column ?? '', 'column (blank = all)', (v) => { op.column = v; }), boolField(!!op.all_columns, 'all columns', (v) => { op.all_columns = v; })];
+      break;
+    case 'drop_empty_rows':
+      fields = [];
+      break;
+  }
+  return h('div', { class: 'row' }, h('b', {}, op.type), ...fields, h('button', { onclick: onRemove }, 'Remove'));
+}
+
+async function fileEditPage(el: HTMLElement) {
+  const id = getEditTarget();
+  el.append(h('h2', {}, 'Edit file'));
+  if (!id) { el.append(h('div', { class: 'mut' }, 'Select a committed CSV file from ', h('a', { href: '#/uploads' }, 'Uploads'), ' first.')); return; }
+  el.append(h('p', { class: 'mut' }, `File ${id}. Edits are saved as new versions; nothing is loaded into ClickHouse here.`));
+
+  const fmt = {
+    inputHeader: h('input', { type: 'checkbox', checked: true }),
+    outputHeader: h('input', { type: 'checkbox', checked: true }),
+    delim: h('select', {}, h('option', { value: ',' }, 'comma'), h('option', { value: '\t' }, 'tab'), h('option', { value: 'custom' }, 'custom')),
+    delimCustom: h('input', { size: '3', placeholder: ';' }),
+  };
+  const formatOptions = (): FormatOptions => ({
+    input_header_row: fmt.inputHeader.checked, output_header_row: fmt.outputHeader.checked,
+    output_delimiter: fmt.delim.value === 'custom' ? fmt.delimCustom.value : fmt.delim.value,
+  });
+
+  const ops: OpSpec[] = [];
+  const opsList = h('div', {});
+  const addType = h('select', {}, OP_TYPES.map((t) => h('option', { value: t }, t)));
+  const msg = h('div', {}); const result = h('div', {}); const versions = h('div', {});
+
+  const drawOps = () => {
+    clear(opsList);
+    opsList.append(...(ops.length ? ops.map((op, idx) => opRow(op, () => { ops.splice(idx, 1); drawOps(); })) : [h('div', { class: 'mut' }, 'No ops yet.')]));
+  };
+  const checkOps = (): string | undefined => {
+    for (let i = 0; i < ops.length; i++) { const e = validateOp(ops[i]); if (e) return `op ${i + 1} (${ops[i].type}): ${e}`; }
+    return undefined;
+  };
+  const drawVersions = async () => {
+    clear(versions); versions.append('Loading...');
+    try {
+      const p = await listVersions(ctx, B.files, id);
+      clear(versions);
+      versions.append(p.items.length ? table(['version', 'header', 'delimiter', 'rows', 'bytes', 'created', ''],
+        p.items.map((v) => [v.version_number, v.header.join(','), v.output_delimiter === '\t' ? '\\t' : v.output_delimiter, fmtNum(v.row_count), fmtNum(v.size_bytes), v.created_at,
+          h('a', {
+            href: '#', onclick: (e: Event) => {
+              e.preventDefault();
+              void getVersion(ctx, B.files, id, v.version_id).then((fresh) => { if (fresh.download_url) location.href = fresh.download_url; });
+            },
+          }, 'get link')])) : h('div', { class: 'mut' }, 'No saved versions yet.'));
+    } catch (e) { clear(versions); versions.append(errBox(e)); }
+  };
+  const runPreview = async () => {
+    clear(msg); clear(result);
+    const bad = checkOps();
+    if (bad) { msg.append(h('div', { class: 'err' }, bad)); return; }
+    try {
+      const r = await preview(ctx, B.files, id, ops, formatOptions(), 100);
+      result.append(table(r.header, r.rows));
+      if (r.truncated) result.append(h('div', { class: 'mut' }, 'Preview truncated at 100 rows.'));
+      if (r.warnings.length) result.append(h('div', { class: 'warn' }, r.warnings.map((w) => `row ${w.row_number}: ${w.message}`).join('; ')));
+    } catch (e) { result.append(errBox(e)); }
+  };
+  const runSave = async () => {
+    clear(msg);
+    const bad = checkOps();
+    if (bad) { msg.append(h('div', { class: 'err' }, bad)); return; }
+    try {
+      const v = await saveVersion(ctx, B.files, id, ops, formatOptions());
+      msg.append(h('div', { class: 'ok' }, `saved version ${v.version_number} (${fmtNum(v.row_count)} rows, ${fmtNum(v.size_bytes)} bytes)`,
+        v.download_url ? h('a', { href: v.download_url }, ' download') : ''));
+      void drawVersions();
+    } catch (e) { msg.append(errBox(e)); }
+  };
+
+  el.append(
+    h('div', { class: 'card' }, h('h3', {}, 'Format'), h('div', { class: 'row' },
+      field('Input has header row', fmt.inputHeader), field('Output header row', fmt.outputHeader), field('Output delimiter', fmt.delim), field('Custom delimiter', fmt.delimCustom))),
+    h('div', { class: 'card' }, h('h3', {}, 'Ops'), opsList,
+      h('div', { class: 'row' }, addType, h('button', { onclick: () => { ops.push(defaultOp(addType.value as OpType)); drawOps(); } }, 'Add op'))),
+    h('div', { class: 'card' }, h('div', { class: 'row' },
+      h('button', { class: 'pri', onclick: () => void runPreview() }, 'Preview result'), h('button', { onclick: () => void runSave() }, 'Save as new version')), msg, result),
+    h('div', { class: 'card' }, h('h3', {}, 'Saved versions'), versions),
+  );
+  drawOps();
+  await drawVersions();
 }
 
 function render() {

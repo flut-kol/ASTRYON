@@ -130,6 +130,103 @@ paths:
             `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/preview:
+    post:
+      operationId: previewFileEdit
+      summary: Preview a spreadsheet-prep ops pipeline against a bounded sample of the file
+      description: |
+        Requires scope `astryon:uploads:write`. The file must be committed and `text/csv`. Applies `ops` in order
+        (rename, split, merge, find/replace, delete, reorder, trim, drop-empty-rows) to up to `limit` kept rows and
+        returns the resulting header/rows without writing anything. This endpoint never enqueues a job and is not
+        wired into ClickHouse ingestion.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreviewRequest' }
+      responses:
+        '200':
+          description: Preview result
+          content: { application/json: { schema: { $ref: '#/components/schemas/PreviewResult' } } }
+        '404':
+          description: Not found for this tenant (`NOT_FOUND`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: The file upload is not committed yet (`FILE_NOT_COMMITTED`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: |
+            `UNSUPPORTED_CONTENT_TYPE` (only `text/csv` can be previewed/edited) or `OPS_INVALID` (unknown column,
+            bad regex, a naming collision, or a malformed op).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/versions:
+    get:
+      operationId: listFileEditVersions
+      summary: List saved edit versions of a file (newest first)
+      description: Requires scope `astryon:uploads:write`. Capped at 100 rows; items omit `download_url` (fetch a single version for a fresh link).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: One page (no further pagination)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/FileEditVersion' } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      operationId: saveFileEditVersion
+      summary: Apply a spreadsheet-prep ops pipeline to the whole file and save the result as a new version
+      description: |
+        Requires scope `astryon:uploads:write`. Writes a new, checksummed S3 object (never mutates the original) and
+        records it under a new `version_number`. The response includes a presigned `download_url` valid for 15
+        minutes. Nothing here is loaded into ClickHouse or enqueued as a processing job.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveVersionRequest' }
+      responses:
+        '201':
+          description: Version saved
+          content: { application/json: { schema: { $ref: '#/components/schemas/FileEditVersion' } } }
+        '404':
+          description: Not found for this tenant (`NOT_FOUND`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: '`FILE_NOT_COMMITTED` or `VERSION_CONFLICT` (concurrent save claimed the version number; retry).'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '413':
+          description: The edited output exceeds the configured size limit (`EDIT_TOO_LARGE`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: '`UNSUPPORTED_CONTENT_TYPE` or `OPS_INVALID`.'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/versions/{versionId}:
+    get:
+      operationId: getFileEditVersion
+      summary: Read one saved edit version, with a fresh download link
+      description: Requires scope `astryon:uploads:write`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: versionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The version
+          content: { application/json: { schema: { $ref: '#/components/schemas/FileEditVersion' } } }
+        '404':
+          description: Not found for this tenant (`NOT_FOUND`).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearer:
@@ -140,7 +237,8 @@ components:
     Error:
       description: |
         400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type or extension for the source type, bad tags/sensitivity, missing required tag); 401 UNAUTHENTICATED;
-        403 FORBIDDEN; 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
+        403 FORBIDDEN; 404 NOT_FOUND (also another tenant's id); 409 FILE_NOT_COMMITTED / VERSION_CONFLICT; 413 FILE_TOO_LARGE / EDIT_TOO_LARGE;
+        422 OPS_INVALID / UNSUPPORTED_CONTENT_TYPE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -266,3 +364,85 @@ components:
       properties:
         code: { type: string }
         message: { type: string }
+    OpSpec:
+      type: object
+      required: [type]
+      unevaluatedProperties: false
+      description: One spreadsheet-prep pipeline step. Column references are resolved against the header as it
+        stands after the preceding steps, so a later op can refer to a column a previous rename/split introduced.
+      properties:
+        type: { type: string, enum: [rename_column, split_column, merge_columns, find_replace, delete_column, reorder_columns, trim_whitespace, drop_empty_rows] }
+        column: { type: string, description: 'rename_column, split_column, find_replace (scoped), trim_whitespace (scoped).' }
+        columns: { type: array, items: { type: string }, description: 'merge_columns, in join order.' }
+        new_name: { type: string, description: rename_column. }
+        new_column: { type: string, description: merge_columns result name. }
+        separator: { type: string, description: merge_columns join separator. }
+        delimiter: { type: string, description: split_column; a literal substring, never a regex. }
+        new_columns: { type: array, minItems: 2, items: { type: string }, description: split_column result names. }
+        drop_original: { type: boolean, description: split_column, merge_columns. }
+        all_columns: { type: boolean, description: find_replace, trim_whitespace scope. }
+        find: { type: string }
+        replace: { type: string }
+        regex: { type: boolean }
+        case_sensitive: { type: boolean }
+        order: { type: array, items: { type: string }, description: 'reorder_columns: full target permutation of the current header.' }
+    FormatOptions:
+      type: object
+      properties:
+        input_header_row: { type: boolean, default: true }
+        output_header_row: { type: boolean, default: true }
+        output_delimiter: { type: string, minLength: 1, maxLength: 1, default: ',', description: "Single character, e.g. ',' or a tab." }
+    PreviewRequest:
+      allOf:
+        - { $ref: '#/components/schemas/FormatOptions' }
+        - type: object
+          required: [ops]
+          unevaluatedProperties: false
+          properties:
+            ops: { type: array, items: { $ref: '#/components/schemas/OpSpec' } }
+            input_header_row: { type: boolean }
+            output_header_row: { type: boolean }
+            output_delimiter: { type: string }
+            limit: { type: integer, minimum: 1, maximum: 500, default: 50 }
+    SaveVersionRequest:
+      allOf:
+        - { $ref: '#/components/schemas/FormatOptions' }
+        - type: object
+          required: [ops]
+          unevaluatedProperties: false
+          properties:
+            ops: { type: array, items: { $ref: '#/components/schemas/OpSpec' } }
+            input_header_row: { type: boolean }
+            output_header_row: { type: boolean }
+            output_delimiter: { type: string }
+            filename: { type: string, description: 'Defaults to the original filename; must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$.' }
+    PreviewResult:
+      type: object
+      required: [header, rows, truncated, warnings]
+      properties:
+        header: { type: array, items: { type: string } }
+        rows: { type: array, items: { type: array, items: { type: string } } }
+        truncated: { type: boolean }
+        warnings:
+          type: array
+          items:
+            type: object
+            required: [row_number, message]
+            properties:
+              row_number: { type: integer }
+              message: { type: string }
+    FileEditVersion:
+      type: object
+      required: [version_id, file_object_id, version_number, header, output_delimiter, header_row, size_bytes, row_count, created_at]
+      properties:
+        version_id: { type: string, format: uuid }
+        file_object_id: { type: string, format: uuid }
+        version_number: { type: integer, minimum: 1 }
+        header: { type: array, items: { type: string } }
+        output_delimiter: { type: string }
+        header_row: { type: boolean }
+        size_bytes: { type: integer }
+        row_count: { type: integer }
+        download_url: { type: string, format: uri, description: Present on create/get; omitted from the list, which does not presign. }
+        download_expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }

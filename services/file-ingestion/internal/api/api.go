@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/classify"
+	"github.com/astryon/file-ingestion/internal/editsave"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/listing"
 	"github.com/astryon/file-ingestion/internal/objects"
@@ -70,6 +71,8 @@ type Server struct {
 	Quota interface {
 		Check(ctx context.Context, tenant string, size int64) error
 	}
+	// Edits serves the spreadsheet-prep preview/save endpoints; its zero value (Versions == nil) disables them with 503.
+	Edits editsave.Service
 
 	mu     sync.Mutex
 	counts map[string]int64
@@ -85,6 +88,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/files/uploads", s.count("list", s.list))
 	mux.HandleFunc("GET /v1/files/uploads/{id}", s.count("get", s.get))
 	mux.HandleFunc("POST /v1/files/uploads/{id}/complete", s.count("complete", s.complete))
+	mux.HandleFunc("POST /v1/files/uploads/{id}/preview", s.count("preview", s.preview))
+	mux.HandleFunc("POST /v1/files/uploads/{id}/versions", s.count("create_version", s.createVersion))
+	mux.HandleFunc("GET /v1/files/uploads/{id}/versions", s.count("list_versions", s.listVersions))
+	mux.HandleFunc("GET /v1/files/uploads/{id}/versions/{versionId}", s.count("get_version", s.getVersion))
 	return mux
 }
 
@@ -150,19 +157,24 @@ func (s *Server) principal(w http.ResponseWriter, r *http.Request) (Principal, b
 }
 
 var messages = map[string]string{
-	"UNAUTHENTICATED":     "Valid access token required.",
-	"FORBIDDEN":           "Scope astryon:uploads:write required.",
-	"BODY_INVALID":        "Request body or path is invalid.",
-	"NOT_FOUND":           "File object not found.",
-	"STORAGE_UNAVAILABLE": "Object storage is unavailable; retry later.",
-	"SOURCE_UNKNOWN":      "Source does not exist for this tenant.",
-	"ALREADY_REGISTERED":  "This file was already registered for the tenant.",
-	"UNAVAILABLE":         "Temporarily unavailable; retry later.",
-	"CHECKSUM_MISMATCH":   "Uploaded content does not match the declared SHA-256 or size; the object was discarded.",
-	"FILE_TOO_LARGE":      "File exceeds the maximum upload size for this tenant.",
-	"TOO_MANY_UPLOADS":    "Too many uploads are open for this tenant; complete or wait for them to expire, then retry.",
-	"UPLOAD_QUOTA":        "The tenant's upload byte quota for the last 24 hours is exhausted.",
-	"UPLOAD_INCOMPLETE":   "Parts are missing or their ETags do not match.",
+	"UNAUTHENTICATED":          "Valid access token required.",
+	"FORBIDDEN":                "Scope astryon:uploads:write required.",
+	"BODY_INVALID":             "Request body or path is invalid.",
+	"NOT_FOUND":                "File object not found.",
+	"STORAGE_UNAVAILABLE":      "Object storage is unavailable; retry later.",
+	"SOURCE_UNKNOWN":           "Source does not exist for this tenant.",
+	"ALREADY_REGISTERED":       "This file was already registered for the tenant.",
+	"UNAVAILABLE":              "Temporarily unavailable; retry later.",
+	"CHECKSUM_MISMATCH":        "Uploaded content does not match the declared SHA-256 or size; the object was discarded.",
+	"FILE_TOO_LARGE":           "File exceeds the maximum upload size for this tenant.",
+	"TOO_MANY_UPLOADS":         "Too many uploads are open for this tenant; complete or wait for them to expire, then retry.",
+	"UPLOAD_QUOTA":             "The tenant's upload byte quota for the last 24 hours is exhausted.",
+	"UPLOAD_INCOMPLETE":        "Parts are missing or their ETags do not match.",
+	"OPS_INVALID":              "The edit ops are invalid (unknown column, bad pattern, or a naming collision).",
+	"UNSUPPORTED_CONTENT_TYPE": "Only text/csv uploads can be previewed or edited.",
+	"FILE_NOT_COMMITTED":       "The file upload is not committed yet.",
+	"EDIT_TOO_LARGE":           "The edited output exceeds the configured size limit.",
+	"VERSION_CONFLICT":         "Could not allocate a version number; retry.",
 }
 
 // writeErr uses the public error shape from docs/errors/api-error-catalog.md.
