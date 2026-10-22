@@ -21,6 +21,7 @@ public record ProcessingConfig(
     static final String VALIDATED_TOPIC = "validated.events.v1";
     static final String PROCESSED_TOPIC = "processed.events.v1";
     static final String QUARANTINE_TOPIC = "events.quarantine.v1";
+    static final String DLQ_TOPIC = "events.dlq.v1";
 
     public ProcessingConfig {
         brokers = List.copyOf(brokers);

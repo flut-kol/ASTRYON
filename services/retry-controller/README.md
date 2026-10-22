@@ -13,6 +13,9 @@ Optional variables:
 
 Endpoints: `GET /healthz`, `GET /metrics`. The controller never accepts a
 tenant ID from HTTP input and exposes only aggregate, tenant-free metrics.
+Backlog gauges (read from `scheduled_retries` at scrape time): `astryon_retry_backlog_pending`
+(unfired, uncancelled retries), `astryon_retry_oldest_due_age_seconds` (0 when none due),
+plus `astryon_retry_backlog_read_errors_total`.
 
 Run after control-plane migrations are applied:
 
@@ -34,7 +37,7 @@ DATABASE_URL='<platform-provided-postgres-url>' go run ./cmd/retry-controller
   dedupe on (tenant_id, job_id, attempt) and still claim the job themselves.
 - Set `ASTRYON_RETRY_DISPATCH_TOPIC` (+ `ASTRYON_KAFKA_*`) to run the controller in dispatch mode instead of the direct
   `QUEUED` flip. Never run both modes against one database.
-- Hooks for file-ingestion/connector-manager workers (not yet wired there): call `Client.Fail` on job failure and consume the topic.
+- file-ingestion worker wiring is done (opt-in `FILE_RETRY_MODE=controller`). connector-manager only borrows `retryclient.Policy`/classification for its backoff (opt-in `CONNECTOR_RETRY_MODE=controller`): its pull state is not a `jobs` row, so `Client.Fail`/dispatcher do not schedule or dispatch connector retries. Original hook note: call `Client.Fail` on job failure and consume the topic.
 - Tests: `go test -race ./...`; live PG: `RETRYCLIENT_LIVE=1 go test ./pkg/retryclient` (needs docker).
 
 See `docs/operations/runbooks/retry-controller.md` for diagnosis and recovery.

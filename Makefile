@@ -1,13 +1,33 @@
 SHELL := /bin/bash
 GO_MODS := $(shell find . -name go.mod -not -path './vendor/*' -not -path './node_modules/*' -exec dirname {} \; 2>/dev/null | sort)
 
-.PHONY: dev-up dev-down topics test lint migrate
+.PHONY: dev-up dev-down topics test lint migrate apps-up apps-down apps-logs extras-up extras-down aggregator-run
 
 dev-up:
 	./scripts/dev/up.sh
 
 dev-down:
 	./scripts/dev/down.sh
+
+apps-up:
+	./scripts/dev/apps-up.sh
+
+apps-down:
+	./scripts/dev/apps-down.sh
+
+apps-logs:
+	docker logs -f --tail 100 astryon_apps
+
+# Redis, Kafka Connect + Debezium (own CDC PostgreSQL), see infra/docker/EXTRAS.md
+extras-up:
+	./scripts/dev/extras-up.sh
+
+extras-down:
+	./scripts/dev/extras-down.sh
+
+# one-shot ch-aggregator run; `make aggregator-run ARGS=reconcile`
+aggregator-run:
+	./scripts/dev/aggregator-run.sh $(ARGS)
 
 topics:
 	./scripts/dev/create-topics.sh

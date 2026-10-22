@@ -42,7 +42,7 @@ func kitQuarantine(c Config, reason string, timeout time.Duration) error {
 	defer k.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return k.Quarantine(ctx, []Quarantined{{Code: "it", Reason: reason, Msg: Message{Topic: "src", Value: []byte(`{"a":1}`)}}})
+	return k.Quarantine(ctx, []Quarantined{{Code: "ERR_IT", Reason: reason, Msg: Message{Topic: "src", Value: []byte(`{"tenant_id":"11111111-1111-4111-8111-111111111111"}`)}}})
 }
 
 // kitConsume polls until a record containing want arrives, then commits it.
@@ -167,7 +167,7 @@ func TestIT_ReconnectAfterBrokerRestart(t *testing.T) {
 	quar := func(reason string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		return k.Quarantine(ctx, []Quarantined{{Code: "it", Reason: reason, Msg: Message{Topic: "src", Value: []byte("{}")}}})
+		return k.Quarantine(ctx, []Quarantined{{Code: "ERR_IT", Reason: reason, Msg: Message{Topic: "src", Value: []byte(`{"tenant_id":"11111111-1111-4111-8111-111111111111"}`)}}})
 	}
 	if err := quar("before-" + tag); err != nil {
 		t.Fatal(err)

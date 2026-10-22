@@ -167,7 +167,7 @@ func (h *Handler) authorizeRead(w http.ResponseWriter, r *http.Request) (Princip
 		return Principal{}, false
 	}
 	if !p.HasScope(ScopeReplayRead) {
-		h.auditDenied(r, ReasonMissingScope, p.Subject)
+		h.auditDeniedPrincipal(r, ReasonMissingScope, p)
 		writeErr(w, 403, "forbidden", "missing scope "+ScopeReplayRead)
 		return Principal{}, false
 	}

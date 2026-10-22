@@ -120,6 +120,56 @@ func TestCursorPagination(t *testing.T) {
 	}
 }
 
+func TestTextSearchIsBoundAndPrivacyPreserving(t *testing.T) {
+	api, f := setup(t, `{"event_id":"00000000-0000-0000-0000-0000000000e1","event_time":"2026-10-20 10:15:00.000","source_id":"s"}`+"\n")
+	c, b := post(t, api, "/v1/query/text", "tok", `{`+base+`,"query":"secret' OR 1=1 --","limit":10}`)
+	if c != 200 || strings.Contains(b, "payload") || strings.Contains(b, "attributes") {
+		t.Fatalf("status/body: %d %s", c, b)
+	}
+	if !strings.Contains(f.query, "hasToken(payload, {p_text:String})") || strings.Contains(f.query, "secret' OR 1=1") {
+		t.Fatalf("query is not token-bound: %s", f.query)
+	}
+	if f.params.Get("param_p_text") != "secret' OR 1=1 --" || f.params.Get("param_p_tenant") != tenant || f.params.Get("readonly") != "1" {
+		t.Fatalf("params: %v", f.params)
+	}
+}
+
+func TestTextSearchValidation(t *testing.T) {
+	api, _ := setup(t, "")
+	for name, body := range map[string]string{
+		"missing query":  `{` + base + `}`,
+		"empty query":    `{` + base + `,"query":"   "}`,
+		"negative limit": `{` + base + `,"query":"word","limit":-1}`,
+		"unknown field":  `{` + base + `,"query":"word","tenant_id":"x"}`,
+	} {
+		if c, _ := post(t, api, "/v1/query/text", "tok", body); c != 400 {
+			t.Fatalf("%s: %d", name, c)
+		}
+	}
+	if c, _ := post(t, api, "/v1/query/text", "tok", `{`+base+`,"query":"`+strings.Repeat("x", MaxTextQuery+1)+`"}`); c != 400 {
+		t.Fatalf("oversized query accepted: %d", c)
+	}
+}
+
+func TestTextSearchCursor(t *testing.T) {
+	rows := `{"event_id":"00000000-0000-0000-0000-0000000000e1","event_time":"2026-10-20 10:15:00.000"}
+{"event_id":"00000000-0000-0000-0000-0000000000e2","event_time":"2026-10-20 10:45:00.000"}
+`
+	api, f := setup(t, rows)
+	c, body := post(t, api, "/v1/query/text", "tok", `{`+base+`,"query":"word","limit":1}`)
+	if c != 200 || !strings.Contains(body, `"next_cursor":"ey`) {
+		t.Fatalf("%d %s", c, body)
+	}
+	cur := body[strings.Index(body, `"next_cursor":"`)+15:]
+	cur = cur[:strings.Index(cur, `"`)]
+	if c, _ := post(t, api, "/v1/query/text", "tok", `{`+base+`,"query":"word","limit":1,"cursor":"`+cur+`"}`); c != 200 {
+		t.Fatalf("cursor request: %d", c)
+	}
+	if f.params.Get("param_p_ct") != "2026-10-20 10:15:00.000" || f.params.Get("param_p_ce") != "00000000-0000-0000-0000-0000000000e1" {
+		t.Fatalf("cursor params: %v", f.params)
+	}
+}
+
 func TestAggregateWhitelist(t *testing.T) {
 	api, f := setup(t, `{"event_type":"t","count":2}`+"\n")
 	if c, b := post(t, api, "/v1/query/aggregate", "tok", `{`+base+`,"metrics":["count"],"group_by":["event_type"]}`); c != 200 || !strings.Contains(b, `"count":2`) {
@@ -198,5 +248,30 @@ func TestSummaries(t *testing.T) {
 		if c, _ := get(t, api, "/v1/quality/summary"+q, "tok"); c != 400 {
 			t.Fatalf("accepted %q: %d", q, c)
 		}
+	}
+}
+
+func TestDurationAndAuthFailureMetrics(t *testing.T) {
+	api, _ := setup(t, `{"data":[]}`)
+	before := authFails[0].Load()
+	if code, _ := post(t, api, "/v1/query/events", "", `{}`); code != 401 {
+		t.Fatalf("code %d", code)
+	}
+	if authFails[0].Load() != before+1 {
+		t.Fatal("unauthenticated not counted")
+	}
+	if durations[0].count.Load() == 0 {
+		t.Fatal("events duration not observed")
+	}
+	var sb strings.Builder
+	Stats.WriteDurations(&sb)
+	out := sb.String()
+	for _, want := range []string{`request_duration_seconds_bucket{route="events",le="+Inf"}`, `auth_failures_total{reason="missing_scope"}`, `_count{route="quality_summary"}`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %s in\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, tenant) {
+		t.Fatal("tenant in metrics")
 	}
 }

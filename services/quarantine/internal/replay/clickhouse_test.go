@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-const chRows = `{"tenant_id":"00000000-0000-4000-8000-0000000000a1","source_id":"00000000-0000-4000-8000-000000000001","batch_id":"00000000-0000-4000-8000-000000000002","job_id":"00000000-0000-4000-8000-000000000003","event_id":"00000000-0000-4000-8000-000000000004","processing_version":2,"pipeline_version":3,"occurred_at":"2026-10-20 11:00:00.123","stage":"normalize","error_code":"BAD_VALUE","error_message":"masked failure","sample_payload":"{\"safe\":true}"}
-{"tenant_id":"00000000-0000-4000-8000-0000000000a1","source_id":"00000000-0000-4000-8000-000000000011","batch_id":"00000000-0000-4000-8000-000000000012","job_id":"00000000-0000-4000-8000-000000000013","event_id":"00000000-0000-4000-8000-000000000014","processing_version":1,"pipeline_version":1,"occurred_at":"2026-10-20 10:00:00.000","stage":"validate","error_code":"SCHEMA","error_message":"masked","sample_payload":""}
+const chRows = `{"r_tenant_id":"00000000-0000-4000-8000-0000000000a1","r_source_id":"00000000-0000-4000-8000-000000000001","r_batch_id":"00000000-0000-4000-8000-000000000002","r_job_id":"00000000-0000-4000-8000-000000000003","r_event_id":"00000000-0000-4000-8000-000000000004","processing_version":2,"pipeline_version":3,"r_occurred_at":"2026-10-20 11:00:00.123","stage":"normalize","error_code":"BAD_VALUE","error_message":"masked failure","sample_payload":"{\"safe\":true}"}
+{"r_tenant_id":"00000000-0000-4000-8000-0000000000a1","r_source_id":"00000000-0000-4000-8000-000000000011","r_batch_id":"00000000-0000-4000-8000-000000000012","r_job_id":"00000000-0000-4000-8000-000000000013","r_event_id":"00000000-0000-4000-8000-000000000014","processing_version":1,"pipeline_version":1,"r_occurred_at":"2026-10-20 10:00:00.000","stage":"validate","error_code":"SCHEMA","error_message":"masked","sample_payload":""}
 `
 
 func TestClickHouseStoreTenantBoundPaginationAndPayloadMinimization(t *testing.T) {

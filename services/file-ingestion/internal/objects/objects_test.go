@@ -110,3 +110,21 @@ func TestSourceOnlyServesVerifiedObjectsAndRangeReads(t *testing.T) {
 		t.Fatalf("cross-tenant open: %v", err)
 	}
 }
+
+func TestRangeReaderAtReadsExactRangesAndEOF(t *testing.T) {
+	m := &memObjs{data: map[string][]byte{"k": []byte("0123456789")}}
+	r := RangeReaderAt{Ctx: context.Background(), Objs: m, Key: "k", Size: 10}
+	p := make([]byte, 4)
+	if n, err := r.ReadAt(p, 3); n != 4 || err != nil || string(p) != "3456" {
+		t.Fatal(n, err, string(p))
+	}
+	if n, err := r.ReadAt(p, 8); n != 2 || err != io.EOF || string(p[:2]) != "89" {
+		t.Fatal(n, err)
+	}
+	if n, err := r.ReadAt(p, 10); n != 0 || err != io.EOF {
+		t.Fatal(n, err)
+	}
+	if _, err := r.ReadAt(p, -1); err == nil {
+		t.Fatal("negative offset accepted")
+	}
+}

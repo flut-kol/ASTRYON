@@ -67,6 +67,9 @@ func main() {
 	} else {
 		log.Print("WARN: REPLAYW_PG_URL unset: replay_requests status is NOT updated")
 	}
+	// REPLAYW_METRICS_ADDR (off when unset): GET /metrics; a bare ":9108" binds 127.0.0.1 only, set a host to expose it.
+	w.Metrics = &worker.Metrics{}
+	worker.ServeMetrics(os.Getenv("REPLAYW_METRICS_ADDR"), w.Metrics.WritePrometheus, log.Printf)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := w.Run(ctx); err != nil {

@@ -129,12 +129,29 @@ func TestAcceptRefusesUnverifiedFileAndFailsOnClickHouseError(t *testing.T) {
 
 func TestNewValidatesConfig(t *testing.T) {
 	for name, c := range map[string]Config{
-		"no url":         {Files: files{}, Mapping: Mapping{EventType: "x"}},
-		"no event type":  {URL: "http://x", Files: files{}},
-		"bad table name": {URL: "http://x", Files: files{}, Mapping: Mapping{EventType: "x"}, EventsTable: "a;DROP"},
+		"no url":             {Files: files{}, Mapping: Mapping{EventType: "x"}},
+		"no event type":      {URL: "http://x", Files: files{}},
+		"bad table name":     {URL: "http://x", Files: files{}, Mapping: Mapping{EventType: "x"}, EventsTable: "a;DROP"},
+		"bad source mapping": {URL: "http://x", Files: files{}, Mapping: Mapping{EventType: "x"}, SourceMappings: map[string]Mapping{"not-a-source": {EventType: "x"}}},
 	} {
 		if _, err := New(c); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+func TestSourceMappingOverridesDefault(t *testing.T) {
+	s, calls := newSink(t, true)
+	s.cfg.SourceMappings = map[string]Mapping{source: {EventType: "geo.point", EventTimeField: "occurred", EntityIDField: "device", ProcessingVersion: 7}}
+	j := jobs.Job{ID: "j1", TenantID: tenant, FileObjectID: fileID}
+	if err := s.Accept(context.Background(), j, []worker.Item{item(0, `{"device":"d1","occurred":"2026-10-01T00:00:00Z"}`, nil)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace((*calls)[0].B)), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["event_type"] != "geo.point" || row["processing_version"] != float64(7) || row["entity_id"] != "d1" {
+		t.Fatalf("row = %v", row)
 	}
 }

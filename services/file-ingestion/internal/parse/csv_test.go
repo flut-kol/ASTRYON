@@ -1,6 +1,7 @@
 package parse
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -25,6 +26,17 @@ func TestCSVQuarantinesMalformedAndContinues(t *testing.T) {
 	})
 	if err != nil || len(got) != 3 || got[1].Err == nil || got[2].Fields[0] != "next" {
 		t.Fatalf("records=%+v err=%v", got, err)
+	}
+}
+
+func TestCSVRejectsInvalidUTF8(t *testing.T) {
+	data := append([]byte("id,value\n"), []byte{'a', ',', 0xff, '\n'}...)
+	var got []CSVRecord
+	if err := CSV(bytes.NewReader(data), 64, func(r CSVRecord) error { got = append(got, r); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !errors.Is(got[1].Err, ErrInvalidEncoding) {
+		t.Fatalf("records=%+v", got)
 	}
 }
 

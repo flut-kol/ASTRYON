@@ -32,7 +32,7 @@ paths:
       summary: List tenant quarantine records using bounded cursor pagination
       description: |
         Requires `astryon:quarantine:read`. Setting `include_original=true` additionally requires
-        `astryon:quarantine:read-payload` and returns only the bounded, masked sample stored in ClickHouse.
+        `astryon:quarantine-payload:read` and returns only the bounded, masked sample stored in ClickHouse.
       parameters:
         - { $ref: '#/components/parameters/RequestId' }
         - name: limit
@@ -58,7 +58,7 @@ paths:
       operationId: planQuarantineReplay
       summary: Count a bounded replay selection without side effects
       description: |
-        Requires `astryon:quarantine:replay`. The selection uses ClickHouse deviation-journal fields:
+        Requires `astryon:quarantine-replay:read`. The selection uses ClickHouse deviation-journal fields:
         `source_id`, a half-open occurred-at range, and the pipeline version that produced the deviation.
         It is not an offset-based replay because the current journal does not store Kafka partition/offset.
       parameters: [{ $ref: '#/components/parameters/RequestId' }]
@@ -80,7 +80,7 @@ paths:
       operationId: publishQuarantineReplay
       summary: Publish a bounded tenant quarantine replay job
       description: |
-        Requires the separate `astryon:quarantine:replay-publish` scope. The service repeats the
+        Requires the separate `astryon:quarantine-replay:write` scope. The service repeats the
         tenant-bound plan, requires an exact count of at most 10000, writes a durable prepared audit
         event, and only then publishes to `quarantine.replay.jobs.v1`. This is intentionally distinct
         from the incompatible DPP-043 `replay.jobs.v1` processing-version contract.

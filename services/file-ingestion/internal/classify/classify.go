@@ -121,6 +121,10 @@ func (s *Scanner) Peek() Labels {
 	return out
 }
 
+// Merge adds already-classified, value-safe findings (for example metadata
+// found in a document container rather than in a parsed row).
+func (s *Scanner) Merge(l Labels) { s.found.Merge(l) }
+
 func (s *Scanner) hit(l Label, field string) {
 	if s.only != nil && !s.only[l] {
 		return

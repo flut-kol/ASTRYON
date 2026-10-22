@@ -3,6 +3,7 @@ module github.com/astryon/export-worker
 go 1.27.0
 
 require (
+	github.com/astryon/audit v0.0.0
 	github.com/astryon/go-common v0.0.0
 	github.com/jackc/pgx/v5 v5.9.2
 )
@@ -14,5 +15,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
+
+replace github.com/astryon/audit => ../../libs/audit
 
 replace github.com/astryon/go-common => ../../libs/go-common

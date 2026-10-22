@@ -1,0 +1,242 @@
+# Everything environment-specific (registry, digests, endpoints, CIDRs, secret names) comes from a
+# platform-owned values file. NO secret value belongs here: secrets are only referenced by
+# secretKeyRef / secret volumes, and the Secrets themselves are created by the secret manager.
+# Env var names below were read from each service's cmd/ main (and its aas.go / kafka config).
+
+image:
+  # Deliberately non-routable; override per environment. Image = <registry>/<service.image.name>@<digest>.
+  registry: registry.invalid/astryon
+  pullPolicy: IfNotPresent
+imagePullSecrets: []   # [{name: ...}]
+
+# Default Secret name for a secretEnv entry given as a bare env-var name: <secretPrefix><component>,
+# key = the env var name. An entry may also be {name, secretName, key, optional}.
+secretPrefix: astryon-
+
+securityContext:       # pod level; the containers always get non-root/read-only/drop ALL
+  runAsUser: 10001
+  runAsGroup: 10001
+
+# AAS (external auth, docs/architecture/authentication.md). Emitted as AAS_* for services with
+# aas: true (ASTRYON_AAS_* for connector-manager, see aasPrefix). Empty values are omitted.
+aas:
+  baseUrl: ""
+  issuer: ""
+  audience: ""
+  env: ""
+  allowedAzp: ""
+  tokenType: ""
+
+kafka:
+  brokers: ""          # ASTRYON_KAFKA_BROKERS, comma list
+  tls: true            # ASTRYON_KAFKA_TLS=1
+  caSecret: ""         # optional Secret with key ca.crt -> ASTRYON_KAFKA_TLS_CA_FILE
+  saslMechanism: ""    # e.g. SCRAM-SHA-512; needs saslSecret with keys username/password
+  saslSecret: ""
+
+# Picked per service through commonEnv.
+common:
+  CH_URL: ""
+  CH_DATABASE: astryon
+
+network:
+  defaultDeny: true    # <release>-default-deny (Ingress+Egress) in the release namespace
+  dns:
+    to:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  # Egress allow-list targets referenced by services[*].egressTo. Each is {to: [<NetworkPolicyPeer>], ports: [<port>]}.
+  # Platform fills in real peers (ipBlock cidr or namespace/pod selectors). A target that is
+  # referenced but has no `to` fails the render instead of silently blocking or opening traffic.
+  targets:
+    kafka:   {to: [], ports: [{protocol: TCP, port: 9093}]}
+    postgres: {to: [], ports: [{protocol: TCP, port: 5432}]}
+    clickhouse: {to: [], ports: [{protocol: TCP, port: 8123}]}
+    s3:      {to: [], ports: [{protocol: TCP, port: 443}]}
+    aas:     {to: [], ports: [{protocol: TCP, port: 443}]}
+    connectorSources: {to: [], ports: []}   # SSRF allow-list for connector-manager (DEVELOPMENT_PLAN §12); ports are source specific
+  ingressController: {from: []}   # peers (e.g. ingress-nginx namespace) allowed to reach exposed services
+  monitoring: {from: []}          # peers allowed to scrape metricsPort
+
+# Per service. Keys: enabled, replicas, image.{name,digest}, port (Service + app listener), metricsPort,
+# probe.{type: http|tcp|none, path, port: port|metrics}, aas, aasPrefix, kafka, commonEnv, podNameEnv,
+# env (plain config), secretEnv, secretVolumes, requiredEnv, egressTo, egressPods, ingressFrom, exposed,
+# tmpDirs, resources, extraEgress, securityContext.
+services:
+  gateway:
+    enabled: true
+    replicas: 2
+    image: {name: gateway, digest: &zero "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+    port: 8080
+    probe: {type: http, path: /healthz, port: port}
+    aas: true
+    kafka: true
+    env: {ASTRYON_GATEWAY_ADDR: ":8080"}
+    requiredEnv: [AAS_BASE_URL, ASTRYON_KAFKA_BROKERS]
+    egressTo: [kafka, aas]
+    exposed: true
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {cpu: "1", memory: 512Mi}}
+
+  query-api:
+    enabled: true
+    replicas: 2
+    image: {name: query-api, digest: *zero}
+    port: 8082
+    metricsPort: 9090
+    probe: {type: tcp, port: port}       # no /healthz in this service
+    aas: true
+    commonEnv: [CH_URL, CH_DATABASE]
+    env: {LISTEN_ADDR: ":8082", QUERY_METRICS_ADDR: ":9090"}
+    secretEnv: [CH_USER, CH_PASSWORD, QUERY_PG_URL]
+    requiredEnv: [AAS_BASE_URL, CH_URL]
+    egressTo: [clickhouse, postgres, aas]
+    exposed: true
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+
+  file-api:
+    enabled: true
+    replicas: 2
+    image: {name: file-api, digest: *zero}
+    port: 8085
+    metricsPort: 9090
+    probe: {type: tcp, port: port}
+    aas: true
+    env: {LISTEN_ADDR: ":8085", FILE_METRICS_ADDR: ":9090"}
+    secretEnv: [FILE_API_PG_URL, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY]
+    requiredEnv: [AAS_BASE_URL, FILE_S3_BUCKET, FILE_S3_ENDPOINT]
+    egressTo: [postgres, s3, aas]
+    exposed: true
+    resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {cpu: "1", memory: 512Mi}}
+
+  file-worker:
+    enabled: true
+    replicas: 1
+    image: {name: file-worker, digest: *zero}
+    metricsPort: 9090
+    probe: {type: tcp, port: metrics}    # only /metrics is served, no /healthz
+    commonEnv: [CH_URL, CH_DATABASE]
+    podNameEnv: [FILE_WORKER_ID]
+    env: {FILE_METRICS_ADDR: ":9090"}
+    secretEnv: [FILE_WORKER_PG_URL, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY, CH_USER, CH_PASSWORD]
+    requiredEnv: [FILE_S3_BUCKET, FILE_S3_ENDPOINT, CH_URL]
+    egressTo: [postgres, s3, clickhouse]
+    resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: "2", memory: 1Gi}}
+
+  export-worker:
+    enabled: true
+    replicas: 2
+    image: {name: export-worker, digest: *zero}
+    port: 8083
+    probe: {type: tcp, port: port}
+    aas: true
+    commonEnv: [CH_URL, CH_DATABASE]
+    podNameEnv: [EXPORT_WORKER_ID]
+    env: {LISTEN_ADDR: ":8083"}
+    secretEnv: [EXPORT_PG_URL, CH_USER, CH_PASSWORD, S3_ACCESS_KEY, S3_SECRET_KEY]
+    requiredEnv: [AAS_BASE_URL, CH_URL, S3_BUCKET, S3_ENDPOINT]
+    egressTo: [postgres, clickhouse, s3, aas]
+    ingressFrom: [admin-bff]
+    resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: "2", memory: 1Gi}}
+
+  quarantine:
+    enabled: true
+    replicas: 2
+    image: {name: quarantine, digest: *zero}
+    port: 8085
+    probe: {type: http, path: /healthz, port: port}
+    aas: true
+    kafka: true
+    commonEnv: [CH_URL, CH_DATABASE]
+    env: {LISTEN_ADDR: ":8085"}
+    secretEnv: [CH_USER, CH_PASSWORD]
+    requiredEnv: [AAS_BASE_URL, CH_URL, ASTRYON_KAFKA_BROKERS]
+    egressTo: [clickhouse, kafka, aas]
+    ingressFrom: [admin-bff]
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 256Mi}}
+
+  connector-manager:
+    enabled: true
+    replicas: 1
+    image: {name: connector-manager, digest: *zero}
+    port: 8089                            # admin API (ASTRYON_CONNECTOR_ADMIN_ADDR); has no /healthz
+    metricsPort: 9090                     # /metrics and /healthz live here
+    probe: {type: http, path: /healthz, port: metrics}
+    aas: true
+    aasPrefix: ASTRYON_
+    kafka: true
+    podNameEnv: [ASTRYON_WORKER_ID]
+    env: {ASTRYON_CONNECTOR_ADMIN_ADDR: ":8089", ASTRYON_CONNECTOR_METRICS_ADDR: ":9090"}
+    secretEnv: [ASTRYON_DATABASE_URL]
+    requiredEnv: [ASTRYON_AAS_BASE_URL]
+    egressTo: [postgres, kafka, aas, connectorSources]
+    ingressFrom: [admin-bff]
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 256Mi}}
+
+  retry-controller:
+    enabled: true
+    replicas: 1
+    image: {name: retry-controller, digest: *zero}
+    port: 8081                            # ASTRYON_RETRY_METRICS_ADDR default; serves /healthz and metrics
+    probe: {type: http, path: /healthz, port: port}
+    env: {ASTRYON_RETRY_METRICS_ADDR: ":8081"}
+    secretEnv: [DATABASE_URL]
+    egressTo: [postgres]
+    resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 250m, memory: 128Mi}}
+
+  replay-controller:
+    enabled: true
+    replicas: 2
+    image: {name: replay-controller, digest: *zero}
+    port: 8087
+    probe: {type: http, path: /healthz, port: port}
+    aas: true
+    kafka: true
+    commonEnv: [CH_URL, CH_DATABASE]
+    env: {REPLAY_ADDR: ":8087"}
+    secretEnv: [REPLAY_PG_URL, CH_USER, CH_PASSWORD]
+    requiredEnv: [AAS_BASE_URL, ASTRYON_KAFKA_BROKERS]
+    egressTo: [postgres, clickhouse, kafka, aas]
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 256Mi}}
+
+  replay-worker:
+    enabled: true
+    replicas: 1
+    image: {name: replay-worker, digest: *zero}
+    probe: {type: none}                   # no listener in this binary
+    kafka: true
+    env: {}
+    secretEnv: [REPLAYW_PG_URL, REPLAYW_CH_USER, REPLAYW_CH_PASSWORD]
+    requiredEnv: [REPLAYW_CH_URL, ASTRYON_KAFKA_BROKERS]
+    egressTo: [postgres, clickhouse, kafka]
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: "1", memory: 512Mi}}
+
+  admin-bff:
+    enabled: true
+    replicas: 2
+    image: {name: admin-bff, digest: *zero}
+    port: 8090
+    probe: {type: tcp, port: port}
+    aasBaseOnly: true                     # AAS_BASE_URL only
+    env: {BFF_ADDR: ":8090", BFF_CLIENT_ID: astryon-portal, BFF_CLIENT_KEY_FILE: /var/run/secrets/astryon/bff/client.pem}
+    # BFF_PUBLIC_ORIGIN, BFF_UPSTREAMS ("gateway=http://<svc>:8080,files=...,query=...,connectors=...,exports=...,quarantine=..."),
+    # BFF_CLIENT_KEY_ID and AAS_BASE_URL come from the environment values file.
+    secretVolumes:
+      - {name: bff-client-key, secretName: astryon-admin-bff-client-key, key: client.pem, mountPath: /var/run/secrets/astryon/bff}
+    requiredEnv: [AAS_BASE_URL, BFF_PUBLIC_ORIGIN, BFF_UPSTREAMS, BFF_CLIENT_KEY_ID]
+    egressTo: [aas]
+    egressPods: [gateway, file-api, query-api, connector-manager, export-worker, quarantine]
+    exposed: true
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 256Mi}}
+
+  # Static site. Assumes an unprivileged nginx image whose content is the vite build (web/admin-ui/dist);
+  # routing /auth and /api to admin-bff is the Ingress's job (same origin, host-scoped session cookie).
+  admin-ui:
+    enabled: true
+    replicas: 2
+    image: {name: admin-ui, digest: *zero}
+    port: 8080
+    probe: {type: http, path: /, port: port}
+    securityContext: {runAsUser: 101, runAsGroup: 101}
+    tmpDirs: [/var/cache/nginx]
+    exposed: true
+    resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {cpu: 200m, memory: 64Mi}}

@@ -3,13 +3,14 @@
 //
 // Required: FILE_WORKER_PG_URL, FILE_S3_ENDPOINT, FILE_S3_BUCKET, FILE_S3_ACCESS_KEY, FILE_S3_SECRET_KEY, CH_URL,
 // FILE_EVENT_TYPE. Optional: FILE_S3_REGION, CH_DATABASE, CH_USER, CH_PASSWORD, FILE_EVENTS_TABLE, FILE_ERRORS_TABLE,
-// FILE_EVENT_TIME_FIELD, FILE_ENTITY_ID_FIELD, FILE_PROCESSING_VERSION (default 1), FILE_BATCH_SIZE (500),
+// FILE_EVENT_TIME_FIELD, FILE_ENTITY_ID_FIELD, FILE_PROCESSING_VERSION (default 1), FILE_SOURCE_MAPPINGS (optional bounded JSON object keyed by source UUID), FILE_LINEAGE_MODE (postgres|log|off), FILE_BATCH_SIZE (500),
 // FILE_MAX_RECORD_BYTES (1 MiB), FILE_RETRY_MODE (local = built-in retry, default; controller = failures go through the
 // retry-controller client, with FILE_RETRY_BASE_SECONDS 5, FILE_RETRY_MAX_SECONDS 900, FILE_RETRY_MAX_ATTEMPTS 10), FILE_LEASE_SECONDS (60), FILE_WORKER_ID (default hostname-pid), FILE_METRICS_ADDR (/metrics, off when unset).
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -24,8 +25,11 @@ import (
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
 	"github.com/astryon/file-ingestion/internal/objects"
+	"github.com/astryon/file-ingestion/internal/parquetout"
+	"github.com/astryon/file-ingestion/internal/parse"
 	"github.com/astryon/file-ingestion/internal/retrybridge"
 	"github.com/astryon/file-ingestion/internal/s3"
+	"github.com/astryon/file-ingestion/internal/scanner"
 	"github.com/astryon/file-ingestion/internal/worker"
 	"github.com/astryon/retry-controller/pkg/retryclient"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -72,10 +76,11 @@ func main() {
 	c := &s3.Client{Endpoint: must("FILE_S3_ENDPOINT"), Bucket: bucket, Region: os.Getenv("FILE_S3_REGION"),
 		Creds: s3.Creds{AccessKey: must("FILE_S3_ACCESS_KEY"), SecretKey: must("FILE_S3_SECRET_KEY")}}
 	files := objects.PGStore{DB: db}
+	sourceMappings := configuredSourceMappings()
 	sink, err := chsink.New(chsink.Config{URL: must("CH_URL"), Database: os.Getenv("CH_DATABASE"), User: os.Getenv("CH_USER"), Password: os.Getenv("CH_PASSWORD"),
 		EventsTable: os.Getenv("FILE_EVENTS_TABLE"), ErrorsTable: os.Getenv("FILE_ERRORS_TABLE"), Files: files,
 		Mapping: chsink.Mapping{EventType: must("FILE_EVENT_TYPE"), EventTimeField: os.Getenv("FILE_EVENT_TIME_FIELD"),
-			EntityIDField: os.Getenv("FILE_ENTITY_ID_FIELD"), ProcessingVersion: uint32(num("FILE_PROCESSING_VERSION", 1))}}) // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
+			EntityIDField: os.Getenv("FILE_ENTITY_ID_FIELD"), ProcessingVersion: uint32(num("FILE_PROCESSING_VERSION", 1))}, SourceMappings: sourceMappings}) // #nosec G115 -- small bounded counter or length, reviewed 2026-10-21
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -85,8 +90,40 @@ func main() {
 	} else if m != "" && m != "local" {
 		log.Fatalf("FILE_RETRY_MODE must be local or controller, got %q", m)
 	}
-	w := worker.New(worker.Config{Store: jobStore, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: sink,
-		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4, Policies: policies()})
+	pipeline := os.Getenv("FILE_PIPELINE_VERSION")
+	if pipeline == "" {
+		pipeline = "file-ingestion/1"
+	}
+	var rowSink worker.Sink = sink
+	if prefix := os.Getenv("FILE_PARQUET_OUT_PREFIX"); prefix != "" {
+		rowSink = &parquetout.Sink{Put: c, Prefix: prefix, Pipeline: pipeline, Inner: sink}
+	}
+	scannerConfig, err := scanner.LoadEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	scannerRuntime := scanner.New(scannerConfig)
+	if scannerConfig.Mode != scanner.ModeOff {
+		log.Printf("malware scanner configured: %s", scannerConfig.Summary())
+	}
+	var lineage jobs.LineageRecorder
+	switch mode := os.Getenv("FILE_LINEAGE_MODE"); mode {
+	case "", "off":
+		if os.Getenv("FILE_LINEAGE_LOG") == "1" { // legacy compatibility
+			lineage = &jobs.LogLineage{W: os.Stdout}
+		}
+	case "postgres":
+		lineage = &jobs.PGLineage{DB: db}
+	case "log":
+		lineage = &jobs.LogLineage{W: os.Stdout}
+	default:
+		log.Fatalf("FILE_LINEAGE_MODE must be postgres, log, or off")
+	}
+	w := worker.New(worker.Config{Store: jobStore, Source: objects.Source{Store: files, Objs: c, Bucket: bucket}, Sink: rowSink,
+		BatchSize: num("FILE_BATCH_SIZE", 500), MaxRecordBytes: num("FILE_MAX_RECORD_BYTES", 1<<20), Heartbeat: lease / 4, Policies: policies(),
+		Lineage: lineage, PipelineVersion: pipeline, MalwareScanner: scannerRuntimeIfEnabled(scannerConfig, &scannerRuntime),
+		ScannerStageDir: scannerConfig.StageDir, ScannerMaxBytes: scannerConfig.MaxStageBytes,
+		Parquet: parse.ParquetLimits{MaxRowGroupSize: int64(num("FILE_PARQUET_MAX_ROWGROUP_BYTES", 256<<20))}})
 	serveMetrics(w.M.WritePrometheus)
 	go func() { // recovery of vanished workers and promotion of due retries; safe on every replica
 		t := time.NewTicker(10 * time.Second)
@@ -108,6 +145,31 @@ func main() {
 	if err := w.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}
+}
+
+// configuredSourceMappings reads a bounded, operator-supplied JSON object:
+// {"source-uuid":{"event_type":"...","event_time_field":"...","entity_id_field":"...","processing_version":2}}.
+// The sink validates UUID keys and event types; malformed configuration fails closed at startup.
+func configuredSourceMappings() map[string]chsink.Mapping {
+	raw := os.Getenv("FILE_SOURCE_MAPPINGS")
+	if raw == "" {
+		return nil
+	}
+	var out map[string]chsink.Mapping
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		log.Fatalf("FILE_SOURCE_MAPPINGS must be a JSON object: %v", err)
+	}
+	if len(out) > 1000 {
+		log.Fatal("FILE_SOURCE_MAPPINGS must contain at most 1000 sources")
+	}
+	return out
+}
+
+func scannerRuntimeIfEnabled(c scanner.Config, r *scanner.Runtime) worker.MalwareScanner {
+	if c.Mode == scanner.ModeOff || len(r.Providers) == 0 {
+		return nil
+	}
+	return r
 }
 
 // serveMetrics exposes /metrics on FILE_METRICS_ADDR (unset = off; bind loopback or a cluster-internal address).

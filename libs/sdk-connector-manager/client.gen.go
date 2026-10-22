@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	BearerAuthScopes = "bearerAuth.Scopes"
+	BearerAuthScopes  = "bearerAuth.Scopes"
+	SourcesReadScopes = "sourcesRead.Scopes"
 )
 
 // Defines values for Kind.
@@ -27,6 +28,16 @@ const (
 	MYSQLCDC    Kind = "MYSQL_CDC"
 	POSTGRESCDC Kind = "POSTGRES_CDC"
 	RESTPULL    Kind = "REST_PULL"
+)
+
+// Defines values for SourceKind.
+const (
+	ApiPull  SourceKind = "api_pull"
+	Database SourceKind = "database"
+	HttpPush SourceKind = "http_push"
+	Kafka    SourceKind = "kafka"
+	S3Files  SourceKind = "s3_files"
+	Sftp     SourceKind = "sftp"
 )
 
 // Connector defines model for Connector.
@@ -68,11 +79,32 @@ type Error struct {
 // Kind defines model for Kind.
 type Kind string
 
+// Source defines model for Source.
+type Source struct {
+	// ConnectorCount Non-deleted connectors attached to the source.
+	ConnectorCount int                `json:"connector_count"`
+	CreatedAt      time.Time          `json:"created_at"`
+	Enabled        bool               `json:"enabled"`
+	Id             openapi_types.UUID `json:"id"`
+	Kind           SourceKind         `json:"kind"`
+	Name           string             `json:"name"`
+	UpdatedAt      time.Time          `json:"updated_at"`
+}
+
+// SourceKind defines model for Source.Kind.
+type SourceKind string
+
 // Id defines model for Id.
 type Id = openapi_types.UUID
 
 // ListConnectorsParams defines parameters for ListConnectors.
 type ListConnectorsParams struct {
+	Limit  *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor *openapi_types.UUID `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+// ListSourcesParams defines parameters for ListSources.
+type ListSourcesParams struct {
 	Limit  *int                `form:"limit,omitempty" json:"limit,omitempty"`
 	Cursor *openapi_types.UUID `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
@@ -169,6 +201,12 @@ type ClientInterface interface {
 
 	// ResumeConnector request
 	ResumeConnector(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSources request
+	ListSources(ctx context.Context, params *ListSourcesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSource request
+	GetSource(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
 
 func (c *Client) ListConnectors(ctx context.Context, params *ListConnectorsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -233,6 +271,30 @@ func (c *Client) PauseConnector(ctx context.Context, id Id, reqEditors ...Reques
 
 func (c *Client) ResumeConnector(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewResumeConnectorRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListSources(ctx context.Context, params *ListSourcesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSourcesRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetSource(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSourceRequest(c.Server, id)
 	if err != nil {
 		return nil, err
 	}
@@ -450,6 +512,105 @@ func NewResumeConnectorRequest(server string, id Id) (*http.Request, error) {
 	return req, nil
 }
 
+// NewListSourcesRequest generates requests for ListSources
+func NewListSourcesRequest(server string, params *ListSourcesParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/sources")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetSourceRequest generates requests for GetSource
+func NewGetSourceRequest(server string, id Id) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/sources/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 func (c *Client) applyEditors(ctx context.Context, req *http.Request, additionalEditors []RequestEditorFn) error {
 	for _, r := range c.RequestEditors {
 		if err := r(ctx, req); err != nil {
@@ -509,6 +670,12 @@ type ClientWithResponsesInterface interface {
 
 	// ResumeConnectorWithResponse request
 	ResumeConnectorWithResponse(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*ResumeConnectorResponse, error)
+
+	// ListSourcesWithResponse request
+	ListSourcesWithResponse(ctx context.Context, params *ListSourcesParams, reqEditors ...RequestEditorFn) (*ListSourcesResponse, error)
+
+	// GetSourceWithResponse request
+	GetSourceWithResponse(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*GetSourceResponse, error)
 }
 
 type ListConnectorsResponse struct {
@@ -646,6 +813,60 @@ func (r ResumeConnectorResponse) StatusCode() int {
 	return 0
 }
 
+type ListSourcesResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		Items      []Source `json:"items"`
+		NextCursor string   `json:"next_cursor"`
+	}
+	JSON400 *Error
+	JSON401 *Error
+	JSON403 *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSourcesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSourcesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetSourceResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Source
+	JSON400      *Error
+	JSON401      *Error
+	JSON403      *Error
+	JSON404      *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSourceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSourceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 // ListConnectorsWithResponse request returning *ListConnectorsResponse
 func (c *ClientWithResponses) ListConnectorsWithResponse(ctx context.Context, params *ListConnectorsParams, reqEditors ...RequestEditorFn) (*ListConnectorsResponse, error) {
 	rsp, err := c.ListConnectors(ctx, params, reqEditors...)
@@ -697,6 +918,24 @@ func (c *ClientWithResponses) ResumeConnectorWithResponse(ctx context.Context, i
 		return nil, err
 	}
 	return ParseResumeConnectorResponse(rsp)
+}
+
+// ListSourcesWithResponse request returning *ListSourcesResponse
+func (c *ClientWithResponses) ListSourcesWithResponse(ctx context.Context, params *ListSourcesParams, reqEditors ...RequestEditorFn) (*ListSourcesResponse, error) {
+	rsp, err := c.ListSources(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSourcesResponse(rsp)
+}
+
+// GetSourceWithResponse request returning *GetSourceResponse
+func (c *ClientWithResponses) GetSourceWithResponse(ctx context.Context, id Id, reqEditors ...RequestEditorFn) (*GetSourceResponse, error) {
+	rsp, err := c.GetSource(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSourceResponse(rsp)
 }
 
 // ParseListConnectorsResponse parses an HTTP response from a ListConnectorsWithResponse call
@@ -947,6 +1186,110 @@ func ParseResumeConnectorResponse(rsp *http.Response) (*ResumeConnectorResponse,
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListSourcesResponse parses an HTTP response from a ListSourcesWithResponse call
+func ParseListSourcesResponse(rsp *http.Response) (*ListSourcesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSourcesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Items      []Source `json:"items"`
+			NextCursor string   `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON403 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetSourceResponse parses an HTTP response from a GetSourceWithResponse call
+func ParseGetSourceResponse(rsp *http.Response) (*GetSourceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSourceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Source
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest Error

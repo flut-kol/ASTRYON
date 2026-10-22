@@ -1,6 +1,6 @@
 # export-worker (DPP-049, execution core)
 
-Module `github.com/astryon/export-worker` (stdlib + `libs/go-common/auth` for AAS in `cmd/` only) that runs export jobs:
+Module `github.com/astryon/export-worker` (`libs/go-common/auth` for AAS and `libs/audit` for PG audit) that runs export jobs:
 verified principal + `ExportSpec` -> read-only ClickHouse stream -> `ObjectStore` -> short-lived pre-signed URL.
 It has an HTTP layer and either an in-memory or a durable PostgreSQL job store/quota (`EXPORT_PG_URL`); Kafka is NOT here.
 
@@ -19,7 +19,8 @@ It has an HTTP layer and either an in-memory or a durable PostgreSQL job store/q
   `EXPORT_MAX_PER_DAY` `EXPORT_MAX_CONCURRENT_PER_TENANT` `EXPORT_URL_TTL_SECONDS` `AAS_*`
   `EXPORT_PG_URL` (enables durable jobs + quota + the dispatcher; unset = in-memory with a warning log) `EXPORT_WORKER_ID` (default hostname-pid, unique per replica) `EXPORT_LEASE_SECONDS` (60)
   `EXPORT_CH_IDLE_TIMEOUT` (30s) / `EXPORT_CH_MAX_DURATION` (15m): ClickHouse stream timeouts, `0` = off, value as Go duration or bare seconds (see 'Timeouts, zombie runs, outages').
-  `EXPORT_CH_HEADER_TIMEOUT` (5m): wait for ClickHouse response headers. `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters).
+  `EXPORT_CH_HEADER_TIMEOUT` (5m): wait for ClickHouse response headers. `EXPORT_FINISH_RETRY` (2m): how long a terminal write is retried while PostgreSQL is down. `EXPORT_PPROF_ADDR` (unset = off): loopback-only debug listener (pprof + `/debug/vars` counters). `EXPORT_METRICS_ADDR` (unset = off): loopback-only Prometheus `/metrics` (`astryon_export_{started,succeeded,rows,bytes}_total`, `astryon_export_failed_total{code}`, `astryon_export_queue_errors_total{op}`, `astryon_export_duration_seconds` histogram; no tenant/export labels).
+  `EXPORT_AUDIT_MODE` (`off`, `best_effort`, or `required`; default `best_effort` when `EXPORT_PG_URL` is set, otherwise `off`) enables PG-backed API audit; `EXPORT_AUDIT_PG_URL` defaults to `EXPORT_PG_URL`. The bounded writer is configured by `EXPORT_AUDIT_QUEUE_SIZE` (1024), `EXPORT_AUDIT_BATCH_SIZE` (100), `EXPORT_AUDIT_FLUSH_INTERVAL` (500ms), `EXPORT_AUDIT_WRITE_TIMEOUT` (5s), and `EXPORT_AUDIT_RETRIES` (2). Its `astryon_audit_{queued,written,dropped,rejected}_total` counters share the metrics endpoint.
   `EXPORT_SWEEP_SECONDS` (300, 0 = off) / `EXPORT_SWEEP_GRACE_SECONDS` (60): orphan multipart-upload sweeper (dispatcher mode, see 'Failure modes').
 - Docker: `docker build -f services/export-worker/Dockerfile -t astryon/export-worker .` (repo root context).
 - Verified: httptest suite with fakes under `-race` (401/403, tenant in body 400, cross-tenant 404, quota 429, lifecycle,
@@ -93,6 +94,11 @@ replica extends the lease of all its jobs every lease/3; the same loop runs `Rec
 - `quota.go`: `QuotaChecker` + `MemoryQuota` (N exports per UTC day, max concurrent, per tenant, per process).
 - `audit.go`: `AuditSink`, `MemoryAudit`, `JSONLinesAudit`; one record per attempt:
   tenant, subject, export_id, spec_hash, rows, bytes, outcome (+error).
+- `api_audit.go`: separate `libs/audit` adapter for `export.create` and `export.download_link`. Identity (`tenant_id`,
+  subject, client id, ACR) comes only from the validated `Principal`; records contain no export spec, URL, object key,
+  payload, PII, token, or secret. In `required` mode create first writes `export.create.prepare` synchronously with
+  `phase=prepared`, then queues `export.create` with `phase=committed` or `phase=failed` after quota/job mutation; a failed
+  prewrite returns 503 `audit_unavailable`. Download-link records and `best_effort` creates use the bounded async queue.
 - `worker.go`: `Runner.Run` (validate -> quota -> stream -> on any failure delete the partial object -> audit -> presign).
 
 ## Verification
@@ -109,7 +115,8 @@ Verified live (`EXPORT_LIVE=1`, otherwise skipped; dev compose ClickHouse 24.x +
 Env: `EXPORT_CH_URL EXPORT_CH_DB EXPORT_CH_USER EXPORT_CH_PASSWORD EXPORT_S3_ENDPOINT EXPORT_S3_ACCESS_KEY EXPORT_S3_SECRET_KEY`.
 
 SigV4 acceptance and URL expiry against a real MinIO are now covered by the E2E harness below (the dev `s3mock` does not
-validate either). A genuine ClickHouse exception after streaming began is now provoked live (see 'Failure modes'). Audit is in-memory/JSON lines.
+validate either). A genuine ClickHouse exception after streaming began is now provoked live (see 'Failure modes'). Worker
+execution-outcome audit is in-memory/JSON lines; API action audit is PG-backed when enabled.
 
 ## Live end-to-end (`cmd/export-worker/e2e_test.go`, `EXPORT_E2E=1`)
 Runbook: `cd services/export-worker && EXPORT_E2E=1 go test ./cmd/export-worker -run TestE2ELive -v -count=1 -timeout 15m`
@@ -215,8 +222,6 @@ pulled; seeds 1 000 000 rows for one tenant, ~575 MB as ndjson; leases 3 s). Mea
 - NOT verified: goroutine count in the real binary (only the in-process test; `EXPORT_PPROF_ADDR` starts but was not scraped during a long soak); PG failover/replicas; real PG failover with promotion (only simulated by fakes/pause); reconciliation/deletion of the object of an abandoned job; the S3 lifecycle rule.
 
 ## Remaining proposal (not implemented)
-```sql
-export_audit(id bigserial, tenant_id uuid, subject text, export_id uuid, spec_hash text, rows bigint,
-  bytes bigint, outcome text, error text, at timestamptz)  -- append-only
-```
-Apply an S3 lifecycle rule on `exports/` so objects expire after the download window. `export_jobs` and quota are done (above).
+Apply an S3 lifecycle rule on `exports/` so objects expire after the download window. `export_jobs`, quota, and API action
+audit via the append-only tenant-RLS `audit_log` are implemented. The detailed worker execution record remains the existing
+`AuditSink` contract and is intentionally not copied into `audit_log` because it includes spec hashes and backend errors.

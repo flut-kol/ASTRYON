@@ -59,3 +59,13 @@ func (s PostgresStore) Schedule(ctx context.Context, tenantID, jobID string, del
 	}
 	return tx.Commit()
 }
+
+// Backlog reads aggregate counts from scheduled_retries only (no per-event or
+// per-tenant data): unreleased retries and the age of the oldest one that is due.
+func (s PostgresStore) Backlog(ctx context.Context) (Backlog, error) {
+	var b Backlog
+	err := s.DB.QueryRowContext(ctx, `
+SELECT count(*), COALESCE(GREATEST(EXTRACT(EPOCH FROM (now() - min(retry_at) FILTER (WHERE retry_at <= now()))), 0), 0)::float8
+FROM scheduled_retries WHERE fired_at IS NULL AND cancelled_at IS NULL`).Scan(&b.Pending, &b.OldestDueSecs)
+	return b, err
+}

@@ -1,0 +1,27 @@
+# DEV ONLY scanner overlay. The Defender image is vendored in this repository.
+services:
+  apps:
+    environment:
+      FILE_SCANNER_MODE: "required"
+      FILE_ARCHIVE_MODE: "inspect"
+      FILE_SCANNER_DEFENDER_URL: "http://defender:3993"
+      FILE_SCANNER_STAGE_DIR: "/var/lib/astryon/scanner"
+      FILE_SCANNER_MAX_STAGE_BYTES: "1073741824"
+    volumes:
+      - ${APPS_TOKEN_FILE:-../../.astryon-dev/dev-token}:/run/secrets/astryon-dev-token:ro
+      - scanner_stage:/var/lib/astryon/scanner
+
+  defender:
+    image: "${DEFENDER_IMAGE:-astryon-go-defender:dev}"
+    build:
+      context: ./defender
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SHARED_FOLDER: "/shared"
+      TIMEOUT_SECONDS: "60"
+    volumes:
+      - scanner_stage:/shared
+
+volumes:
+  scanner_stage:

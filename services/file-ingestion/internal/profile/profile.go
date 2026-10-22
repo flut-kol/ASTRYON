@@ -71,7 +71,7 @@ type Profile struct {
 	MaxColumns           int // top-level fields per record
 	MaxLineBytes         int // per-record bytes
 
-	// Parser: "ndjson" or "csv" are wired; the worker picks the actual parser from the upload's content type.
+	// Parser: "ndjson", "csv", or bounded "metadata" inspection.
 	Parser         string
 	RequiredFields []string // top-level fields every record must have
 	OnInvalid      OnInvalid
@@ -81,7 +81,7 @@ type Profile struct {
 	MaskPII, TokenizePII bool
 	DedupKey             string
 
-	// Declared metadata (not enforced yet).
+	// Handling metadata: read scope is enforced by the API; retention and export remain declarative.
 	RetentionClass    string
 	RequiredReadScope string
 	ExportAllowed     bool
@@ -91,9 +91,9 @@ type Profile struct {
 
 var (
 	ndjson   = []string{"application/x-ndjson"}
-	both     = []string{"application/x-ndjson", "text/csv"}
+	both     = []string{"application/x-ndjson", "text/csv", "application/vnd.apache.parquet"}
 	extND    = []string{".ndjson", ".jsonl", ".json"}
-	extBoth  = []string{".ndjson", ".jsonl", ".json", ".csv"}
+	extBoth  = []string{".ndjson", ".jsonl", ".json", ".csv", ".parquet"}
 	credPII  = []classify.Label{classify.Credentials, classify.PII}
 	credGeo  = []classify.Label{classify.Credentials, classify.Geo}
 	credOnly = []classify.Label{classify.Credentials}
@@ -175,7 +175,8 @@ var registry = func() map[string]Profile {
 	add(strict("personal_data"))
 	add(strict("financial"))
 	add(func() Profile {
-		p := base("media_meta", ndjson, extND)
+		p := base("media_meta", append(append([]string{}, ndjson...), "application/pdf", "image/jpeg", "image/png"), append(append([]string{}, extND...), ".pdf", ".jpg", ".jpeg", ".png"))
+		p.Parser = "metadata"
 		p.Detectors = []classify.Label{classify.Geo, classify.Credentials, classify.PII}
 		return p
 	}())

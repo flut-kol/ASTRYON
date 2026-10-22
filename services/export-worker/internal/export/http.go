@@ -22,6 +22,7 @@ type Server struct {
 	Runner     *Runner // its Quota is ignored: the server reserves quota at POST and holds it for the job
 	Quota      QuotaChecker
 	Audit      AuditSink
+	APIAudit   *APIAudit
 	Jobs       JobStore
 	Workers    int           // concurrently running jobs, default 2
 	MaxQueue   int           // jobs waiting for a worker, default 100
@@ -92,6 +93,9 @@ func (s *Server) wrap(scope string, h handler) http.HandlerFunc {
 			rid = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
 		w.Header().Set("X-Request-ID", rid)
+		// Make the validated/generated id available to handlers and audit. The
+		// request body and authorization header are never passed to audit.
+		r.Header.Set("X-Request-ID", rid)
 		fail := func(e *apiError) {
 			w.Header().Set("Content-Type", "application/json")
 			if e.retryAfter > 0 {
@@ -142,7 +146,7 @@ func (s *Server) wrap(scope string, h handler) http.HandlerFunc {
 	}
 }
 
-func (s *Server) create(_ http.ResponseWriter, p Principal, _ *http.Request, body []byte) (int, any, error) {
+func (s *Server) create(_ http.ResponseWriter, p Principal, r *http.Request, body []byte) (int, any, error) {
 	var spec ExportSpec
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -164,9 +168,13 @@ func (s *Server) create(_ http.ResponseWriter, p Principal, _ *http.Request, bod
 		return 0, nil, &apiError{status: 503, retryAfter: 30, Code: "queue_full", Message: "export queue is full"}
 	}
 	s.mu.Unlock()
+	if err := s.APIAudit.BeforeExportCreate(r.Context(), p, id, r.Header.Get("X-Request-ID")); err != nil {
+		return 0, nil, &apiError{status: 503, retryAfter: 5, Code: "audit_unavailable", Message: "audit storage temporarily unavailable"}
+	}
 
 	job := Job{ID: id, TenantID: p.TenantID, Subject: p.Subject, Spec: spec, Status: StatusQueued,
 		ObjectKey: ObjectKey(p.TenantID, id, spec.Ext()), CreatedAt: s.now()}
+	auditFailed := func() { s.APIAudit.ExportCreateFailed(p, id, r.Header.Get("X-Request-ID")) }
 	release := func() {}
 	quotaErr := func(qerr error) *apiError {
 		if s.Audit != nil {
@@ -188,6 +196,7 @@ func (s *Server) create(_ http.ResponseWriter, p Principal, _ *http.Request, bod
 	if rs, ok := s.Quota.(ReservingCreator); ok {
 		// Durable quota: limits are checked and the job row inserted in ONE transaction (replica-safe).
 		if err := rs.CreateReserved(job); err != nil {
+			auditFailed()
 			if errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrTooManyConcurrent) {
 				return 0, nil, quotaErr(err)
 			}
@@ -197,15 +206,18 @@ func (s *Server) create(_ http.ResponseWriter, p Principal, _ *http.Request, bod
 		if s.Quota != nil {
 			rel, qerr := s.Quota.Acquire(p.TenantID)
 			if qerr != nil {
+				auditFailed()
 				return 0, nil, quotaErr(qerr)
 			}
 			release = rel
 		}
 		if err := s.Jobs.Create(job); err != nil {
 			release()
+			auditFailed()
 			return 0, nil, err
 		}
 	}
+	s.APIAudit.ExportCreated(p, id, r.Header.Get("X-Request-ID"))
 	if s.OnEnqueue != nil {
 		s.OnEnqueue()
 		return http.StatusAccepted, map[string]any{"id": id, "status": StatusQueued}, nil
@@ -272,7 +284,15 @@ func (s *Server) run(p Principal, job Job, release func()) {
 func (r *Runner) runNoPresign(ctx context.Context, p Principal, id string, spec ExportSpec) (Result, error) {
 	c := *r
 	c.Presign = nil
-	return c.Run(ctx, p, id, spec)
+	Metrics.started.Add(1)
+	t0 := time.Now()
+	res, err := c.Run(ctx, p, id, spec)
+	code := ""
+	if err != nil {
+		code = errCode(err, ctx)
+	}
+	Metrics.exportDone(code, res.Rows, res.Bytes, time.Since(t0).Seconds())
+	return res, err
 }
 
 func errCode(err error, ctx context.Context) string {
@@ -348,6 +368,7 @@ func (s *Server) get(_ http.ResponseWriter, p Principal, r *http.Request, _ []by
 			return 0, nil, &apiError{status: 502, Code: "presign_failed", Message: "could not issue download link"}
 		}
 		v.DownloadURL, v.ExpiresAt = u, &exp
+		s.APIAudit.ExportDownloadLink(p, j.ID, r.Header.Get("X-Request-ID"))
 	}
 	return http.StatusOK, v, nil
 }

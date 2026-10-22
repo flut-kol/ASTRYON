@@ -1,0 +1,11 @@
+.git
+.astryon-dev
+.env
+**/node_modules
+web
+docs
+**/*.pem
+**/*.key
+**/*.test
+bin
+dist

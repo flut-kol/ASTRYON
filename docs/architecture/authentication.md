@@ -51,7 +51,7 @@ ASTRYON **не містить і не розгортає власний auth-с�
 Реєстрація є конфігурацією чинного сервісу, а не кодом ASTRYON. Її contract test має перевіряти discovery,
 audiences, redirect URI, scopes, `tenant_id`, token exchange та revocation до розгортання ASTRYON.
 
-## Початкова модель scopes
+## Scope-модель
 
 Назви відповідають формату AAS `<namespace>:<resource>:<action>` без wildcard. Endpoint вимагає всі заявлені для
 нього scopes; роль не замінює object-level authorization.
@@ -59,19 +59,20 @@ audiences, redirect URI, scopes, `tenant_id`, token exchange та revocation д�
 | Scope | Доступ |
 |---|---|
 | `astryon:events:write` | submit single/batch events |
-| `astryon:events:read` | query events у дозволеному tenant |
 | `astryon:uploads:write` | create/complete uploads |
-| `astryon:sources:read`, `astryon:sources:write` | read/change sources |
-| `astryon:pipelines:read`, `astryon:pipelines:write` | read/change pipelines |
-| `astryon:jobs:read`, `astryon:jobs:write` | inspect/cancel jobs |
+| `astryon:query:read` | query/aggregate/summary APIs |
+| `astryon:sources:read` | read-only source catalog |
+| `astryon:jobs:read` | read-only job metadata and label counts |
+| `astryon:connectors:write` | list/get/create/pause/resume connectors |
+| `astryon:data:read`, `astryon:secrets:read`, `astryon:pii:read` | profile-dependent data-class access |
 | `astryon:quarantine:read` | inspect tenant-scoped quarantine metadata |
-| `astryon:quarantine:read-payload` | inspect the original quarantined payload; grant separately because it may contain rejected/unmasked input |
-| `astryon:replays:write` | create replay requests |
-| `astryon:exports:read`, `astryon:exports:write` | inspect/create exports |
-| `astryon:metrics:read` | business metrics API |
-| `astryon:platform:admin` | privileged control-plane operations |
+| `astryon:quarantine-payload:read` | inspect the original quarantined payload; grant separately because it may contain rejected/unmasked input |
+| `astryon:quarantine-replay:read`, `astryon:quarantine-replay:write` | plan/dry-run and publish quarantine replay jobs |
+| `astryon:replay:read`, `astryon:replay:write` | inspect and create replay-controller requests |
+| `astryon:export:read`, `astryon:export:write` | inspect and create exports |
 
-Остаточна матриця endpoint → audience → scopes зберігається поруч з OpenAPI і тестується автоматично.
+Endpoint → scope перевіряється в кожному сервісі та OpenAPI-контракті; централізований наскрізний тест і фактичне
+створення ролей у AAS залишаються окремими задачами.
 
 ## Потоки
 

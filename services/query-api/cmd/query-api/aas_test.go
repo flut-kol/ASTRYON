@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/astryon/audit"
 	"github.com/astryon/go-common/auth"
 	"github.com/astryon/query-api/internal/query"
 )
@@ -45,7 +46,8 @@ func TestAASAdapterEndToEnd(t *testing.T) {
 	var chTenant string
 	ch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { chTenant = r.URL.Query().Get("param_p_tenant") }))
 	defer ch.Close()
-	api := httptest.NewServer((&query.Server{Auth: aasAuthenticator{v: v}, CHURL: ch.URL}).Handler())
+	auditSink := &aasAuditCapture{}
+	api := httptest.NewServer((&query.Server{Auth: aasAuthenticator{v: v}, CHURL: ch.URL, Audit: auditSink}).Handler())
 	defer api.Close()
 
 	call := func(tok string) int {
@@ -69,10 +71,20 @@ func TestAASAdapterEndToEnd(t *testing.T) {
 	if c := call(token(t, key, "astryon:events:write")); c != 403 {
 		t.Fatalf("missing scope: %d", c)
 	}
+	if len(auditSink.events) != 1 || auditSink.events[0].Subject != "u" || auditSink.events[0].ClientID != "portal" || auditSink.events[0].ACR != "mfa" {
+		t.Fatalf("principal audit mapping = %+v", auditSink.events)
+	}
 	tok := token(t, key, "astryon:query:read")
 	if c := call(tok[:len(tok)-4] + "AAAA"); c != 401 {
 		t.Fatalf("tampered signature: %d", c)
 	}
+}
+
+type aasAuditCapture struct{ events []audit.Event }
+
+func (a *aasAuditCapture) Submit(e audit.Event) error {
+	a.events = append(a.events, e)
+	return nil
 }
 
 var issuerURL string
@@ -82,7 +94,7 @@ func token(t *testing.T, key *rsa.PrivateKey, scope string) string {
 	now := time.Now()
 	return sign(t, key, map[string]any{"iss": issuerURL, "aud": []string{"astryon-query"}, "env": "test", "typ": "at+jwt", "azp": "portal",
 		"exp": now.Add(time.Hour).Unix(), "nbf": now.Add(-time.Minute).Unix(), "iat": now.Add(-time.Minute).Unix(), "jti": "j", "sub": "u",
-		"client_id": "portal", "tenant_id": claimTenant, "scope": scope})
+		"client_id": "portal", "tenant_id": claimTenant, "scope": scope, "acr": "mfa", "amr": []string{"pwd", "otp"}})
 }
 
 func sign(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {

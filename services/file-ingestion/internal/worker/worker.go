@@ -9,14 +9,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/astryon/file-ingestion/internal/classify"
 	"github.com/astryon/file-ingestion/internal/jobs"
+	"github.com/astryon/file-ingestion/internal/metadata"
 	"github.com/astryon/file-ingestion/internal/parse"
 	"github.com/astryon/file-ingestion/internal/profile"
+	malwarescan "github.com/astryon/file-ingestion/internal/scanner"
 )
 
 // JobStore is the subset of *jobs.Store the worker needs.
@@ -30,10 +33,25 @@ type JobStore interface {
 	Fail(ctx context.Context, j jobs.Job, code string, retryable bool) (jobs.State, error)
 }
 
+type MetadataStore interface {
+	SetMetadata(ctx context.Context, j jobs.Job, m jobs.DocumentMetadata) error
+}
+
 // Source resolves a job's file object. Fingerprint identifies immutable content (the verified SHA-256), Open
 // range-reads from a byte offset.
 type Source interface {
 	Open(ctx context.Context, j jobs.Job, offset int64) (rc io.ReadCloser, fingerprint string, err error)
+}
+
+// RandomSource is implemented by sources that can serve random-access reads. Parquet needs it: the footer sits at
+// the end of the object and row groups are read independently. size is the verified object size.
+type RandomSource interface {
+	OpenAt(ctx context.Context, j jobs.Job) (ra io.ReaderAt, size int64, fingerprint string, err error)
+}
+
+// Outputter is optionally implemented by sinks that write an object per batch; its key lands in the batch lineage.
+type Outputter interface {
+	OutputKey(j jobs.Job, valid []Item) string
 }
 
 // Item is one parsed record with its idempotency key (parse.Record.DedupKey).
@@ -47,6 +65,13 @@ type Item struct {
 // accepted before Accept returns.
 type Sink interface {
 	Accept(ctx context.Context, j jobs.Job, valid, invalid []Item) error
+}
+
+// MalwareScanner is the bounded, fail-closed scanner gate used before the
+// first parser/sink pass. Implementations must never return engine output or
+// file contents in a verdict.
+type MalwareScanner interface {
+	Scan(context.Context, malwarescan.File) malwarescan.Verdict
 }
 
 // quarantined is returned by run when a content policy holds the file back before anything reached the sink.
@@ -79,6 +104,21 @@ type Config struct {
 	// Policies is the credentials policy (env default plus tenant/source overrides); the zero value quarantines.
 	// A source-type profile's own policy sits between an explicit override and the default (profile.EffectiveCredentialsPolicy).
 	Policies classify.PolicySet
+	// Lineage, when set, records source file -> batch -> (output) -> pipeline version for every batch the sink accepted.
+	Lineage jobs.LineageRecorder
+	// PipelineVersion labels lineage and normalized output; default "file-ingestion/1".
+	PipelineVersion string
+	// LineageDestination is the destination recorded for sinks that are not Outputters; default CLICKHOUSE_BULK.
+	LineageDestination jobs.Destination
+	// Parquet bounds the Parquet reader (MaxRecordBytes is taken from the profile/worker setting).
+	Parquet parse.ParquetLimits
+	// MalwareScanner is optional for development. When configured, a fresh
+	// job is staged and scanned before any bytes can reach the sink.
+	MalwareScanner MalwareScanner
+	// ScannerStageDir is the directory used for short-lived scanner files.
+	ScannerStageDir string
+	// ScannerMaxBytes bounds local staging. Oversized objects are held back.
+	ScannerMaxBytes int64
 }
 
 // Metrics are plain atomic counters; Prometheus text via WritePrometheus.
@@ -156,6 +196,15 @@ func New(c Config) *Worker {
 	}
 	if c.Heartbeat <= 0 {
 		c.Heartbeat = 15 * time.Second
+	}
+	if c.PipelineVersion == "" {
+		c.PipelineVersion = "file-ingestion/1"
+	}
+	if c.LineageDestination == "" {
+		c.LineageDestination = jobs.ClickHouseBulk
+	}
+	if c.ScannerMaxBytes <= 0 {
+		c.ScannerMaxBytes = 1 << 30
 	}
 	return &Worker{Config: c}
 }
@@ -257,14 +306,19 @@ func (w *Worker) process(parent context.Context, j jobs.Job) error {
 // prescan classifies the whole object in a streaming pass (bounded memory) before any record reaches the sink, so
 // quarantine/block really mean "nothing was written". It returns the final labels.
 func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) (classify.Labels, error) {
-	rc, _, err := w.Source.Open(ctx, j, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
 	sc := prof.NewScanner()
+	// Some document containers carry GPS/XMP metadata outside the row payload.
+	// Inspect them separately and retain only a bounded classification finding;
+	// coordinate values must never enter jobs.content_labels or API responses.
+	if rc, _, e := w.Source.Open(ctx, j, 0); e == nil {
+		if md, me := metadata.Extract(ctx, rc, j.ContentType, metadata.SafeLimits()); me == nil && len(md.Coordinates) > 0 {
+			sc.Merge(classify.Labels{classify.Geo: {Count: int64(len(md.Coordinates)), Fields: []string{"metadata.gps"}}})
+		}
+		_ = rc.Close()
+	}
 	st := &stream{f: formatOf(j)}
-	err = st.run(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, func(row row) error {
+	var err error
+	emit := func(row row) error {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
@@ -282,14 +336,54 @@ func (w *Worker) prescan(ctx context.Context, j jobs.Job, prof profile.Profile) 
 			st.scan(sc, row)
 		}
 		return nil
-	})
+	}
+	if st.f == formatParquet {
+		var ra io.ReaderAt
+		var size int64
+		if ra, size, _, err = w.openParquet(ctx, j); err == nil {
+			err = mapParquetErr(st.runParquet(ra, size, w.parquetLimits(prof), 0, 0, emit))
+		}
+		return sc.Take(), err
+	}
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	err = st.run(rc, prof.MaxRecord(w.MaxRecordBytes), 0, 1, emit)
 	return sc.Take(), err
 }
 
 func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) error {
 	prof := profile.Select(j.SourceType)
+	if prof.Parser == "metadata" {
+		if len(j.Checkpoint) != 0 {
+			return nil
+		}
+		labels, err := w.prescanMetadata(ctx, j)
+		if err != nil {
+			return err
+		}
+		seen.Merge(labels)
+		if err := w.Store.SetLabels(ctx, j, labels); err != nil {
+			return err
+		}
+		pol := prof.EffectiveCredentialsPolicy(w.Policies, j.TenantID, j.SourceID)
+		switch out := prof.Evaluate(pol, labels); out.Action {
+		case profile.Quarantine:
+			return quarantined{code: out.Code, labels: labels}
+		case profile.Block:
+			return permanent{code: out.Code, blocked: true}
+		}
+		return nil
+	}
 	if prof.Parser != "ndjson" && prof.Parser != "csv" {
 		return Permanent("parser_unavailable")
+	}
+	if w.MalwareScanner != nil && len(j.Checkpoint) == 0 {
+		if err := w.scanObject(ctx, j); err != nil {
+			return err
+		}
 	}
 	pol := prof.EffectiveCredentialsPolicy(w.Policies, j.TenantID, j.SourceID)
 	var scanner *classify.Scanner
@@ -315,6 +409,9 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		}
 	}
 
+	if formatOf(j) == formatParquet {
+		return w.runParquet(ctx, j, prof, scanner, seen)
+	}
 	var cp parse.Checkpoint
 	haveCP := len(j.Checkpoint) > 0
 	if haveCP {
@@ -345,11 +442,8 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		if len(pending) == 0 {
 			return nil
 		}
-		if len(valid) > 0 || len(invalid) > 0 {
-			if err := w.Sink.Accept(ctx, j, valid, invalid); err != nil {
-				w.M.SinkErrors.Add(1)
-				return err
-			}
+		if err := w.accept(ctx, j, fp, valid, invalid, pending[0].Number, pending[len(pending)-1].Number); err != nil {
+			return err
 		}
 		next := cp
 		for _, r := range pending {
@@ -418,4 +512,100 @@ func (w *Worker) run(ctx context.Context, j jobs.Job, seen classify.Labels) erro
 		return err
 	}
 	return flush()
+}
+
+func (w *Worker) prescanMetadata(ctx context.Context, j jobs.Job) (classify.Labels, error) {
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	r, err := metadata.Extract(ctx, rc, j.ContentType, metadata.SafeLimits())
+	if err != nil {
+		return nil, Permanent("metadata_unavailable")
+	}
+	labels := classify.Labels{}
+	if ms, ok := w.Store.(MetadataStore); ok {
+		coords := make([]jobs.DocumentCoordinate, 0, len(r.Coordinates))
+		for _, c := range r.Coordinates {
+			if c.Valid() {
+				coords = append(coords, jobs.DocumentCoordinate{Latitude: c.Latitude, Longitude: c.Longitude})
+			}
+		}
+		if err := ms.SetMetadata(ctx, j, jobs.DocumentMetadata{Format: r.Format, Coordinates: coords, Tags: r.Tags, Truncated: r.Truncated}); err != nil {
+			return nil, err
+		}
+	}
+	if len(r.Coordinates) > 0 {
+		labels.Merge(classify.Labels{classify.Geo: {Count: int64(len(r.Coordinates)), Fields: []string{"metadata.gps"}}})
+	}
+	return labels, nil
+}
+
+// scanObject stages the verified object to a private temporary file and asks
+// the configured provider(s) to inspect it. The path is never exposed outside
+// the scanner call and is removed before returning. Scanners run before any
+// parser or sink call and errors remain retryable by the normal job state
+// machine. Positive verdicts are quarantined, never sent to the sink.
+func (w *Worker) scanObject(ctx context.Context, j jobs.Job) error {
+	rc, _, err := w.Source.Open(ctx, j, 0)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	dir := w.ScannerStageDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	staged, cleanup, err := malwarescan.Stage(ctx, dir, rc, w.ScannerMaxBytes)
+	if err != nil {
+		if errors.Is(err, malwarescan.ErrStageTooLarge) {
+			return quarantined{code: "SCANNER_SIZE_LIMIT"}
+		}
+		return fmt.Errorf("scanner staging: %w", err)
+	}
+	defer cleanup()
+	staged.Name = j.FileObjectID
+	v := w.MalwareScanner.Scan(ctx, staged)
+	switch v.Status {
+	case malwarescan.Clean:
+		return nil
+	case malwarescan.Infected:
+		return quarantined{code: "MALWARE_DETECTED"}
+	case malwarescan.Encrypted:
+		return quarantined{code: "SCANNER_ENCRYPTED"}
+	case malwarescan.ScanError:
+		// Provider outages/timeouts are deliberately retryable. Do not turn
+		// an unavailable scanner into an ingest allow decision.
+		return fmt.Errorf("malware scanner unavailable: %s", v.ReasonCode)
+	default:
+		return fmt.Errorf("malware scanner returned unknown verdict")
+	}
+}
+
+// accept hands a batch to the sink, then records its lineage. Both must succeed before the caller checkpoints.
+func (w *Worker) accept(ctx context.Context, j jobs.Job, fp string, valid, invalid []Item, first, last int) error {
+	if len(valid) == 0 && len(invalid) == 0 {
+		return nil
+	}
+	if err := w.Sink.Accept(ctx, j, valid, invalid); err != nil {
+		w.M.SinkErrors.Add(1)
+		return err
+	}
+	if w.Lineage == nil {
+		return nil
+	}
+	b := jobs.BatchLineage{TenantID: j.TenantID, JobID: j.ID, SourceFileID: j.FileObjectID, SourceChecksum: fp,
+		PipelineVersion: w.PipelineVersion, Destination: w.LineageDestination, FirstRow: int64(first), LastRow: int64(last),
+		Valid: len(valid), Invalid: len(invalid)}
+	if o, ok := w.Sink.(Outputter); ok {
+		if b.OutputKey = o.OutputKey(j, valid); b.OutputKey != "" {
+			b.Destination = jobs.ParquetS3
+		}
+	}
+	b.BatchID = jobs.NewBatchID(fp, w.PipelineVersion, b.FirstRow, b.LastRow)
+	if err := b.Validate(); err != nil {
+		return Permanent("lineage_invalid")
+	}
+	return w.Lineage.Record(ctx, b)
 }

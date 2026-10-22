@@ -34,14 +34,20 @@ type fakeAAS struct {
 	lastBasic  string
 	badNonce   bool
 	tokenType  string
+	key        *ecdsa.PrivateKey
+	sub, sid   string
+	tenant     string
 }
 
 func newFakeAAS(t *testing.T) *fakeAAS {
-	f := &fakeAAS{codes: map[string]struct{ challenge, nonce string }{}, expiresIn: 300, tokenType: "Bearer"}
+	f := &fakeAAS{codes: map[string]struct{ challenge, nonce string }{}, expiresIn: 300, tokenType: "Bearer", sub: "user-1", sid: "sid-1", tenant: "11111111-1111-4111-8111-111111111111"}
+	f.key, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/realm/.well-known/openid-configuration":
-			json.NewEncoder(w).Encode(map[string]string{"issuer": f.URL + "/realm", "authorization_endpoint": f.URL + "/realm/auth", "token_endpoint": f.URL + "/realm/token", "end_session_endpoint": f.URL + "/realm/logout"})
+			json.NewEncoder(w).Encode(map[string]string{"issuer": f.URL + "/realm", "authorization_endpoint": f.URL + "/realm/auth", "token_endpoint": f.URL + "/realm/token", "end_session_endpoint": f.URL + "/realm/logout", "jwks_uri": f.URL + "/realm/jwks"})
+		case "/realm/jwks":
+			json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{"kty": "EC", "crv": "P-256", "kid": "k1", "use": "sig", "x": b64u(f.key.X.FillBytes(make([]byte, 32))), "y": b64u(f.key.Y.FillBytes(make([]byte, 32)))}}})
 		case "/realm/auth":
 			q := r.URL.Query()
 			if q.Get("code_challenge_method") != "S256" || q.Get("response_type") != "code" || q.Get("client_id") != "astryon-portal" {
@@ -95,7 +101,8 @@ func newFakeAAS(t *testing.T) *fakeAAS {
 }
 
 func (f *fakeAAS) idToken(nonce string) string {
-	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": "user-1", "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce})
+	cl, _ := json.Marshal(map[string]any{"iss": f.URL + "/realm", "sub": f.sub, "sid": f.sid, "aud": "astryon-portal", "exp": time.Now().Add(time.Hour).Unix(), "nonce": nonce,
+		"tenant_id": f.tenant, "azp": "astryon-portal", "acr": "mfa", "amr": []string{"pwd", "otp"}})
 	return b64u([]byte(`{"alg":"ES256"}`)) + "." + b64u(cl) + "." + b64u([]byte("sig"))
 }
 
@@ -109,7 +116,11 @@ type env struct {
 
 func setup(t *testing.T, mut func(*Options)) *env {
 	t.Helper()
-	aas := newFakeAAS(t)
+	return setupOn(t, newFakeAAS(t), mut)
+}
+
+func setupOn(t *testing.T, aas *fakeAAS, mut func(*Options)) *env {
+	t.Helper()
 	got := make(chan http.Header, 8)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := r.Header.Clone()
@@ -262,6 +273,35 @@ func TestCSRFAndLogout(t *testing.T) {
 	}
 	if res, _ := e.do(t, "GET", "/api/query/x", nil); res.StatusCode != 401 {
 		t.Fatalf("after logout = %d", res.StatusCode)
+	}
+}
+
+func TestAbsoluteAfterLoginKeepsRegisteredPostLogoutURI(t *testing.T) {
+	e := setup(t, func(o *Options) { o.AfterLoginPath = "http://127.0.0.1:15173/" })
+	e.login(t)
+	_, body := e.do(t, "POST", "/auth/logout", map[string]string{CSRFHeader: CSRFValue})
+	if !strings.Contains(body, "post_logout_redirect_uri="+url.QueryEscape(e.bff.URL+"/")) {
+		t.Fatalf("post-logout URI must stay on the BFF origin: %s", body)
+	}
+}
+
+func TestAllowedOriginsAndRootRedirect(t *testing.T) {
+	e := setup(t, func(o *Options) {
+		o.AfterLoginPath = "http://127.0.0.1:15173/"
+		o.AllowedOrigins = []string{"http://127.0.0.1:15173"}
+	})
+	e.login(t)
+	if res, _ := e.do(t, "POST", "/auth/logout", map[string]string{CSRFHeader: CSRFValue, "Origin": "http://127.0.0.1:15173"}); res.StatusCode != 200 {
+		t.Fatalf("logout from an allowed UI origin = %d", res.StatusCode)
+	}
+	e.login(t)
+	if res, _ := e.do(t, "POST", "/auth/logout", map[string]string{CSRFHeader: CSRFValue, "Origin": "http://evil.example"}); res.StatusCode != 403 {
+		t.Fatalf("logout from a foreign origin = %d", res.StatusCode)
+	}
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := c.Get(e.bff.URL + "/")
+	if err != nil || res.StatusCode != 302 || res.Header.Get("Location") != "http://127.0.0.1:15173/" {
+		t.Fatalf("GET / = %v %v", res, err)
 	}
 }
 

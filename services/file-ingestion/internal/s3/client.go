@@ -209,6 +209,16 @@ func (c *Client) Get(ctx context.Context, key string, offset int64) (io.ReadClos
 	return resp.Body, nil
 }
 
+// Put stores a small, whole object (worker output parts; body is held in memory by the caller and signed whole).
+func (c *Client) Put(ctx context.Context, key string, body []byte, contentType string) error {
+	resp, err := c.do(ctx, http.MethodPut, key, nil, body, map[string]string{"Content-Type": contentType})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return check(resp, "put", 200, 201, 204)
+}
+
 // Delete removes an object (used to discard uploads whose checksum did not verify).
 func (c *Client) Delete(ctx context.Context, key string) error {
 	resp, err := c.do(ctx, http.MethodDelete, key, nil, nil, nil)

@@ -69,3 +69,35 @@ func TestMetricsAreTenantFreePrometheusCounters(t *testing.T) {
 		t.Fatalf("sensitive label in %q", body)
 	}
 }
+
+type fakeBacklog struct {
+	b   Backlog
+	err error
+}
+
+func (f fakeBacklog) Backlog(context.Context) (Backlog, error) { return f.b, f.err }
+
+func TestMetricsExposeBacklogGauges(t *testing.T) {
+	m := &Metrics{Backlog: fakeBacklog{b: Backlog{Pending: 7, OldestDueSecs: 12.5}}}
+	r := httptest.NewRecorder()
+	m.Handler().ServeHTTP(r, httptest.NewRequest("GET", "/metrics", nil))
+	body := r.Body.String()
+	for _, want := range []string{"astryon_retry_backlog_pending 7\n", "astryon_retry_oldest_due_age_seconds 12.5\n", "astryon_retry_backlog_read_errors_total 0\n", "astryon_retry_polls_total 0"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in %q", want, body)
+		}
+	}
+	if strings.Contains(body, "{") {
+		t.Fatalf("labels not allowed: %q", body)
+	}
+}
+
+func TestMetricsBacklogErrorOmitsGauges(t *testing.T) {
+	m := &Metrics{Backlog: fakeBacklog{err: errors.New("down")}}
+	r := httptest.NewRecorder()
+	m.Handler().ServeHTTP(r, httptest.NewRequest("GET", "/metrics", nil))
+	body := r.Body.String()
+	if strings.Contains(body, "backlog_pending") || !strings.Contains(body, "backlog_read_errors_total 1") {
+		t.Fatalf("unexpected: %q", body)
+	}
+}

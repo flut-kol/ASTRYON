@@ -33,6 +33,30 @@ Sprint 08 (`DPP-036` .. `DPP-040`). Library packages only so far; there is no ex
   `_PRIMARY_KEY` (comma list), `_GROUP`, `_SCHEMA_VERSION`, `_PROCESSING_VERSION`. Not yet: reading these from the `connectors` row, a PostgreSQL-backed
   `PositionStore`, live Debezium/Kafka test.
 
+## Admin API audit
+
+When `ASTRYON_AUDIT_PG_URL` is set, the admin API uses the bounded asynchronous PostgreSQL writer from
+`libs/audit`. It records `connector.create`, `connector.pause`, `connector.resume`, and `auth.denied` for a
+validated principal that lacks a scope. Invalid or missing tokens are not assigned a synthetic tenant and are
+not written. Identity, tenant and `acr` come from the validated principal; `amr`, connector config, secret
+references, payloads and PII are never stored. Create events contain only connector id, source id and connector
+kind; failures add a bounded error code.
+
+Writer bounds are configurable with `ASTRYON_AUDIT_QUEUE_SIZE`, `_BATCH_SIZE`, `_FLUSH_INTERVAL`,
+`_WRITE_TIMEOUT`, `_RETRIES`, `_DRAIN_TIMEOUT`, and `_PG_MAX_CONNS`. The metrics listener exposes
+`astryon_audit_{queued,written,dropped,rejected}_total`; drops also produce identifier-free log messages. SIGTERM
+drains the audit queue before closing its pool.
+
+There are currently no source create/update/pause/resume, connector update, or credential-reference mutation
+endpoints in this service. Audit events for those actions must be added with the endpoints rather than inventing
+write paths solely for audit.
+
+## Retry mode (DPP-041)
+
+`CONNECTOR_RETRY_MODE` (default `local` = built-in 30 s base, 1 h cap schedule). `controller` (`internal/retrybridge`) takes the delay from the retry-controller's public `pkg/retryclient` policy and classification instead: transient failures (`pull_error`, `emit_failed`, `secret_unavailable`, HTTP 408/425/429/5xx) back off exponentially with jitter (`CONNECTOR_RETRY_BASE_SECONDS` 30, `CONNECTOR_RETRY_MAX_SECONDS` 3600, `CONNECTOR_RETRY_MAX_ATTEMPTS` 10); permanent ones (`bad_config`, `bad_response`, other 4xx, `response_too_large`) and transient ones past the attempt limit are parked at the max delay. `Retry-After` stays a minimum. Claim, lease fence, cursor-after-emit and `pullstore.Fail` are unchanged.
+
+Limits, stated plainly: `retryclient.Client.Fail` and the dispatcher work on the `jobs` table and `scheduled_retries(job_id -> jobs)`, and a pull connector is not a job. So in this mode nothing is written to `scheduled_retries`, the retry-controller does not dispatch these retries, there is no dead-letter (a permanently failing connector keeps retrying at the max delay until paused) and the retry backlog metrics do not include connectors. Real controller scheduling would need a connector-aware ledger or schema change (not done). Tests: `internal/retrybridge`, runner hook, env parsing; no live test.
+
 ## Not yet
 
 - Kafka `Emitter` for `raw.events.v1` (gateway has its own TLS/SASL/mTLS producer; extract a shared client first), a `SecretRef` resolver (Vault),

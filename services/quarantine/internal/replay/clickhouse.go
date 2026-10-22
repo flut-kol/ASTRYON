@@ -53,14 +53,14 @@ type quarantineCursor struct {
 }
 
 type clickHouseRow struct {
-	TenantID      string `json:"tenant_id"`
-	SourceID      string `json:"source_id"`
-	BatchID       string `json:"batch_id"`
-	JobID         string `json:"job_id"`
-	EventID       string `json:"event_id"`
+	TenantID      string `json:"r_tenant_id"`
+	SourceID      string `json:"r_source_id"`
+	BatchID       string `json:"r_batch_id"`
+	JobID         string `json:"r_job_id"`
+	EventID       string `json:"r_event_id"`
 	Processing    uint32 `json:"processing_version"`
 	Pipeline      uint32 `json:"pipeline_version"`
-	OccurredAt    string `json:"occurred_at"`
+	OccurredAt    string `json:"r_occurred_at"`
 	Stage         string `json:"stage"`
 	ErrorCode     string `json:"error_code"`
 	ErrorMessage  string `json:"error_message"`
@@ -102,9 +102,9 @@ func (s *ClickHouseStore) ListQuarantine(ctx context.Context, tenantID, rawCurso
 	if includePayload {
 		payloadColumn = fmt.Sprintf("substring(sample_payload, 1, %d) AS sample_payload", maxSamplePayloadBytes)
 	}
-	query := fmt.Sprintf(`SELECT toString(tenant_id) AS tenant_id, toString(source_id) AS source_id,
-toString(batch_id) AS batch_id, toString(job_id) AS job_id, toString(event_id) AS event_id,
-processing_version, pipeline_version, toString(occurred_at) AS occurred_at, stage, error_code,
+	query := fmt.Sprintf(`SELECT toString(tenant_id) AS r_tenant_id, toString(source_id) AS r_source_id,
+toString(batch_id) AS r_batch_id, toString(job_id) AS r_job_id, toString(event_id) AS r_event_id,
+processing_version, pipeline_version, toString(occurred_at) AS r_occurred_at, stage, error_code,
 	substring(error_message, 1, %d) AS error_message, %s
 FROM %s WHERE %s
 ORDER BY occurred_at DESC, source_id DESC, batch_id DESC, job_id DESC, event_id DESC,

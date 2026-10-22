@@ -15,6 +15,10 @@ const ScopeEventsWrite = "astryon:events:write"
 // source of tenant identity; body and headers are never trusted for it.
 type Principal struct {
 	TenantID string
+	Subject  string
+	ClientID string
+	ACR      string
+	AMR      []string
 	Scopes   []string
 }
 

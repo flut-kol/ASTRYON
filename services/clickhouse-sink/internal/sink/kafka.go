@@ -3,7 +3,6 @@ package sink
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	ec "github.com/astryon/event-contracts"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -108,6 +108,7 @@ type KafkaSource struct {
 	cl       *kgo.Client
 	maxPoll  int
 	quarTopc string
+	dlqTopc  string // tenantless rejections (no QuarantineRecordV1 possible)
 	conn     *connErrs
 	wait     time.Duration // bounds Quarantine's wait for a produce ack
 	tls      bool
@@ -146,7 +147,7 @@ func NewKafka(c Config) (*KafkaSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &KafkaSource{cl: cl, maxPoll: c.BatchSize, quarTopc: c.QuarantineTopic, conn: ce, wait: wait, tls: c.KafkaTLS}, nil
+	return &KafkaSource{cl: cl, maxPoll: c.BatchSize, quarTopc: c.QuarantineTopic, dlqTopc: dlqTopic(c), conn: ce, wait: wait, tls: c.KafkaTLS}, nil
 }
 
 func (k *KafkaSource) Poll(ctx context.Context) ([]Message, error) {
@@ -211,17 +212,19 @@ func (k *KafkaSource) Commit(ctx context.Context, msgs []Message) error {
 
 func (k *KafkaSource) Close() { k.cl.Close() }
 
-// Quarantine produces rejected messages to the quarantine topic (synchronously, acks=all).
+func dlqTopic(c Config) string {
+	if c.DLQTopic != "" {
+		return c.DLQTopic
+	}
+	return ec.TopicDLQ
+}
+
+// Quarantine produces rejected messages as QuarantineRecordV1 to the quarantine
+// topic, or to the DLQ when no tenant is known (synchronously, acks=all).
 func (k *KafkaSource) Quarantine(ctx context.Context, q []Quarantined) error {
-	recs := make([]*kgo.Record, len(q))
-	for i, x := range q {
-		// Original bytes are carried as-is for replay; reason never contains payload content.
-		b, _ := json.Marshal(map[string]any{
-			"reason_code": x.Code, "reason": x.Reason, "stage": "clickhouse-sink",
-			"source_topic": x.Msg.Topic, "source_partition": x.Msg.Partition, "source_offset": x.Msg.Offset,
-			"quarantined_at": time.Now().UTC().Format(time.RFC3339Nano), "original": json.RawMessage(rawOrString(x.Msg.Value)),
-		})
-		recs[i] = &kgo.Record{Topic: k.quarTopc, Key: x.Msg.Key, Value: b}
+	recs, err := quarantineRecords(q, time.Now(), k.quarTopc, k.dlqTopc)
+	if err != nil {
+		return err
 	}
 	return k.produce(ctx, recs)
 }
@@ -262,12 +265,4 @@ func (k *KafkaSource) produce(ctx context.Context, recs []*kgo.Record) error {
 		}
 	}
 	return err
-}
-
-func rawOrString(v []byte) []byte {
-	if json.Valid(v) {
-		return v
-	}
-	b, _ := json.Marshal(string(v))
-	return b
 }

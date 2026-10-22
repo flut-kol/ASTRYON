@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -284,5 +285,144 @@ func TestParseTenants(t *testing.T) {
 	ts, err := parseTenants("tok", tenantA, tenantB+"=x")
 	if err != nil || len(ts) != 2 || ts[0].Token != "tok" {
 		t.Fatal(ts, err)
+	}
+}
+
+func TestProfilesProduceExpectedShapes(t *testing.T) {
+	for _, name := range ProfileNames() {
+		cfg := RunConfig{BatchSize: 50}
+		cfg.Opt.EventSize = 1024
+		if err := ApplyProfile(&cfg, name, false, false); err != nil {
+			t.Fatal(err)
+		}
+		b := NewBuilder(cfg.Opt, []Tenant{{ID: tenantA, Token: "t"}, {ID: tenantB, Token: "u"}}, 7)
+		bt := b.BuildBatch(300)
+		var body struct {
+			Events []json.RawMessage `json:"events"`
+		}
+		if err := json.Unmarshal(bt.Body, &body); err != nil || len(body.Events) != 300 {
+			t.Fatalf("%s: bad batch: %v", name, err)
+		}
+		if bt.Valid+bt.Invalid != 300 {
+			t.Fatalf("%s: counts", name)
+		}
+	}
+	if err := ApplyProfile(&RunConfig{}, "nope", false, false); err == nil {
+		t.Fatal("unknown profile accepted")
+	}
+}
+
+func TestWideLateHotSchemaInvalid(t *testing.T) {
+	b := newTestBuilder(Options{EventSize: 4096, Shape: "wide", WideFields: 100, LateRatio: 1, LateMax: 48 * time.Hour, HotKeyRatio: 1})
+	e := b.Envelope(b.tenants[0])
+	if err := e.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(e.Payload, &m); err != nil || len(m) < 50 {
+		t.Fatalf("payload not wide: %d keys %v", len(m), err)
+	}
+	if _, ok := m["nested"].(map[string]any); !ok {
+		t.Fatal("no nested object")
+	}
+	if len(e.Payload) < 2500 || len(e.Payload) > 6000 {
+		t.Fatalf("wide payload size %d", len(e.Payload))
+	}
+	if !e.EventTime.Before(time.Now().Add(-time.Minute)) || e.EntityKey != "ent-hot" {
+		t.Fatalf("late/hot not applied: %v %s", e.EventTime, e.EntityKey)
+	}
+	bi := newTestBuilder(Options{EventSize: 512, InvalidRatio: 1, SchemaInvalid: true})
+	for i := 0; i < 30; i++ {
+		var raw map[string]any
+		_ = json.Unmarshal(bi.invalidEvent(bi.tenants[0]), &raw)
+		if _, bad := raw["unknown_field_xyz"]; bad || raw["event_id"] == "not-a-uuid" {
+			t.Fatal("schema-invalid event used decode-level corruption")
+		}
+		v, _ := raw["schema_version"].(float64)
+		if raw["schema_id"] != "" && v > 0 {
+			t.Fatalf("event not schema-invalid: %v", raw)
+		}
+	}
+}
+
+func TestParsePromAndBacklog(t *testing.T) {
+	v, err := ParsePromValue([]byte(`{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,"10"]},{"metric":{},"value":[1,"5.5"]}]}}`))
+	if err != nil || v != 15.5 {
+		t.Fatalf("%v %v", v, err)
+	}
+	if _, err := ParsePromValue([]byte(`{"status":"error"}`)); err == nil {
+		t.Fatal("error status accepted")
+	}
+	end := 10.0
+	r := EvalBacklog("q", []BacklogSample{{0, 0}, {5, 900000}, {10, 800000}, {20, 400}, {25, 0}}, &end, 1000, "")
+	if r.Peak != 900000 || !r.Drained || r.DrainSec == nil || *r.DrainSec != 10 {
+		t.Fatalf("%+v", r)
+	}
+	r = EvalBacklog("q", []BacklogSample{{12, 5e6}}, &end, 1000, "")
+	if r.Drained {
+		t.Fatal("should not be drained")
+	}
+}
+
+func TestEvaluateChecks(t *testing.T) {
+	rep := Report{Sent: 1000, Failed: 0, EventsPerSec: 900, LatencyMs: map[string]float64{"p95": 100}}
+	cs := Evaluate(Criteria{AckP95Ms: 250, MinRateFrac: 0.95}, rep, 1000, nil, nil)
+	if AllPass(cs) {
+		t.Fatal("rate 90% must fail the 95% criterion")
+	}
+	rep.EventsPerSec = 1000
+	if !AllPass(Evaluate(Criteria{AckP95Ms: 250, MinRateFrac: 0.95}, rep, 1000, nil, nil)) {
+		t.Fatal("should pass")
+	}
+	rep.Failed = 1
+	if AllPass(Evaluate(Criteria{AckP95Ms: 250}, rep, 0, nil, nil)) {
+		t.Fatal("failed events must fail")
+	}
+}
+
+func TestBurstPhases(t *testing.T) {
+	p := BurstPhases(1000, time.Second, 120000, 2*time.Second, 3*time.Second)
+	if len(p) != 3 || p[1].Name != "burst" || p[1].Rate != 120000 {
+		t.Fatalf("%+v", p)
+	}
+	if len(BurstPhases(0, 0, 5, time.Second, time.Second)) != 1 {
+		t.Fatal("zero baseline should be burst only")
+	}
+}
+
+func TestScenarioAgainstFakeGatewayAndQuery(t *testing.T) {
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Events []struct {
+				EventID string `json:"event_id"`
+			} `json:"events"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		res := []map[string]string{}
+		for _, e := range req.Events {
+			res = append(res, map[string]string{"event_id": e.EventID, "status": "accepted"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": len(req.Events), "results": res})
+	}))
+	defer gw.Close()
+	qs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) }))
+	defer qs.Close()
+	cfg := RunConfig{URL: gw.URL, BatchSize: 20, Concurrency: 2, Timeout: 2 * time.Second, Seed: 1, Tenants: []Tenant{{ID: tenantA, Token: "t"}}}
+	cfg.Opt.EventSize = 512
+	out := t.TempDir() + "/r.json"
+	code := runScenario(context.Background(), cfg, scenarioFlags{
+		burstRate: 2000, burstDur: 300 * time.Millisecond, baseRate: 200, baseDur: 200 * time.Millisecond, drainDur: 300 * time.Millisecond,
+		queryURL: qs.URL, queryRate: 50, queryConc: 2, ackP95: 250, minRateFrac: 0.5, enforce: true,
+	}, "x", gw.Client(), out)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rep ScenarioReport
+	if err := json.Unmarshal(raw, &rep); err != nil || len(rep.Phases) != 3 || rep.Query == nil || rep.Query.Requests == 0 || !rep.Pass {
+		t.Fatalf("report %v %+v", err, rep)
 	}
 }

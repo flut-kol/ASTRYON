@@ -9,7 +9,7 @@ type Principal struct {
 	Scopes   map[string]bool
 }
 
-const ManageScope = "astryon:connectors:manage"
+const ManageScope = "astryon:connectors:write"
 
 // Authorize rejects cross-tenant connector access before probing a remote
 // endpoint, preventing both IDOR and accidental credential use.

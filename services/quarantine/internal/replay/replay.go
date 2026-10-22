@@ -12,8 +12,8 @@ import (
 var ErrInvalidReplayRequest = errors.New("invalid replay request")
 
 const (
-	ReplayScope                = "astryon:quarantine:replay" // dry-run planning
-	ReplayPublishScope         = "astryon:quarantine:replay-publish"
+	ReplayScope                = "astryon:quarantine-replay:read" // dry-run planning
+	ReplayPublishScope         = "astryon:quarantine-replay:write"
 	maxReplayRange             = 31 * 24 * time.Hour
 	maxReplayCandidates uint64 = 10_000
 )

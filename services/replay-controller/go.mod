@@ -3,6 +3,7 @@ module github.com/astryon/replay-controller
 go 1.27.0
 
 require (
+	github.com/astryon/audit v0.0.0
 	github.com/astryon/go-common v0.0.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/twmb/franz-go v1.18.1
@@ -21,3 +22,5 @@ require (
 )
 
 replace github.com/astryon/go-common => ../../libs/go-common
+
+replace github.com/astryon/audit => ../../libs/audit

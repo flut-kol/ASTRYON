@@ -1,0 +1,124 @@
+# ASTRYON dev extras: Redis, Kafka Connect + Debezium, a separate logical-replication PostgreSQL. DEV ONLY.
+# Own compose project (astryon-extras) on the dev stack's network (astryon-dev_default), so `up.sh --remove-orphans` of the
+# base stack never removes these containers and vice versa. Use scripts/dev/extras-up.sh (creates the
+# Connect internal topics, Kafka auto-create is off) so the services below are healthy.
+# Host ports (127.0.0.1): Redis 16379 | Connect REST 18484 | CDC PostgreSQL 15433
+# Optional profiles: processing (Flink; UI 18481, Prometheus 19249/19250) | metrics (kafka_exporter 19308, postgres_exporter 19187)
+name: astryon-extras
+
+networks:
+  default:
+    name: astryon-dev_default
+    external: true
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: astryon_redis
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  pg_cdc:
+    # Separate from astryon_postgres on purpose: logical decoding needs wal_level=logical, the main DB stays untouched.
+    image: postgres:16-alpine
+    container_name: astryon_pg_cdc
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=4", "-c", "max_replication_slots=4"]
+    ports:
+      - "127.0.0.1:${PG_CDC_HOST_PORT:-15433}:5432"
+    environment:
+      POSTGRES_USER: ${PG_CDC_USER:-cdc}
+      POSTGRES_PASSWORD: ${PG_CDC_PASSWORD:-cdc_dev_only}
+      POSTGRES_DB: ${PG_CDC_DB:-cdcdemo}
+    volumes:
+      - ./extras/pg_cdc_init.sql:/docker-entrypoint-initdb.d/10-demo.sql:ro
+      - pg_cdc_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  connect:
+    image: quay.io/debezium/connect:${DEBEZIUM_VERSION:-2.7.3.Final}
+    container_name: astryon_connect
+    depends_on:
+      pg_cdc: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:${CONNECT_HOST_PORT:-18484}:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: astryon-connect
+      CONFIG_STORAGE_TOPIC: astryon.connect.configs
+      OFFSET_STORAGE_TOPIC: astryon.connect.offsets
+      STATUS_STORAGE_TOPIC: astryon.connect.status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  processing:
+    # Optional (profile "processing"): Flink job raw.events.v1 -> validated/processed/quarantine, checkpoints in s3mock.
+    profiles: ["processing"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/extras/flink/Dockerfile
+    image: astryon/processing-dev
+    container_name: astryon_processing
+    ports:
+      - "127.0.0.1:${FLINK_UI_HOST_PORT:-18481}:8081"
+      # Prometheus reporter: JobManager on 9249, TaskManager on the next free port of the range (9250) in this single container.
+      - "127.0.0.1:${FLINK_METRICS_JM_HOST_PORT:-19249}:9249"
+      - "127.0.0.1:${FLINK_METRICS_TM_HOST_PORT:-19250}:9250"
+    environment:
+      PROCESSING_KAFKA_BROKERS: kafka:9092
+      PROCESSING_CHECKPOINT_URI: s3://flink-checkpoints/processing-v1
+      PROCESSING_PIPELINE_ID: 00000000-0000-0000-0000-0000000000c1
+      PROCESSING_CHECKPOINT_INTERVAL: 10s
+      # Keep the range at two ports (JM + TM) and the published ports above in line if you change it.
+      FLINK_METRICS_PORT: ${FLINK_METRICS_PORT:-9249-9250}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/jobs/overview | grep -q RUNNING"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 40s
+
+  kafka_exporter:
+    # Optional (profile "metrics"): consumer-group lag and topic/partition offsets. Scrape http://127.0.0.1:19308/metrics.
+    profiles: ["metrics"]
+    image: danielqsj/kafka-exporter:v1.8.0
+    container_name: astryon_kafka_exporter
+    command: ["--kafka.server=kafka:9092"]
+    ports:
+      - "127.0.0.1:${KAFKA_EXPORTER_HOST_PORT:-19308}:9308"
+
+  postgres_exporter:
+    # Optional (profile "metrics"): metrics of the main dev PostgreSQL. Scrape http://127.0.0.1:19187/metrics.
+    # Credentials come from the environment (same variables as the dev stack); use a read-only role outside dev.
+    profiles: ["metrics"]
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: astryon_postgres_exporter
+    environment:
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB:-astryon}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER:-astryon}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD:-astryon_dev_only}
+    ports:
+      - "127.0.0.1:${POSTGRES_EXPORTER_HOST_PORT:-19187}:9187"
+
+volumes:
+  pg_cdc_data:

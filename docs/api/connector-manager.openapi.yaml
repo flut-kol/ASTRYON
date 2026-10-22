@@ -4,8 +4,8 @@ info:
   version: 0.1.0
   description: >
     Minimal connector admin API served by services/connector-manager when ASTRYON_CONNECTOR_ADMIN_ADDR is set.
-    Tenant is taken only from the validated token (AAS) and never from headers or bodies. Every operation needs
-    scope astryon:connectors:manage. Responses carry SecretRef names only, never secret values.
+    Tenant is taken only from the validated token (AAS) and never from headers or bodies. Connector operations need
+    scope astryon:connectors:write; the read-only /v1/sources endpoints need astryon:sources:read. Responses carry SecretRef names only, never secret values.
 servers:
   - url: http://localhost:8089
 security:
@@ -98,9 +98,54 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+  /v1/sources:
+    get:
+      operationId: listSources
+      summary: List the caller's tenant's sources (read-only, cursor pagination)
+      description: >
+        Requires scope `astryon:sources:read` (separate from `astryon:connectors:write`). Ordered by id; pass
+        `next_cursor` back as `cursor`; `next_cursor` is an empty string on the last page. Source `config` and
+        credential references are never returned.
+      security: [{sourcesRead: []}]
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: cursor, in: query, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: Page of sources
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Source'}}
+                  next_cursor: {type: string}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /v1/sources/{id}:
+    get:
+      operationId: getSource
+      summary: Get one source
+      description: Requires scope `astryon:sources:read`. Another tenant's id is 404.
+      security: [{sourcesRead: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Id'}
+      responses:
+        '200':
+          description: The source
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Source'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
-    bearerAuth: {type: http, scheme: bearer, description: "AAS access token with scope astryon:connectors:manage and a tenant claim"}
+    sourcesRead: {type: http, scheme: bearer, description: "AAS access token with scope astryon:sources:read and a tenant claim"}
+    bearerAuth: {type: http, scheme: bearer, description: "AAS access token with scope astryon:connectors:write and a tenant claim"}
   parameters:
     Id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
   responses:
@@ -110,6 +155,17 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
   schemas:
+    Source:
+      type: object
+      required: [id, name, kind, enabled, connector_count, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        kind: {type: string, enum: [kafka, http_push, s3_files, sftp, database, api_pull]}
+        enabled: {type: boolean}
+        connector_count: {type: integer, description: Non-deleted connectors attached to the source.}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
     Kind: {type: string, enum: [POSTGRES_CDC, MYSQL_CDC, REST_PULL]}
     Connector:
       type: object

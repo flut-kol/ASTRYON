@@ -198,6 +198,7 @@ func (d *Dispatcher) loop() {
 		ccancel()
 		if err != nil && d.base.Err() == nil {
 			log.Printf("dispatcher: claim: %v", err)
+			Metrics.queueError("claim")
 		}
 		if err == nil && ok {
 			backoff = d.PollMin
@@ -230,6 +231,7 @@ func (d *Dispatcher) execute(j Job) {
 	if err != nil || !started {
 		if err != nil {
 			log.Printf("dispatcher: start %s: %v", j.ID, err)
+			Metrics.queueError("start")
 			if d.base.Err() == nil { // after a hard stop nothing is written: lease expiry re-queues the claim
 				rctx, rcancel := context.WithTimeout(d.base, 15*time.Second)
 				_ = d.Queue.Release(rctx, j) // if this fails too, lease expiry re-queues it
@@ -365,6 +367,7 @@ func (d *Dispatcher) finish(j Job, out JobResult) (written bool) {
 			}
 			return true
 		}
+		Metrics.queueError("finish")
 		if attempt == 1 {
 			log.Printf("dispatcher: finish %s: %v (retrying for up to %s)", j.ID, err, d.FinishRetry)
 		}
@@ -406,6 +409,9 @@ func (d *Dispatcher) maintain() {
 				if d.bgCtx.Err() == nil && d.hbDownSince.IsZero() { // during a known outage the heartbeat already reported
 					log.Printf("dispatcher: recover: %v", err)
 				}
+				if d.bgCtx.Err() == nil {
+					Metrics.queueError("recover")
+				}
 			} else if st.Requeued+st.Failed > 0 {
 				log.Printf("dispatcher: recovered requeued=%d failed=%d", st.Requeued, st.Failed)
 			}
@@ -440,6 +446,7 @@ func (d *Dispatcher) heartbeat() {
 	}
 	switch {
 	case err != nil && d.bgCtx.Err() == nil:
+		Metrics.queueError("heartbeat")
 		if d.hbDownSince.IsZero() {
 			d.hbDownSince = time.Now()
 			log.Printf("dispatcher: heartbeat: %v (queue unreachable; further failures not logged)", err)

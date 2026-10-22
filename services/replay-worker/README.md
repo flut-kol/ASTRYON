@@ -56,3 +56,7 @@ migration 0001) then `UPDATE replay_requests ... WHERE tenant_id AND source_id A
 
 ## End-to-end test
 `TestE2EControllerJobToCompleted` feeds the controller's golden job (`../replay-controller/internal/replay/testdata/job.v1.json`) through `Worker.Step` with fakes: events copied v1 -> v2, request RUNNING -> COMPLETED, offset committed. Activation is covered controller-side.
+
+## Metrics
+
+`REPLAYW_METRICS_ADDR` (unset = off) serves `GET /metrics` (Prometheus text). A bare `:9108` binds 127.0.0.1 only; set an explicit host to expose it. Series `astryon_replay_worker_*`: replays_requested/approved/started/completed_total, replays_failed_total{code}, events_replayed_total, active_replays (gauge), replay_duration_seconds (histogram), publish_errors_total. No tenant/source/job labels.

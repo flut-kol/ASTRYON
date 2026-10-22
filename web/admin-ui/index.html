@@ -4,24 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ASTRYON Admin</title>
-<style>
-:root{--bg:#f6f7f9;--fg:#1b1f24;--mut:#667;--card:#fff;--bd:#d8dce2;--ac:#2557d6;--bad:#b3261e;--ok:#1b7f3b;--warn:#9a6700}
-@media (prefers-color-scheme:dark){:root{--bg:#14171a;--fg:#e6e8eb;--mut:#9aa;--card:#1d2125;--bd:#333a42;--ac:#7aa2ff;--bad:#ff8b84;--ok:#6fd48b;--warn:#e3b341}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
-header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 16px;background:var(--card);border-bottom:1px solid var(--bd)}
-nav a{margin-right:12px;color:var(--mut);text-decoration:none}nav a.on{color:var(--ac);font-weight:600}
-main{padding:16px;max-width:1200px;margin:0 auto}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:12px;margin-bottom:12px}
-table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--bd);vertical-align:top}
-input,select,button{font:inherit;padding:4px 8px;border:1px solid var(--bd);border-radius:4px;background:var(--card);color:var(--fg)}
-button{cursor:pointer}button.pri{background:var(--ac);color:#fff;border-color:var(--ac)}
-.row{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin-bottom:8px}.row label{display:flex;flex-direction:column;font-size:12px;color:var(--mut)}
-.err{color:var(--bad)}.ok{color:var(--ok)}.warn{color:var(--warn)}.mut{color:var(--mut)}
-.drop{border:2px dashed var(--bd);padding:24px;text-align:center;border-radius:6px}.drop.over{border-color:var(--ac)}
-.kpis{display:flex;flex-wrap:wrap;gap:12px}.kpi{min-width:140px}.kpi b{display:block;font-size:22px}
-.na{padding:16px;border:1px dashed var(--bd);border-radius:6px;color:var(--mut)}
-code{font-family:ui-monospace,monospace}
-</style>
+<script>try{var t=localStorage.getItem('astryon_admin_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
 </head>
 <body>
 <div id="app"></div>

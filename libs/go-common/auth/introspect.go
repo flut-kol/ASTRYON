@@ -52,8 +52,15 @@ type Introspection struct {
 
 // Principal derives the typed principal from the introspection claims (active tokens only).
 func (i Introspection) Principal() Principal {
-	return Principal{TenantID: stringClaim(i.Claims, "tenant_id"), Subject: stringClaim(i.Claims, "sub"),
-		ClientID: stringClaim(i.Claims, "client_id"), JTI: stringClaim(i.Claims, "jti"), Scopes: scopes(i.Claims["scope"])}
+	return Principal{
+		TenantID: stringClaim(i.Claims, "tenant_id"),
+		Subject:  stringClaim(i.Claims, "sub"),
+		ClientID: stringClaim(i.Claims, "client_id"),
+		JTI:      stringClaim(i.Claims, "jti"),
+		Scopes:   scopes(i.Claims["scope"]),
+		ACR:      stringClaim(i.Claims, "acr"),
+		AMR:      stringListClaim(i.Claims, "amr"),
+	}
 }
 
 type introCacheEntry struct {

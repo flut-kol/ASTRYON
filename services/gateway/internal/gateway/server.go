@@ -7,36 +7,50 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
+	"github.com/astryon/audit"
 	ec "github.com/astryon/event-contracts"
 )
 
 const (
-	maxIdemKeyLen    = 128
-	maxRawQuarantine = 64 << 10
+	maxIdemKeyLen = 128
 	// ErrEnvelopeMalformed is a gateway-local diagnostic for undecodable items.
 	ErrEnvelopeMalformed ec.Code = "ERR_ENVELOPE_MALFORMED"
 )
 
 // Server is the HTTP gateway.
 type Server struct {
-	cfg  Config
-	auth Authenticator
-	pub  Publisher
-	now  func() time.Time
-	m    metrics
+	cfg   Config
+	auth  Authenticator
+	pub   Publisher
+	audit AuditSink
+	now   func() time.Time
+	m     metrics
 }
 
-func NewServer(cfg Config, a Authenticator, p Publisher) *Server {
-	return &Server{cfg: cfg, auth: a, pub: p, now: time.Now}
+// AuditSink is the non-blocking subset of audit.Writer used on request paths.
+type AuditSink interface {
+	Submit(audit.Event) error
+	Stats() audit.Stats
+}
+
+// NewServer accepts an optional audit sink; persistence stays opt-in.
+func NewServer(cfg Config, a Authenticator, p Publisher, sinks ...AuditSink) *Server {
+	s := &Server{cfg: cfg, auth: a, pub: p, now: time.Now}
+	if len(sinks) > 0 && sinks[0] != nil {
+		s.audit = sinks[0]
+		s.m.auditStats = sinks[0].Stats
+	}
+	return s
 }
 
 // Handler returns the routed handler with request-ID middleware.
@@ -79,11 +93,19 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 func (s *Server) prelude(w http.ResponseWriter, r *http.Request) (Principal, string, bool) {
 	p, err := s.auth.Authenticate(r)
 	if err != nil {
+		// Invalid credentials have no validated tenant. The audit schema requires
+		// one, so never invent a tenant merely to persist this attempt.
+		if r.Header.Get("Authorization") == "" {
+			s.m.auditDeniedUnrecordable.Add(1)
+		} else {
+			s.m.auditTokenInvalidUnrecordable.Add(1)
+		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		writeErr(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required", nil)
 		return p, "", false
 	}
 	if !ec.IsUUID(p.TenantID) || !p.HasScope(ScopeEventsWrite) {
+		s.recordDenied(r, p, "missing_scope")
 		writeErr(w, r, http.StatusForbidden, "FORBIDDEN", "missing required scope "+ScopeEventsWrite, nil)
 		return p, "", false
 	}
@@ -149,6 +171,7 @@ func (s *Server) handleSingle(w http.ResponseWriter, r *http.Request) {
 	}
 	it := parseItem(body)
 	if it.parseErr == nil && it.env.TenantID != "" && it.env.TenantID != p.TenantID {
+		s.recordDenied(r, p, "tenant_mismatch")
 		writeErr(w, r, http.StatusForbidden, "TENANT_MISMATCH", "tenant_id in body does not match authenticated tenant", nil)
 		return
 	}
@@ -192,6 +215,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	for i, raw := range req.Events {
 		items[i] = parseItem(raw)
 		if items[i].parseErr == nil && items[i].env.TenantID != "" && items[i].env.TenantID != p.TenantID {
+			s.recordDenied(r, p, "tenant_mismatch")
 			writeErr(w, r, http.StatusForbidden, "TENANT_MISMATCH", "tenant_id in body does not match authenticated tenant", map[string]int{"index": i})
 			return
 		}
@@ -216,13 +240,28 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) recordDenied(r *http.Request, p Principal, reason string) {
+	if s.audit == nil {
+		return
+	}
+	e := audit.NewEvent(audit.Claims{
+		TenantID: p.TenantID,
+		Subject:  p.Subject,
+		ClientID: p.ClientID,
+		ACR:      p.ACR,
+	}, audit.CategorySecurity, "auth.denied", audit.OutcomeDenied, audit.Resource{Type: "request"}).
+		WithTrace("", requestID(r.Context())).
+		WithDetails(map[string]string{"reason": reason, "method": r.Method, "route": r.URL.Path})
+	_ = s.audit.Submit(e) // best effort; writer stats expose rejection/drop
+}
+
 // process validates and publishes one event. "accepted" is returned only
 // after the publisher acked.
 func (s *Server) process(ctx context.Context, p Principal, it item, idem string, idx int) ItemResult {
 	res := ItemResult{Index: idx}
 	reqID := requestID(ctx)
 	if it.parseErr != nil {
-		return s.quarantine(ctx, p, it, idx, res, []ec.Code{ErrEnvelopeMalformed}, it.parseErr.Error())
+		return s.quarantine(ctx, p, it, idem, idx, res, []ec.Code{ErrEnvelopeMalformed}, it.parseErr.Error())
 	}
 	env := it.env
 	env.TenantID = p.TenantID // always from the principal
@@ -248,7 +287,7 @@ func (s *Server) process(ctx context.Context, p Principal, it item, idem string,
 		if errors.As(err, &ve) {
 			codes = ve.Codes()
 		}
-		return s.quarantine(ctx, p, it, idx, res, codes, err.Error())
+		return s.quarantine(ctx, p, it, idem, idx, res, codes, err.Error())
 	}
 	val, err := json.Marshal(env)
 	if err != nil {
@@ -263,31 +302,80 @@ func (s *Server) process(ctx context.Context, p Principal, it item, idem string,
 	return res
 }
 
-func (s *Server) quarantine(ctx context.Context, p Principal, it item, idx int, res ItemResult, codes []ec.Code, detail string) ItemResult {
+func (s *Server) quarantine(ctx context.Context, p Principal, it item, idem string, idx int, res ItemResult, codes []ec.Code, detail string) ItemResult {
 	strCodes := make([]string, len(codes))
 	for i, c := range codes {
 		strCodes[i] = string(c)
 	}
-	rec := map[string]any{
-		"tenant_id": p.TenantID, "request_id": requestID(ctx), "index": idx,
-		"received_at": s.now().UTC(), "codes": strCodes, "detail": detail,
-		"source_topic": ec.TopicRawEvents,
+	reason := string(ErrEnvelopeMalformed)
+	if len(strCodes) > 0 {
+		reason = strCodes[0]
 	}
-	raw := it.raw
-	if len(raw) > maxRawQuarantine {
-		raw = raw[:maxRawQuarantine]
-		rec["raw_truncated"] = true
+	// The gateway has no Kafka coordinate yet; the identity is stable across
+	// client retries when an Idempotency-Key is present, else per request.
+	stable := requestID(ctx)
+	if idem != "" {
+		stable = "idem:" + idem
 	}
-	rec["raw_b64"] = base64.StdEncoding.EncodeToString(raw)
-	val, _ := json.Marshal(rec)
-	key := ec.PartitionKey(p.TenantID, fmt.Sprintf("%s/%d", requestID(ctx), idx))
+	id, err := ec.QuarantineDeviationIDFromKey("gateway", fmt.Sprintf("%s|%s|%d", p.TenantID, stable, idx))
+	if err != nil {
+		res.Status, res.Code, res.Message = "failed", "INTERNAL", "quarantine encode failed"
+		return res
+	}
+	orig := ec.NewQuarantineOriginalV1(it.raw)
+	rec := ec.QuarantineRecordV1{
+		ContractVersion: ec.QuarantineContractVersionV1, DeviationID: id, TenantID: p.TenantID,
+		QuarantinedAt: s.now().UTC(), Stage: "gateway_validate", ReasonCode: reason,
+		Diagnostic: quarantineDiagnostic(strCodes, detail),
+		Provenance: ec.QuarantineProvenanceV1{SourceTopic: ec.TopicRawEvents},
+		Original:   &orig,
+	}
+	if it.parseErr == nil {
+		if ec.IsUUID(it.env.SourceID) {
+			rec.SourceID = it.env.SourceID
+		}
+		if ec.IsUUID(it.env.EventID) {
+			rec.EventID = it.env.EventID
+		}
+	}
+	if err := rec.ValidateAt(s.now()); err != nil {
+		res.Status, res.Code, res.Message = "failed", "INTERNAL", "quarantine encode failed"
+		return res
+	}
+	val, err := json.Marshal(rec)
+	if err != nil {
+		res.Status, res.Code, res.Message = "failed", "INTERNAL", "quarantine encode failed"
+		return res
+	}
 	res.Codes = strCodes
-	if err := s.pub.Publish(ctx, ec.TopicQuarantine, key, val); err != nil {
+	if err := s.pub.Publish(ctx, ec.TopicQuarantine, ec.PartitionKey(p.TenantID, id), val); err != nil {
 		res.Status, res.Code, res.Message = "failed", "PUBLISH_FAILED", "quarantine not durably recorded"
 		return res
 	}
 	res.Status, res.Code, res.Message = "quarantined", "ENVELOPE_INVALID", "validation failed"
 	return res
+}
+
+// quarantineDiagnostic joins the codes and detail into printable text bounded
+// by the contract limit.
+func quarantineDiagnostic(codes []string, detail string) string {
+	d := strings.Join(codes, ",")
+	if detail != "" {
+		d += ": " + detail
+	}
+	d = strings.Map(func(r rune) rune {
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return ' '
+		}
+		return r
+	}, d)
+	if len(d) > ec.MaxQuarantineDiagnosticBytes {
+		d = d[:ec.MaxQuarantineDiagnosticBytes]
+		for !utf8.ValidString(d) {
+			d = d[:len(d)-1]
+		}
+	}
+	return d
 }
 
 // deriveEventID makes event_id a pure function of (tenant, source, key, index)

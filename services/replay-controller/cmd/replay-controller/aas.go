@@ -19,7 +19,7 @@ func (a aasAuthenticator) Authenticate(r *http.Request) (replay.Principal, error
 	if err != nil {
 		return replay.Principal{}, replay.ErrUnauthenticated
 	}
-	return replay.Principal{TenantID: p.TenantID, Subject: p.Subject, Scopes: p.Scopes}, nil
+	return replay.Principal{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID, ACR: p.ACR, Scopes: p.Scopes}, nil
 }
 
 // denyAll is used when neither AAS nor the dev token is configured.

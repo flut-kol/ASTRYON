@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"unicode/utf8"
 )
 
 var (
 	ErrRecordTooLarge  = errors.New("record exceeds configured maximum")
 	ErrInvalidPosition = errors.New("invalid parser position")
+	ErrInvalidEncoding = errors.New("record is not valid UTF-8")
 )
 
 type Record struct {
@@ -64,6 +66,8 @@ func NDJSONFrom(r io.Reader, maxRecordBytes int, startOffset int64, startNumber 
 		}
 		if oversized {
 			record.Err = ErrRecordTooLarge
+		} else if !utf8.Valid(raw) {
+			record.Err = ErrInvalidEncoding
 		} else {
 			var value any
 			if jsonErr := json.Unmarshal(raw, &value); jsonErr != nil {

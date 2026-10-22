@@ -14,6 +14,8 @@ const ScopeReplayWrite = "astryon:replay:write"
 type Principal struct {
 	TenantID string
 	Subject  string // caller identity, audit only (never used for authorization)
+	ClientID string // validated client_id claim, audit only
+	ACR      string // validated acr claim, audit only
 	Scopes   []string
 }
 

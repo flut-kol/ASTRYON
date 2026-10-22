@@ -1,0 +1,25 @@
+# TEMPLATE: copy into the platform-owned Argo CD repo. repoURL/targetRevision are placeholders.
+# The values file (digest-pinned images, endpoints, egress peers, secret names) lives with the
+# platform and must never contain secret values.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: astryon-services-stage
+  namespace: argocd
+  finalizers: [resources-finalizer.argocd.argoproj.io]
+spec:
+  project: astryon
+  source:
+    repoURL: https://git.invalid/REPLACE_ORG/REPLACE_REPO.git
+    targetRevision: REPLACE_REVISION
+    path: infra/kubernetes/charts/astryon-services
+    helm:
+      releaseName: astryon
+      ignoreMissingValueFiles: true
+      valueFiles:
+        - values-stage.yaml   # REPLACE: platform-owned environment values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: astryon-stage
+  syncPolicy:
+    syncOptions: [PrunePropagationPolicy=foreground]

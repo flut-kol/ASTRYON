@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -15,7 +16,7 @@ import (
 
 const (
 	ScopeQuarantineRead        = "astryon:quarantine:read"
-	ScopeQuarantineReadPayload = "astryon:quarantine:read-payload"
+	ScopeQuarantineReadPayload = "astryon:quarantine-payload:read"
 	defaultPageSize            = 50
 	maxPageSize                = 100
 )
@@ -29,11 +30,33 @@ var tenantUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 type BrowserPrincipal struct {
 	TenantID string
 	Subject  string
+	ClientID string
+	ACR      string
 	Scopes   map[string]bool
 }
 
 type BrowserAuthenticator interface {
 	Authenticate(*http.Request) (BrowserPrincipal, error)
+}
+
+// AuditMirror is an optional best-effort secondary audit sink. The Kafka
+// ReplayAuditSink remains authoritative and is always called first on replay
+// publication paths. MirrorEvent contains claims and bounded identifiers only.
+type AuditMirror interface {
+	RecordMirror(context.Context, MirrorEvent) error
+}
+
+type MirrorEvent struct {
+	TenantID     string
+	Subject      string
+	ClientID     string
+	ACR          string
+	Action       string
+	Outcome      string
+	ResourceType string
+	ResourceID   string
+	TraceID      string
+	RequestID    string
 }
 
 // QuarantineRecord contains only browser-safe metadata by default. Original
@@ -75,6 +98,7 @@ type BrowserHandler struct {
 	ReplayPlanner ReplayDryRunPlanner
 	ReplayJobs    ReplayJobPublisher
 	Audit         ReplayAuditSink
+	AuditMirror   AuditMirror
 	Now           func() time.Time
 }
 
@@ -85,7 +109,11 @@ func (h BrowserHandler) Routes() http.Handler {
 		w.Header().Set("X-Request-ID", traceID)
 		writeBrowserJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /v1/quarantine", h.list)
+	mux.HandleFunc("GET /v1/quarantine", func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.list(rec, r)
+		Metrics.incBrowse(statusOutcome(rec.status))
+	})
 	mux.HandleFunc("POST /v1/quarantine/replays/dry-run", h.replayDryRun)
 	mux.HandleFunc("POST /v1/quarantine/replays", h.replayPublish)
 	return mux
@@ -128,6 +156,7 @@ func (h BrowserHandler) list(w http.ResponseWriter, r *http.Request) {
 			writeBrowserError(w, http.StatusBadRequest, "INVALID_CURSOR", "cursor is malformed", traceID)
 			return
 		}
+		log.Printf("quarantine list failed (trace %s): %v", traceID, err) // cause stays server-side
 		writeBrowserError(w, http.StatusServiceUnavailable, "QUARANTINE_UNAVAILABLE", "quarantine records unavailable", traceID)
 		return
 	}

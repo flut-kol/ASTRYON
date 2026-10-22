@@ -1,4 +1,4 @@
-import { call, ApiError, type Ctx } from './http';
+import { call, ApiError, parseError, type Ctx } from './http';
 
 export const SOURCE_TYPES = ['unknown', 'telemetry', 'geo', 'report', 'export', 'config', 'log', 'credentials_bundle', 'personal_data', 'financial', 'media_meta', 'reference'] as const;
 export const SENSITIVITIES = ['public', 'internal', 'restricted'] as const;
@@ -6,8 +6,22 @@ export const STATUSES = ['NEW', 'QUEUED', 'RUNNING', 'RETRYING', 'SUCCEEDED', 'F
 export const PART_SIZE = 8 * 1024 * 1024; // S3 minimum for non-last parts is 5 MiB
 export const MAX_BROWSER_BYTES = 256 * 1024 * 1024; // whole file is hashed in memory; larger files need a CLI/uploader
 
+export function isMetadataDocument(file: Pick<File, 'name' | 'type'>): boolean {
+  const type = file.type.toLowerCase().split(';', 1)[0];
+  return ['application/pdf', 'image/jpeg', 'image/png'].includes(type) || /\.(pdf|jpe?g|png)$/i.test(file.name);
+}
+
+export function isArchive(file: Pick<File, 'name' | 'type'>): boolean {
+  const type = file.type.toLowerCase().split(';', 1)[0];
+  return ['application/zip', 'application/x-tar', 'application/tar', 'application/gzip', 'application/x-gzip'].includes(type) || /\.(zip|tar|tgz|gz)$/i.test(file.name);
+}
+
+export function sourceTypeForFile(file: Pick<File, 'name' | 'type'>, selected: string): string {
+  return (selected === '' || selected === 'unknown') && isMetadataDocument(file) ? 'media_meta' : selected;
+}
+
 export interface Labels { [name: string]: { count: number; fields: string[] } }
-export interface JobInfo { id: string; status: string; error?: string; labels: Labels }
+export interface JobInfo { id: string; status: string; error?: string; labels: Labels; metadata?: { format?: string; tags?: string[]; coordinates?: { latitude: number; longitude: number }[] } }
 export interface UploadItem {
   file_object_id: string; source_id: string; source_type: string; committed: boolean; size_bytes: number;
   sensitivity: string; tags: Record<string, string>; created_at: string; job?: JobInfo;
@@ -15,6 +29,7 @@ export interface UploadItem {
 }
 export interface UploadPage { items: UploadItem[]; next_cursor?: string }
 export interface UploadSession { file_object_id: string; upload_id: string; part_urls: string[]; expires_at: string }
+export interface LocationPoint { file_object_id: string; latitude: number; longitude: number }
 
 export function parseTags(s: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -44,6 +59,24 @@ export function labelSummary(l: Labels | undefined): string {
 export interface ListFilter { source_type?: string; sensitivity?: string; tag?: string; status?: string; label?: string; cursor?: string; limit?: string }
 export const listUploads = (c: Ctx, base: string, f: ListFilter) => call<UploadPage>(c, base, '/v1/files/uploads', { query: { ...f } });
 export const getUpload = (c: Ctx, base: string, id: string) => call<UploadItem>(c, base, `/v1/files/uploads/${encodeURIComponent(id)}`);
+export const listLocations = (c: Ctx, base: string) => call<{ items: LocationPoint[]; next_cursor?: string }>(c, base, '/v1/files/locations');
+
+export type UploadPreview = { mode: 'content' | 'metadata-only'; content_type?: string; content?: string; reason?: string; [key: string]: unknown };
+/** Fetches the bounded, policy-filtered preview. The endpoint may return text for safe files or JSON metadata. */
+export async function previewUpload(c: Ctx, base: string, id: string): Promise<UploadPreview> {
+  const f = c.fetchFn ?? ((...a: Parameters<typeof fetch>) => fetch(...a));
+  const headers: Record<string, string> = { Accept: 'text/plain, application/json' };
+  const tok = c.bff ? null : c.getToken();
+  if (tok) headers.Authorization = `Bearer ${tok}`;
+  let res: Response;
+  try { res = await f(`${base.replace(/\/$/, '')}/v1/files/uploads/${encodeURIComponent(id)}/preview`, { headers, credentials: 'same-origin' }); }
+  catch (e) { throw new ApiError(0, 'network_error', e instanceof Error ? e.message : 'network error'); }
+  const reqId = res.headers.get('X-Request-ID') ?? undefined;
+  if (!res.ok) { let body: unknown; try { body = await res.json(); } catch { /* non-JSON */ } throw parseError(res.status, body, res.statusText || 'request failed', reqId); }
+  const ct = res.headers.get('Content-Type') ?? '';
+  if (ct.includes('json')) return { ...(await res.json() as Record<string, unknown>), mode: 'metadata-only' };
+  return { mode: 'content', content_type: ct, content: await res.text() };
+}
 
 export interface UploadParams { file: File; source_id: string; source_type: string; sensitivity?: string; tags: Record<string, string> }
 export async function uploadFile(c: Ctx, base: string, p: UploadParams, opts: { s3Proxy?: string; onProgress?: (msg: string) => void } = {}): Promise<{ file_object_id: string; job_id: string }> {
@@ -76,4 +109,12 @@ export async function uploadFile(c: Ctx, base: string, p: UploadParams, opts: { 
   const done = await call<{ file_object_id: string; job_id: string }>(c, base, `/v1/files/uploads/${sess.file_object_id}/complete`, { method: 'POST', body: { upload_id: sess.upload_id, parts: etags } });
   return done;
 }
-function guessType(n: string) { return /\.csv$/i.test(n) ? 'text/csv' : 'application/x-ndjson'; }
+function guessType(n: string) {
+  if (/\.pdf$/i.test(n)) return 'application/pdf';
+  if (/\.jpe?g$/i.test(n)) return 'image/jpeg';
+  if (/\.png$/i.test(n)) return 'image/png';
+  if (/\.zip$/i.test(n)) return 'application/zip';
+  if (/\.tar$/i.test(n)) return 'application/x-tar';
+  if (/\.(tgz|gz)$/i.test(n)) return 'application/gzip';
+  return /\.csv$/i.test(n) ? 'text/csv' : 'application/x-ndjson';
+}

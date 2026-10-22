@@ -59,7 +59,7 @@ var allScopes = []string{ScopeExportWrite, ScopeExportRead}
 
 func testAuth() Authenticator {
 	return multiAuth{
-		"a":      {TenantID: tenantA, Subject: "ua", Scopes: allScopes},
+		"a":      {TenantID: tenantA, Subject: "ua", ClientID: "portal", ACR: "mfa", Scopes: allScopes},
 		"b":      {TenantID: tenantB, Subject: "ub", Scopes: allScopes},
 		"wonly":  {TenantID: tenantA, Scopes: []string{ScopeExportWrite}},
 		"ronly":  {TenantID: tenantA, Scopes: []string{ScopeExportRead}},

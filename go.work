@@ -1,6 +1,8 @@
 go 1.27.0
 
 use (
+	./infra/docker/defender
+	./libs/audit
 	./libs/event-contracts
 	./libs/go-common
 	./libs/sdk-connector-manager

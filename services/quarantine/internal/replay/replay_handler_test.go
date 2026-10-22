@@ -33,6 +33,13 @@ type replayAudit struct {
 	err    error
 }
 
+type replayMirror struct{ events []MirrorEvent }
+
+func (m *replayMirror) RecordMirror(_ context.Context, event MirrorEvent) error {
+	m.events = append(m.events, event)
+	return nil
+}
+
 func (a *replayAudit) RecordReplayAudit(_ context.Context, event ReplayAuditEvent) error {
 	if a.err != nil {
 		return a.err
@@ -209,6 +216,24 @@ func TestReplayPublishRequiresAuthenticationAndSeparateScope(t *testing.T) {
 	}
 	if planner.calls != 0 || len(publisher.jobs) != 0 || len(audit.events) != 0 {
 		t.Fatal("unauthorized request reached replay dependencies")
+	}
+}
+
+func TestReplayPublishMirrorsOnlyValidatedDeniedAndOutcomes(t *testing.T) {
+	planner := &replayPlanner{plan: ReplayDryRunPlan{CandidateCount: 2}}
+	publisher, audit, mirror := &replayPublisher{}, &replayAudit{}, &replayMirror{}
+	auth := browserAuth{TenantID: tenantA, Subject: "operator", ClientID: "portal", ACR: "mfa", Scopes: map[string]bool{}}
+	h := BrowserHandler{Auth: auth, ReplayPlanner: planner, ReplayJobs: publisher, Audit: audit, AuditMirror: mirror, Now: func() time.Time { return time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC) }}.Routes()
+	h.ServeHTTP(httptest.NewRecorder(), publishRequest(validReplayJSON))
+	if len(mirror.events) != 1 || mirror.events[0].Action != "auth.denied" || mirror.events[0].TenantID != tenantA || mirror.events[0].ClientID != "portal" || mirror.events[0].ACR != "mfa" {
+		t.Fatalf("mirror denied=%+v", mirror.events)
+	}
+
+	auth.Scopes[ReplayPublishScope] = true
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, publishRequest(validReplayJSON))
+	if w.Code != http.StatusAccepted || len(mirror.events) != 2 || mirror.events[1].Outcome != "success" {
+		t.Fatalf("status=%d mirror=%+v", w.Code, mirror.events)
 	}
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, call, parseError } from './http';
 import { parseProm } from './prom';
-import { labelSummary, parseTags, planParts, rewritePartUrl, sha256Hex, uploadFile } from './upload';
+import { labelSummary, parseTags, planParts, rewritePartUrl, sha256Hex, sourceTypeForFile, uploadFile } from './upload';
 import { localToRfc3339, queryEvents } from './query';
 import { takeTokenFromHash } from './auth';
 
@@ -45,6 +45,8 @@ describe('helpers', () => {
     expect(await sha256Hex(new TextEncoder().encode('abc').buffer as ArrayBuffer)).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
     expect(localToRfc3339('')).toBeUndefined();
     expect(takeTokenFromHash('#token=a%2Bb')).toBe('a+b');
+    expect(sourceTypeForFile(new File(['x'], 'photo.jpg', { type: 'image/jpeg' }), 'unknown')).toBe('media_meta');
+    expect(sourceTypeForFile(new File(['x'], 'photo.jpg', { type: 'image/jpeg' }), 'geo')).toBe('geo');
   });
 });
 
@@ -111,5 +113,40 @@ describe('bff mode', () => {
     expect(g.headers['X-Requested-With']).toBeUndefined();
     expect(p.headers['X-Requested-With']).toBe('astryon-admin');
     expect(p.credentials).toBe('same-origin');
+  });
+});
+
+describe('connector create', () => {
+  it('validates, parses config and posts only whitelisted fields (no tenant)', async () => {
+    const { createConnector, parseConfig, validateConnector } = await import('./connectors');
+    const ok = { source_id: '00000000-0000-0000-0000-0000000000b1', name: 'orders', kind: 'REST_PULL', secret_ref: 'env://ORDERS_TOKEN' };
+    expect(validateConnector(ok)).toBeUndefined();
+    expect(validateConnector({ ...ok, source_id: 'x' })).toMatch(/UUID/);
+    expect(validateConnector({ ...ok, name: ' ' })).toMatch(/name/);
+    expect(validateConnector({ ...ok, kind: 'FTP' })).toMatch(/kind/);
+    expect(validateConnector({ ...ok, secret_ref: 'hunter2' })).toMatch(/secret ref/);
+    expect(parseConfig('')).toEqual({});
+    expect(() => parseConfig('[]')).toThrow(/object/);
+    const f = vi.fn().mockResolvedValue(json({ id: 'c', name: 'orders' }, 201));
+    await createConnector({ getToken: () => 't', fetchFn: f }, '/c', { ...ok, config: { url: 'https://x' } });
+    expect(f.mock.calls[0][0]).toBe('/c/v1/connectors');
+    expect(JSON.parse(f.mock.calls[0][1].body)).toEqual({ ...ok, config: { url: 'https://x' } });
+  });
+});
+
+describe('replay publish guard', () => {
+  it('offers publishing only for exact, non-empty plans within the limit, and posts the counted request', async () => {
+    const { canPublish, publishReplay } = await import('./quarantine');
+    const plan = { dry_run: true, candidate_count: 17, candidate_count_is_lower_bound: false, executable: true };
+    expect(canPublish(plan)).toBe(true);
+    expect(canPublish({ ...plan, candidate_count_is_lower_bound: true })).toBe(false);
+    expect(canPublish({ ...plan, candidate_count: 0 })).toBe(false);
+    expect(canPublish({ ...plan, candidate_count: 10001 })).toBe(false);
+    expect(canPublish({ ...plan, executable: false })).toBe(false);
+    const f = vi.fn().mockResolvedValue(json({ job_id: 'j', status: 'queued', candidate_count: 17 }, 202));
+    const req = { source_id: 's', occurred_from: 'a', occurred_to: 'b', pipeline_version: 2 };
+    await publishReplay({ getToken: () => 't', fetchFn: f }, '/q', req);
+    expect(f.mock.calls[0][0]).toBe('/q/v1/quarantine/replays');
+    expect(JSON.parse(f.mock.calls[0][1].body)).toEqual(req);
   });
 });

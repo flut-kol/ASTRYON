@@ -1,4 +1,4 @@
-openapi: 3.1.0
+openapi: 3.0.3
 info:
   title: ASTRYON File Upload API
   version: 1.0.0
@@ -93,7 +93,8 @@ paths:
         Requires scope `astryon:uploads:write`. `job.labels` come from the content classifier: per-label match counts and
         column/field names only, never matched values. `job.status` is `QUARANTINED` when a content policy held the file back
         (nothing reached the sink; sensitivity was raised to `restricted`); `job.error` then carries the catalog code.
-        `profile` is declared handling metadata of the source type; retention, read scope and export are not enforced yet.
+        `profile` exposes handling metadata of the source type; profiles with a distinct `required_read_scope` enforce it on reads.
+        Retention and export policy remain declarative until their storage/export integrations are enabled.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -127,8 +128,112 @@ paths:
         '422':
           description: |
             `CHECKSUM_MISMATCH` (content differs from the declared SHA-256/size; the object was deleted, create a new upload) or
-            `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry).
+            `UPLOAD_INCOMPLETE` (missing parts or wrong ETags; re-upload the parts and retry), or
+            `ARCHIVE_REJECTED` (when archive inspection is enabled and the bounded safety inspection fails). In
+            `FILE_ARCHIVE_MODE=inspect`, allow-listed ZIP/TAR/GZIP uploads are inspected as metadata only and return
+            `mode: archive_inspect` without creating a processing job. The file-api command defaults to `inspect`;
+            set `FILE_ARCHIVE_MODE=disabled` to reject archive MIME types.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/preview:
+    get:
+      operationId: previewUpload
+      summary: Preview safe text content or receive redacted metadata
+      description: |
+        Requires `astryon:data:read` (or `astryon:uploads:write`) and is tenant-scoped. Only committed `text/csv`
+        and `application/x-ndjson` objects can be returned inline, capped at 64 KiB and 200 lines. The response is
+        metadata-only for uncommitted, quarantined, credentials-labelled, or PII-labelled objects; matched values are
+        never returned. Archives and Parquet are not extracted or previewed. `X-Preview-Truncated: true` indicates a
+        safe content response was capped.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Inline safe content or metadata-only JSON
+          headers:
+            X-Preview-Mode: { schema: { type: string, enum: [content, metadata-only] } }
+            X-Preview-Truncated: { schema: { type: boolean } }
+          content:
+            text/plain:
+              schema: { type: string, description: Bounded CSV/NDJSON content; values are returned only when the object is safe. }
+            application/json:
+              schema: { $ref: '#/components/schemas/PreviewMetadata' }
+        '415':
+          description: Unsupported preview format, including archives and Parquet.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/uploads/{id}/retry:
+    post:
+      operationId: retryUpload
+      summary: Retry a committed file processing job
+      description: |
+        Requires `astryon:uploads:write` and is tenant-scoped. Re-enqueues a committed non-archive file using the
+        idempotent file object key. When archive inspection is enabled, ZIP/TAR/GZIP files are inspected again as
+        metadata only and are never sent to the text worker.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '202': { description: Processing job queued, content: { application/json: { schema: { $ref: '#/components/schemas/Completed' } } } }
+        '200': { description: Archive inspected without creating a job, content: { application/json: { schema: { $ref: '#/components/schemas/Completed' } } } }
+        '422': { description: Archive failed bounded inspection, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/files/locations:
+    get:
+      operationId: listFileLocations
+      summary: List validated GPS coordinates extracted from tenant files
+      description: |
+        Requires `astryon:uploads:write` and is tenant-scoped. The endpoint accepts no query or body parameters.
+        It returns only validated latitude/longitude pairs from `media_meta` files. The cursor is reserved for
+        future pagination and is empty when all current coordinates are returned.
+      responses:
+        '200':
+          description: File locations
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileLocations' }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/jobs:
+    get:
+      operationId: listJobs
+      summary: List the tenant's processing jobs (newest first, keyset pagination)
+      description: |
+        Read-only. Requires scope `astryon:jobs:read` (not `uploads:write`). The tenant comes only from the token (plus
+        row-level security); another tenant's job is never listed. Order is `created_at DESC, id DESC`; pass `next_cursor`
+        back as `cursor` (opaque). `next_cursor` is an empty string on the last page. Unknown or repeated query
+        parameters and bad values return 400 `BODY_INVALID`. Job rows hold run-level state and aggregate counters only
+        (no per-event status); `labels` are per-label match counts, never matched values or field names.
+      security: [ { bearer: [] } ]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/JobStatus' } }
+        - { name: source_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: One page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/Job' } }
+                  next_cursor: { type: string, description: Empty string on the last page. }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/jobs/{id}:
+    get:
+      operationId: getJob
+      summary: Get one job
+      description: Requires scope `astryon:jobs:read`. Another tenant's job id and unknown ids are both 404 `NOT_FOUND`.
+      security: [ { bearer: [] } ]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
         default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
@@ -140,7 +245,7 @@ components:
     Error:
       description: |
         400 BODY_INVALID (malformed JSON, unknown field, bad uuid/sha256/size/parts/content type or extension for the source type, bad tags/sensitivity, missing required tag); 401 UNAUTHENTICATED;
-        403 FORBIDDEN; 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
+        403 FORBIDDEN (missing `astryon:uploads:write`, or `astryon:jobs:read` on /v1/jobs); 413 FILE_TOO_LARGE; 429 TOO_MANY_UPLOADS / UPLOAD_QUOTA; 404 NOT_FOUND (also another tenant's id); 502 STORAGE_UNAVAILABLE; 503 UNAVAILABLE.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -148,7 +253,7 @@ components:
     CreateUpload:
       type: object
       required: [source_id, filename, content_type, sha256, size_bytes, parts]
-      unevaluatedProperties: false
+      additionalProperties: false
       properties:
         source_id: { type: string, format: uuid }
         filename: { type: string, description: A plain file name; path separators and `..` are rejected. }
@@ -162,11 +267,18 @@ components:
             Processing profile. Unknown or omitted values use `unknown` (all detectors, credentials policy from the deployment default).
             The profile fixes allowed content types and extensions, classifier detectors, credentials/geo/PII policies
             (allow|tag|quarantine|block), sensitivity default and floor, required tags, size/row/column/line limits.
+            `media_meta` accepts PDF, JPEG, and PNG objects and runs bounded metadata-only extraction (no record sink).
           enum: [unknown, telemetry, geo, report, export, config, log, credentials_bundle, personal_data, financial, media_meta, reference]
         tags:
           type: object
           maxProperties: 16
-          description: Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles require tags (e.g. `purpose`).
+          description: |
+            Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles
+            require tags (e.g. `purpose`). Archive password candidates are never enabled by a generic upload option:
+            both `archive_passwords=enabled|true|1` and a non-empty `archive_password_campaign` are required. The
+            latter selects an administrator-managed, tenant-scoped candidate set; it is not a generated dictionary or
+            unrestricted brute force. Missing/invalid tags mean zero password attempts. Candidate values are never
+            persisted, returned, or written to logs/audit.
           additionalProperties: { type: string, maxLength: 64 }
         sensitivity:
           type: string
@@ -183,7 +295,6 @@ components:
     Labels:
       type: object
       description: Content labels. Counts and field names only; matched values are never stored or returned.
-      propertyNames: { enum: [contains_geo, contains_credentials, contains_pii] }
       additionalProperties:
         type: object
         required: [count, fields]
@@ -234,12 +345,13 @@ components:
           properties:
             id: { type: string, format: uuid }
             status: { type: string, enum: [QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED, QUARANTINED] }
-            error: { type: string, description: 'Catalog code, e.g. CREDENTIALS_DETECTED, PII_DETECTED, GEO_COORDINATES_REQUIRED, SCHEMA_VIOLATION, ROW_LIMIT_EXCEEDED.' }
+            error: { type: string, description: 'Catalog or processing code, e.g. CREDENTIALS_DETECTED, PII_DETECTED, GEO_COORDINATES_REQUIRED, SCHEMA_VIOLATION, ROW_LIMIT_EXCEEDED, ERR_INVALID_ENCODING.' }
             labels: { $ref: '#/components/schemas/Labels' }
+            metadata: { $ref: '#/components/schemas/DocumentMetadata' }
     CompleteUpload:
       type: object
       required: [upload_id, parts]
-      unevaluatedProperties: false
+      additionalProperties: false
       properties:
         upload_id: { type: string, maxLength: 512 }
         parts:
@@ -249,7 +361,7 @@ components:
           items:
             type: object
             required: [number, etag]
-            unevaluatedProperties: false
+            additionalProperties: false
             properties:
               number: { type: integer, minimum: 1 }
               etag: { type: string, maxLength: 256 }
@@ -258,8 +370,70 @@ components:
       required: [file_object_id, status, job_id]
       properties:
         file_object_id: { type: string, format: uuid }
-        status: { const: committed }
+        status: { type: string, enum: [committed] }
         job_id: { type: string, format: uuid }
+    PreviewMetadata:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [metadata-only] }
+        reason: { type: string, description: 'Reason such as uncommitted, quarantined, sensitive labels, or unsupported format.' }
+        file_object_id: { type: string, format: uuid }
+        content_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
+    DocumentMetadata:
+      type: object
+      description: Bounded safe metadata extracted from documents; values are never written to content labels.
+      properties:
+        format: { type: string, enum: [pdf, png, jpeg, json, ndjson] }
+        coordinates:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            required: [latitude, longitude]
+            properties:
+              latitude: { type: number, minimum: -90, maximum: 90 }
+              longitude: { type: number, minimum: -180, maximum: 180 }
+        tags: { type: array, maxItems: 64, items: { type: string, maxLength: 64 } }
+        truncated: { type: boolean }
+    FileLocations:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [file_object_id, latitude, longitude]
+            properties:
+              file_object_id: { type: string, format: uuid }
+              latitude: { type: number, minimum: -90, maximum: 90 }
+              longitude: { type: number, minimum: -180, maximum: 180 }
+        next_cursor: { type: string }
+    JobStatus: { type: string, enum: [NEW, QUEUED, RUNNING, RETRYING, SUCCEEDED, FAILED, CANCELLED, QUARANTINED] }
+    Job:
+      type: object
+      required: [id, kind, status, source_id, file_object_id, attempt_count, max_attempts, events_processed, events_failed, labels, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, description: 'e.g. process_file', example: process_file }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        source_id: { type: string, format: uuid, nullable: true }
+        file_object_id: { type: string, format: uuid, nullable: true }
+        attempt_count: { type: integer }
+        max_attempts: { type: integer }
+        events_processed: { type: integer, format: int64, description: Aggregate counter. }
+        events_failed: { type: integer, format: int64, description: Aggregate counter. }
+        error: { type: string, description: 'Catalog/error code of the last failure (e.g. CREDENTIALS_DETECTED or ERR_INVALID_ENCODING); omitted when none or not a plain code.' }
+        labels:
+          type: object
+          description: Content label -> match count (counts only).
+          additionalProperties: { type: integer, format: int64 }
+          example: { contains_pii: 3 }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
     Error:
       type: object
       required: [code, message]

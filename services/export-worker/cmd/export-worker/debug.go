@@ -91,3 +91,34 @@ func startDebug(addr string) {
 		}
 	}()
 }
+
+// metricsHandler serves the Prometheus text exposition at /metrics.
+func metricsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		export.Metrics.WritePrometheus(w)
+	})
+	return mux
+}
+
+// startMetrics starts the loopback-only /metrics listener when EXPORT_METRICS_ADDR is set (off by default).
+func startMetrics(addr string) {
+	if addr == "" {
+		return
+	}
+	if err := loopbackAddr(addr); err != nil {
+		log.Fatalf("EXPORT_METRICS_ADDR: %v", err)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("EXPORT_METRICS_ADDR: %v", err)
+	}
+	go func() {
+		srv := &http.Server{Handler: metricsHandler(), ReadHeaderTimeout: 5 * time.Second}
+		log.Printf("metrics listener on %s", ln.Addr())
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
+}

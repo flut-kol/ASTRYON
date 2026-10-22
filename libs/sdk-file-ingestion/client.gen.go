@@ -22,6 +22,11 @@ const (
 	BearerScopes = "bearer.Scopes"
 )
 
+// Defines values for CompletedStatus.
+const (
+	Committed CompletedStatus = "committed"
+)
+
 // Defines values for CreateUploadSensitivity.
 const (
 	CreateUploadSensitivityInternal   CreateUploadSensitivity = "internal"
@@ -43,6 +48,32 @@ const (
 	Report            CreateUploadSourceType = "report"
 	Telemetry         CreateUploadSourceType = "telemetry"
 	Unknown           CreateUploadSourceType = "unknown"
+)
+
+// Defines values for DocumentMetadataFormat.
+const (
+	Jpeg   DocumentMetadataFormat = "jpeg"
+	Json   DocumentMetadataFormat = "json"
+	Ndjson DocumentMetadataFormat = "ndjson"
+	Pdf    DocumentMetadataFormat = "pdf"
+	Png    DocumentMetadataFormat = "png"
+)
+
+// Defines values for JobStatus.
+const (
+	JobStatusCANCELLED   JobStatus = "CANCELLED"
+	JobStatusFAILED      JobStatus = "FAILED"
+	JobStatusNEW         JobStatus = "NEW"
+	JobStatusQUARANTINED JobStatus = "QUARANTINED"
+	JobStatusQUEUED      JobStatus = "QUEUED"
+	JobStatusRETRYING    JobStatus = "RETRYING"
+	JobStatusRUNNING     JobStatus = "RUNNING"
+	JobStatusSUCCEEDED   JobStatus = "SUCCEEDED"
+)
+
+// Defines values for PreviewMetadataMode.
+const (
+	MetadataOnly PreviewMetadataMode = "metadata-only"
 )
 
 // Defines values for UploadInfoJobStatus.
@@ -79,14 +110,14 @@ const (
 
 // Defines values for ListUploadsParamsStatus.
 const (
-	ListUploadsParamsStatusCANCELLED   ListUploadsParamsStatus = "CANCELLED"
-	ListUploadsParamsStatusFAILED      ListUploadsParamsStatus = "FAILED"
-	ListUploadsParamsStatusNEW         ListUploadsParamsStatus = "NEW"
-	ListUploadsParamsStatusQUARANTINED ListUploadsParamsStatus = "QUARANTINED"
-	ListUploadsParamsStatusQUEUED      ListUploadsParamsStatus = "QUEUED"
-	ListUploadsParamsStatusRETRYING    ListUploadsParamsStatus = "RETRYING"
-	ListUploadsParamsStatusRUNNING     ListUploadsParamsStatus = "RUNNING"
-	ListUploadsParamsStatusSUCCEEDED   ListUploadsParamsStatus = "SUCCEEDED"
+	CANCELLED   ListUploadsParamsStatus = "CANCELLED"
+	FAILED      ListUploadsParamsStatus = "FAILED"
+	NEW         ListUploadsParamsStatus = "NEW"
+	QUARANTINED ListUploadsParamsStatus = "QUARANTINED"
+	QUEUED      ListUploadsParamsStatus = "QUEUED"
+	RETRYING    ListUploadsParamsStatus = "RETRYING"
+	RUNNING     ListUploadsParamsStatus = "RUNNING"
+	SUCCEEDED   ListUploadsParamsStatus = "SUCCEEDED"
 )
 
 // Defines values for ListUploadsParamsLabel.
@@ -109,8 +140,11 @@ type CompleteUpload struct {
 type Completed struct {
 	FileObjectId openapi_types.UUID `json:"file_object_id"`
 	JobId        openapi_types.UUID `json:"job_id"`
-	Status       interface{}        `json:"status"`
+	Status       CompletedStatus    `json:"status"`
 }
+
+// CompletedStatus defines model for Completed.Status.
+type CompletedStatus string
 
 // CreateUpload defines model for CreateUpload.
 type CreateUpload struct {
@@ -134,9 +168,15 @@ type CreateUpload struct {
 	// SourceType Processing profile. Unknown or omitted values use `unknown` (all detectors, credentials policy from the deployment default).
 	// The profile fixes allowed content types and extensions, classifier detectors, credentials/geo/PII policies
 	// (allow|tag|quarantine|block), sensitivity default and floor, required tags, size/row/column/line limits.
+	// `media_meta` accepts PDF, JPEG, and PNG objects and runs bounded metadata-only extraction (no record sink).
 	SourceType *CreateUploadSourceType `json:"source_type,omitempty"`
 
-	// Tags Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles require tags (e.g. `purpose`).
+	// Tags Keys `^[a-z][a-z0-9_.-]{0,31}$`; values up to 64 characters from `[A-Za-z0-9_.:/@+ -]`. Some profiles
+	// require tags (e.g. `purpose`). Archive password candidates are never enabled by a generic upload option:
+	// both `archive_passwords=enabled|true|1` and a non-empty `archive_password_campaign` are required. The
+	// latter selects an administrator-managed, tenant-scoped candidate set; it is not a generated dictionary or
+	// unrestricted brute force. Missing/invalid tags mean zero password attempts. Candidate values are never
+	// persisted, returned, or written to logs/audit.
 	Tags *map[string]string `json:"tags,omitempty"`
 }
 
@@ -146,7 +186,22 @@ type CreateUploadSensitivity string
 // CreateUploadSourceType Processing profile. Unknown or omitted values use `unknown` (all detectors, credentials policy from the deployment default).
 // The profile fixes allowed content types and extensions, classifier detectors, credentials/geo/PII policies
 // (allow|tag|quarantine|block), sensitivity default and floor, required tags, size/row/column/line limits.
+// `media_meta` accepts PDF, JPEG, and PNG objects and runs bounded metadata-only extraction (no record sink).
 type CreateUploadSourceType string
+
+// DocumentMetadata Bounded safe metadata extracted from documents; values are never written to content labels.
+type DocumentMetadata struct {
+	Coordinates *[]struct {
+		Latitude  float32 `json:"latitude"`
+		Longitude float32 `json:"longitude"`
+	} `json:"coordinates,omitempty"`
+	Format    *DocumentMetadataFormat `json:"format,omitempty"`
+	Tags      *[]string               `json:"tags,omitempty"`
+	Truncated *bool                   `json:"truncated,omitempty"`
+}
+
+// DocumentMetadataFormat defines model for DocumentMetadata.Format.
+type DocumentMetadataFormat string
 
 // Error defines model for Error.
 type Error struct {
@@ -154,11 +209,66 @@ type Error struct {
 	Message string `json:"message"`
 }
 
+// FileLocations defines model for FileLocations.
+type FileLocations struct {
+	Items []struct {
+		FileObjectId openapi_types.UUID `json:"file_object_id"`
+		Latitude     float32            `json:"latitude"`
+		Longitude    float32            `json:"longitude"`
+	} `json:"items"`
+	NextCursor string `json:"next_cursor"`
+}
+
+// Job defines model for Job.
+type Job struct {
+	AttemptCount int       `json:"attempt_count"`
+	CreatedAt    time.Time `json:"created_at"`
+
+	// Error Catalog/error code of the last failure (e.g. CREDENTIALS_DETECTED or ERR_INVALID_ENCODING); omitted when none or not a plain code.
+	Error *string `json:"error,omitempty"`
+
+	// EventsFailed Aggregate counter.
+	EventsFailed int64 `json:"events_failed"`
+
+	// EventsProcessed Aggregate counter.
+	EventsProcessed int64               `json:"events_processed"`
+	FileObjectId    *openapi_types.UUID `json:"file_object_id"`
+	FinishedAt      *time.Time          `json:"finished_at"`
+	Id              openapi_types.UUID  `json:"id"`
+
+	// Kind e.g. process_file
+	Kind string `json:"kind"`
+
+	// Labels Content label -> match count (counts only).
+	Labels      map[string]int64    `json:"labels"`
+	MaxAttempts int                 `json:"max_attempts"`
+	SourceId    *openapi_types.UUID `json:"source_id"`
+	StartedAt   *time.Time          `json:"started_at"`
+	Status      JobStatus           `json:"status"`
+}
+
+// JobStatus defines model for JobStatus.
+type JobStatus string
+
 // Labels Content labels. Counts and field names only; matched values are never stored or returned.
 type Labels map[string]struct {
 	Count  int      `json:"count"`
 	Fields []string `json:"fields"`
 }
+
+// PreviewMetadata defines model for PreviewMetadata.
+type PreviewMetadata struct {
+	ContentType  *string             `json:"content_type,omitempty"`
+	FileObjectId *openapi_types.UUID `json:"file_object_id,omitempty"`
+	Mode         PreviewMetadataMode `json:"mode"`
+
+	// Reason Reason such as uncommitted, quarantined, sensitive labels, or unsupported format.
+	Reason    *string `json:"reason,omitempty"`
+	SizeBytes *int64  `json:"size_bytes,omitempty"`
+}
+
+// PreviewMetadataMode defines model for PreviewMetadata.Mode.
+type PreviewMetadataMode string
 
 // UploadInfo defines model for UploadInfo.
 type UploadInfo struct {
@@ -167,13 +277,16 @@ type UploadInfo struct {
 
 	// Job Latest `process_file` job, absent until the upload is completed.
 	Job *struct {
-		// Error Catalog code, e.g. CREDENTIALS_DETECTED, PII_DETECTED, GEO_COORDINATES_REQUIRED, SCHEMA_VIOLATION, ROW_LIMIT_EXCEEDED.
+		// Error Catalog or processing code, e.g. CREDENTIALS_DETECTED, PII_DETECTED, GEO_COORDINATES_REQUIRED, SCHEMA_VIOLATION, ROW_LIMIT_EXCEEDED, ERR_INVALID_ENCODING.
 		Error *string            `json:"error,omitempty"`
 		Id    openapi_types.UUID `json:"id"`
 
 		// Labels Content labels. Counts and field names only; matched values are never stored or returned.
-		Labels Labels              `json:"labels"`
-		Status UploadInfoJobStatus `json:"status"`
+		Labels Labels `json:"labels"`
+
+		// Metadata Bounded safe metadata extracted from documents; values are never written to content labels.
+		Metadata *DocumentMetadata   `json:"metadata,omitempty"`
+		Status   UploadInfoJobStatus `json:"status"`
 	} `json:"job,omitempty"`
 	Profile struct {
 		ExportAllowed     *bool   `json:"export_allowed,omitempty"`
@@ -258,6 +371,14 @@ type ListUploadsParamsStatus string
 // ListUploadsParamsLabel defines parameters for ListUploads.
 type ListUploadsParamsLabel string
 
+// ListJobsParams defines parameters for ListJobs.
+type ListJobsParams struct {
+	Limit    *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor   *string             `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Status   *JobStatus          `form:"status,omitempty" json:"status,omitempty"`
+	SourceId *openapi_types.UUID `form:"source_id,omitempty" json:"source_id,omitempty"`
+}
+
 // CreateUploadJSONRequestBody defines body for CreateUpload for application/json ContentType.
 type CreateUploadJSONRequestBody = CreateUpload
 
@@ -337,6 +458,9 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+	// ListFileLocations request
+	ListFileLocations(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListUploads request
 	ListUploads(ctx context.Context, params *ListUploadsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -352,6 +476,30 @@ type ClientInterface interface {
 	CompleteUploadWithBody(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	CompleteUpload(ctx context.Context, id openapi_types.UUID, body CompleteUploadJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PreviewUpload request
+	PreviewUpload(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RetryUpload request
+	RetryUpload(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListJobs request
+	ListJobs(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetJob request
+	GetJob(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
+
+func (c *Client) ListFileLocations(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListFileLocationsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 func (c *Client) ListUploads(ctx context.Context, params *ListUploadsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -424,6 +572,81 @@ func (c *Client) CompleteUpload(ctx context.Context, id openapi_types.UUID, body
 		return nil, err
 	}
 	return c.Client.Do(req)
+}
+
+func (c *Client) PreviewUpload(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPreviewUploadRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetryUpload(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetryUploadRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListJobs(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListJobsRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetJob(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetJobRequest(c.Server, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// NewListFileLocationsRequest generates requests for ListFileLocations
+func NewListFileLocationsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/locations")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewListUploadsRequest generates requests for ListUploads
@@ -724,6 +947,205 @@ func NewCompleteUploadRequestWithBody(server string, id openapi_types.UUID, cont
 	return req, nil
 }
 
+// NewPreviewUploadRequest generates requests for PreviewUpload
+func NewPreviewUploadRequest(server string, id openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/uploads/%s/preview", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewRetryUploadRequest generates requests for RetryUpload
+func NewRetryUploadRequest(server string, id openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/files/uploads/%s/retry", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListJobsRequest generates requests for ListJobs
+func NewListJobsRequest(server string, params *ListJobsParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/jobs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.SourceId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "source_id", runtime.ParamLocationQuery, *params.SourceId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetJobRequest generates requests for GetJob
+func NewGetJobRequest(server string, id openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "id", runtime.ParamLocationPath, id)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/jobs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 func (c *Client) applyEditors(ctx context.Context, req *http.Request, additionalEditors []RequestEditorFn) error {
 	for _, r := range c.RequestEditors {
 		if err := r(ctx, req); err != nil {
@@ -767,6 +1189,9 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+	// ListFileLocationsWithResponse request
+	ListFileLocationsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListFileLocationsResponse, error)
+
 	// ListUploadsWithResponse request
 	ListUploadsWithResponse(ctx context.Context, params *ListUploadsParams, reqEditors ...RequestEditorFn) (*ListUploadsResponse, error)
 
@@ -782,6 +1207,41 @@ type ClientWithResponsesInterface interface {
 	CompleteUploadWithBodyWithResponse(ctx context.Context, id openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CompleteUploadResponse, error)
 
 	CompleteUploadWithResponse(ctx context.Context, id openapi_types.UUID, body CompleteUploadJSONRequestBody, reqEditors ...RequestEditorFn) (*CompleteUploadResponse, error)
+
+	// PreviewUploadWithResponse request
+	PreviewUploadWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*PreviewUploadResponse, error)
+
+	// RetryUploadWithResponse request
+	RetryUploadWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*RetryUploadResponse, error)
+
+	// ListJobsWithResponse request
+	ListJobsWithResponse(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*ListJobsResponse, error)
+
+	// GetJobWithResponse request
+	GetJobWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*GetJobResponse, error)
+}
+
+type ListFileLocationsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *FileLocations
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ListFileLocationsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListFileLocationsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
 }
 
 type ListUploadsResponse struct {
@@ -887,6 +1347,115 @@ func (r CompleteUploadResponse) StatusCode() int {
 	return 0
 }
 
+type PreviewUploadResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *PreviewMetadata
+	JSON415      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r PreviewUploadResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PreviewUploadResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RetryUploadResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Completed
+	JSON202      *Completed
+	JSON422      *Error
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r RetryUploadResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetryUploadResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListJobsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		Items []Job `json:"items"`
+
+		// NextCursor Empty string on the last page.
+		NextCursor string `json:"next_cursor"`
+	}
+	JSONDefault *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ListJobsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListJobsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetJobResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Job
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetJobResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetJobResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ListFileLocationsWithResponse request returning *ListFileLocationsResponse
+func (c *ClientWithResponses) ListFileLocationsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ListFileLocationsResponse, error) {
+	rsp, err := c.ListFileLocations(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListFileLocationsResponse(rsp)
+}
+
 // ListUploadsWithResponse request returning *ListUploadsResponse
 func (c *ClientWithResponses) ListUploadsWithResponse(ctx context.Context, params *ListUploadsParams, reqEditors ...RequestEditorFn) (*ListUploadsResponse, error) {
 	rsp, err := c.ListUploads(ctx, params, reqEditors...)
@@ -937,6 +1506,75 @@ func (c *ClientWithResponses) CompleteUploadWithResponse(ctx context.Context, id
 		return nil, err
 	}
 	return ParseCompleteUploadResponse(rsp)
+}
+
+// PreviewUploadWithResponse request returning *PreviewUploadResponse
+func (c *ClientWithResponses) PreviewUploadWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*PreviewUploadResponse, error) {
+	rsp, err := c.PreviewUpload(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePreviewUploadResponse(rsp)
+}
+
+// RetryUploadWithResponse request returning *RetryUploadResponse
+func (c *ClientWithResponses) RetryUploadWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*RetryUploadResponse, error) {
+	rsp, err := c.RetryUpload(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetryUploadResponse(rsp)
+}
+
+// ListJobsWithResponse request returning *ListJobsResponse
+func (c *ClientWithResponses) ListJobsWithResponse(ctx context.Context, params *ListJobsParams, reqEditors ...RequestEditorFn) (*ListJobsResponse, error) {
+	rsp, err := c.ListJobs(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListJobsResponse(rsp)
+}
+
+// GetJobWithResponse request returning *GetJobResponse
+func (c *ClientWithResponses) GetJobWithResponse(ctx context.Context, id openapi_types.UUID, reqEditors ...RequestEditorFn) (*GetJobResponse, error) {
+	rsp, err := c.GetJob(ctx, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetJobResponse(rsp)
+}
+
+// ParseListFileLocationsResponse parses an HTTP response from a ListFileLocationsWithResponse call
+func ParseListFileLocationsResponse(rsp *http.Response) (*ListFileLocationsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListFileLocationsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FileLocations
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
 // ParseListUploadsResponse parses an HTTP response from a ListUploadsWithResponse call
@@ -1105,6 +1743,167 @@ func ParseCompleteUploadResponse(rsp *http.Response) (*CompleteUploadResponse, e
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePreviewUploadResponse parses an HTTP response from a PreviewUploadWithResponse call
+func ParsePreviewUploadResponse(rsp *http.Response) (*PreviewUploadResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PreviewUploadResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest PreviewMetadata
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 415:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON415 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	case rsp.StatusCode == 200:
+		// Content-type (text/plain) unsupported
+
+	}
+
+	return response, nil
+}
+
+// ParseRetryUploadResponse parses an HTTP response from a RetryUploadWithResponse call
+func ParseRetryUploadResponse(rsp *http.Response) (*RetryUploadResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetryUploadResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Completed
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest Completed
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListJobsResponse parses an HTTP response from a ListJobsWithResponse call
+func ParseListJobsResponse(rsp *http.Response) (*ListJobsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListJobsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Items []Job `json:"items"`
+
+			// NextCursor Empty string on the last page.
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetJobResponse parses an HTTP response from a GetJobWithResponse call
+func ParseGetJobResponse(rsp *http.Response) (*GetJobResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetJobResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Job
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest Error

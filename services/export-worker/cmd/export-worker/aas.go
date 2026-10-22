@@ -18,7 +18,8 @@ func (a aasAuthenticator) Authenticate(r *http.Request) (export.Principal, error
 	if err != nil {
 		return export.Principal{}, export.ErrUnauthenticated
 	}
-	return export.Principal{TenantID: p.TenantID, Subject: p.Subject, Scopes: p.Scopes}, nil
+	return export.Principal{TenantID: p.TenantID, Subject: p.Subject, ClientID: p.ClientID,
+		ACR: p.ACR, AMR: append([]string(nil), p.AMR...), Scopes: p.Scopes}, nil
 }
 
 func aasConfig() auth.Config {

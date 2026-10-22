@@ -28,22 +28,26 @@ import (
 const nilUUID = "00000000-0000-0000-0000-000000000000"
 
 var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var sourceIDRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // Mapping says how a raw JSON record becomes an events_normalized row.
 type Mapping struct {
-	EventType         string // required
-	EventTimeField    string // top-level field with RFC 3339 text or Unix seconds/milliseconds; default: ingest time + quality flag
-	EntityIDField     string // optional top-level field
-	ProcessingVersion uint32 // default 1
+	EventType         string `json:"event_type"`         // required
+	EventTimeField    string `json:"event_time_field"`   // top-level field with RFC 3339 text or Unix seconds/milliseconds; default: ingest time + quality flag
+	EntityIDField     string `json:"entity_id_field"`    // optional top-level field
+	ProcessingVersion uint32 `json:"processing_version"` // default 1
 }
 
 type Config struct {
 	URL, Database, User, Password string
 	EventsTable, ErrorsTable      string // default events_normalized_distributed / processing_errors_local
 	Mapping                       Mapping
-	Files                         objects.Store // resolves the file object (bucket/key) of a job
-	Client                        *http.Client
-	Now                           func() time.Time
+	// SourceMappings overrides Mapping by source UUID. The default mapping remains
+	// required so a source without an override is deterministic and safe.
+	SourceMappings map[string]Mapping
+	Files          objects.Store // resolves the file object (bucket/key) of a job
+	Client         *http.Client
+	Now            func() time.Time
 }
 
 type Sink struct{ cfg Config }
@@ -55,12 +59,16 @@ func New(c Config) (*Sink, error) {
 	if c.ErrorsTable == "" {
 		c.ErrorsTable = "processing_errors_local"
 	}
-	if c.Mapping.ProcessingVersion == 0 {
-		c.Mapping.ProcessingVersion = 1
-	}
+	c.Mapping = normalizeMapping(c.Mapping)
 	if c.URL == "" || c.Mapping.EventType == "" || c.Files == nil || !identRe.MatchString(c.EventsTable) || !identRe.MatchString(c.ErrorsTable) ||
 		(c.Database != "" && !identRe.MatchString(c.Database)) {
 		return nil, errors.New("chsink: URL, Mapping.EventType, Files and valid table names are required")
+	}
+	for sourceID, mapping := range c.SourceMappings {
+		if !sourceIDRe.MatchString(sourceID) || normalizeMapping(mapping).EventType == "" {
+			return nil, fmt.Errorf("chsink: invalid mapping for source %q", sourceID)
+		}
+		c.SourceMappings[sourceID] = normalizeMapping(mapping)
 	}
 	if c.Client == nil {
 		c.Client = &http.Client{Timeout: 60 * time.Second}
@@ -69,6 +77,20 @@ func New(c Config) (*Sink, error) {
 		c.Now = time.Now
 	}
 	return &Sink{c}, nil
+}
+
+func normalizeMapping(m Mapping) Mapping {
+	if m.ProcessingVersion == 0 {
+		m.ProcessingVersion = 1
+	}
+	return m
+}
+
+func (s *Sink) mappingFor(sourceID string) (Mapping, bool) {
+	if m, ok := s.cfg.SourceMappings[sourceID]; ok {
+		return normalizeMapping(m), m.EventType != ""
+	}
+	return s.cfg.Mapping, s.cfg.Mapping.EventType != ""
 }
 
 // eventID derives a stable UUID (v5-shaped) from the record's dedup key (fingerprint + byte offset).
@@ -99,11 +121,15 @@ func (s *Sink) Accept(ctx context.Context, j jobs.Job, valid, invalid []worker.I
 	if !f.Committed {
 		return objects.ErrNotVerified
 	}
+	mapping, ok := s.mappingFor(f.SourceID)
+	if !ok {
+		return worker.Permanent("mapping_failed")
+	}
 	now := s.cfg.Now().UTC()
 	if len(valid) > 0 {
 		var body bytes.Buffer
 		for _, it := range valid {
-			line, err := s.eventRow(j, f, it, now)
+			line, err := s.eventRow(mapping, j, f, it, now)
 			if err != nil {
 				return worker.Permanent("mapping_failed")
 			}
@@ -119,7 +145,7 @@ func (s *Sink) Accept(ctx context.Context, j jobs.Job, valid, invalid []worker.I
 		for _, it := range invalid {
 			line, _ := json.Marshal(map[string]any{
 				"tenant_id": j.TenantID, "source_id": f.SourceID, "batch_id": f.ID, "job_id": j.ID, "event_id": eventID(it.DedupKey),
-				"processing_version": s.cfg.Mapping.ProcessingVersion, "occurred_at": now.Format(chTime), "stage": "file_parse",
+				"processing_version": mapping.ProcessingVersion, "occurred_at": now.Format(chTime), "stage": "file_parse",
 				"error_code": errorCode(it.Record.Err), "error_message": errorMessage(it.Record.Err), "raw_ref": rawRef(f, it.Record),
 			})
 			body.Write(line)
@@ -138,6 +164,9 @@ func rawRef(f objects.File, r parse.Record) string {
 
 // errorCode / errorMessage never echo record content (it may hold PII); only the failure class.
 func errorCode(err error) string {
+	if errors.Is(err, parse.ErrInvalidEncoding) {
+		return "ERR_INVALID_ENCODING"
+	}
 	if errors.Is(err, parse.ErrRecordTooLarge) {
 		return "ERR_RECORD_TOO_LARGE"
 	}
@@ -148,6 +177,9 @@ func errorCode(err error) string {
 }
 
 func errorMessage(err error) string {
+	if errors.Is(err, parse.ErrInvalidEncoding) {
+		return "record is not valid UTF-8"
+	}
 	if errors.Is(err, parse.ErrRecordTooLarge) {
 		return "record exceeds the configured maximum size"
 	}
@@ -165,8 +197,7 @@ func token(kind string, j jobs.Job, items []worker.Item) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Sink) eventRow(j jobs.Job, f objects.File, it worker.Item, now time.Time) ([]byte, error) {
-	m := s.cfg.Mapping
+func (s *Sink) eventRow(m Mapping, j jobs.Job, f objects.File, it worker.Item, now time.Time) ([]byte, error) {
 	var doc map[string]any
 	_ = json.Unmarshal(it.Record.Raw, &doc) // a non-object JSON value (array, number) simply has no mapped fields
 	flags := []string{}

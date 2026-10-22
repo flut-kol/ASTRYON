@@ -53,7 +53,7 @@ func (d *dpopRejects) WritePrometheus(w io.Writer) {
 
 // serveMetrics exposes /metrics on QUERY_METRICS_ADDR (unset = off; use a loopback or cluster-internal
 // address, the API port stays free of unauthenticated endpoints).
-func serveMetrics(d *dpopRejects) {
+func serveMetrics(d *dpopRejects, a *auditRuntime) {
 	addr := os.Getenv("QUERY_METRICS_ADDR")
 	if addr == "" {
 		return
@@ -62,7 +62,9 @@ func serveMetrics(d *dpopRejects) {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		d.WritePrometheus(w)
+		a.WritePrometheus(w)
 		query.Stats.WritePrometheus(w)
+		query.Stats.WriteDurations(w)
 	})
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { log.Printf("query-api metrics: %v", srv.ListenAndServe()) }()

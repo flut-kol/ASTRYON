@@ -168,7 +168,7 @@ final class EnvelopeProcessor {
 
     private ProcessingResult reject(RawRecord raw, String code, String tenantId) {
         if (!uuid(tenantId)) {
-            throw new IllegalStateException("cannot quarantine without a validated tenant_id");
+            return deadLetter(raw, code);
         }
         String normalizedTenantId = tenantId.toLowerCase(Locale.ROOT);
         String deviationId = quarantineDeviationId(raw);
@@ -207,9 +207,44 @@ final class EnvelopeProcessor {
         originalNode.put("truncated", truncated);
         try {
             byte[] key = (normalizedTenantId + '\u001f' + deviationId).getBytes(StandardCharsets.UTF_8);
-            return ProcessingResult.quarantined(new OutputRecord(ProcessingConfig.QUARANTINE_TOPIC, key, mapper.writeValueAsBytes(quarantine)));
+            return ProcessingResult.quarantined(new OutputRecord(ProcessingConfig.QUARANTINE_TOPIC, key, mapper.writeValueAsBytes(quarantine)), code);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("cannot serialize quarantine record", exception);
+        }
+    }
+
+    /**
+     * A tenantless input cannot be emitted as QuarantineRecordV1: that contract
+     * requires a validated tenant_id. Keep it recoverable in the platform DLQ,
+     * without inventing a tenant or exposing an invalid quarantine record.
+     */
+    private ProcessingResult deadLetter(RawRecord raw, String code) {
+        // A real Kafka source always supplies these coordinates. Refuse to
+        // publish a record whose retry identity could not be made stable.
+        String deviationId = quarantineDeviationId(raw);
+        ObjectNode dlq = mapper.createObjectNode();
+        dlq.put("contract_version", 1);
+        dlq.put("dead_letter_id", deviationId);
+        dlq.put("quarantined_at", clock.instant().toString());
+        dlq.put("stage", QUARANTINE_PRODUCER);
+        dlq.put("reason_code", code);
+        dlq.put("diagnostic", diagnostic(code));
+
+        ObjectNode provenance = dlq.putObject("provenance");
+        provenance.put("source_topic", raw.topic());
+        provenance.put("source_partition", raw.partition());
+        provenance.put("source_offset", raw.offset());
+
+        // Do not copy opaque input into the tenantless DLQ: invalid input may
+        // contain an untrusted tenant identifier or other tenant data. The
+        // source coordinate and deterministic id are sufficient for bounded
+        // retry/audit handling without leaking that data across tenants.
+        try {
+            byte[] key = ("dlq\u001f" + deviationId).getBytes(StandardCharsets.UTF_8);
+            return ProcessingResult.quarantined(
+                    new OutputRecord(ProcessingConfig.DLQ_TOPIC, key, mapper.writeValueAsBytes(dlq)), code);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("cannot serialize dead-letter record", exception);
         }
     }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/astryon/export-worker/internal/export"
@@ -31,5 +32,16 @@ func TestPprofOnlyOnDebugHandler(t *testing.T) {
 	pub.ServeHTTP(rr, httptest.NewRequest("GET", "/debug/pprof/", nil))
 	if rr.Code == 200 {
 		t.Fatalf("public handler serves pprof: %d", rr.Code)
+	}
+}
+
+func TestMetricsHandler(t *testing.T) {
+	rec := httptest.NewRecorder()
+	metricsHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "astryon_export_started_total") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if err := loopbackAddr("0.0.0.0:9100"); err == nil {
+		t.Error("non-loopback accepted")
 	}
 }

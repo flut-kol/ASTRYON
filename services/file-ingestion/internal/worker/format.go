@@ -11,6 +11,9 @@ import (
 	"github.com/astryon/file-ingestion/internal/parse"
 )
 
+// ParquetContentType selects the Parquet reader (random-access source required, see RandomSource).
+const ParquetContentType = "application/vnd.apache.parquet"
+
 // maxCSVColumns bounds the header (and so the per-row map built for the sink and the checkpoint size).
 const maxCSVColumns = 1024
 
@@ -19,13 +22,18 @@ type format int
 const (
 	formatNDJSON format = iota
 	formatCSV
+	formatParquet
 )
 
 // formatOf chooses the parser from the upload record's content type (already allow-listed at upload creation).
 // Anything but text/csv is NDJSON, the original behaviour.
 func formatOf(j jobs.Job) format {
-	if mt, _, _ := strings.Cut(j.ContentType, ";"); strings.EqualFold(strings.TrimSpace(mt), "text/csv") {
+	mt, _, _ := strings.Cut(j.ContentType, ";")
+	switch mt = strings.TrimSpace(mt); {
+	case strings.EqualFold(mt, "text/csv"):
 		return formatCSV
+	case strings.EqualFold(mt, ParquetContentType):
+		return formatParquet
 	}
 	return formatNDJSON
 }
@@ -37,10 +45,16 @@ type row struct {
 	Rec    parse.Record
 	Fields []string
 	Header bool
+	// Parquet only: the row group the row belongs to and whether it is the group's last row (checkpoint boundary).
+	Group    int
+	GroupEnd bool
 }
 
 // dataNumber is the 1-based number of a data record (the CSV header line does not count towards row limits).
-func (f format) dataNumber(r parse.Record) int64 {
+func (f format) dataNumber(r parse.Record) int64 { // parquet has no header record
+	if f == formatParquet {
+		return int64(r.Number)
+	}
 	if f == formatCSV {
 		return int64(r.Number) - 1
 	}

@@ -38,6 +38,10 @@ type Principal struct {
 	Scopes   []string
 	// Confirmation is the DPoP key thumbprint (cnf.jkt) when the token is sender-constrained.
 	Confirmation string
+	// ACR is the authentication context class reference asserted by AAS, when present.
+	ACR string
+	// AMR lists the authentication methods asserted by AAS, when present.
+	AMR []string
 }
 
 // HasScope reports whether p includes scope.
@@ -225,7 +229,16 @@ func (v *Verifier) principal(claims map[string]any, bound bool) (Principal, erro
 	if bound != (jkt != "") {
 		return Principal{}, ErrUnauthenticated // downgrade / unbound token under the DPoP scheme
 	}
-	p := Principal{Confirmation: jkt, TenantID: stringClaim(claims, "tenant_id"), Subject: stringClaim(claims, "sub"), ClientID: stringClaim(claims, "client_id"), JTI: stringClaim(claims, "jti"), Scopes: scopes(claims["scope"])}
+	p := Principal{
+		TenantID:     stringClaim(claims, "tenant_id"),
+		Subject:      stringClaim(claims, "sub"),
+		ClientID:     stringClaim(claims, "client_id"),
+		JTI:          stringClaim(claims, "jti"),
+		Scopes:       scopes(claims["scope"]),
+		Confirmation: jkt,
+		ACR:          stringClaim(claims, "acr"),
+		AMR:          stringListClaim(claims, "amr"),
+	}
 	if !isUUID(p.TenantID) || p.Subject == "" || p.JTI == "" {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -433,6 +446,21 @@ func numericDate(v any) (time.Time, bool) {
 	return time.Unix(int64(f), 0).UTC(), true
 }
 func stringClaim(m map[string]any, key string) string { s, _ := m[key].(string); return s }
+func stringListClaim(m map[string]any, key string) []string {
+	values, ok := m[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(values))
+	for i, value := range values {
+		s, ok := value.(string)
+		if !ok {
+			return nil
+		}
+		out[i] = s
+	}
+	return out
+}
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
